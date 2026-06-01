@@ -4,6 +4,14 @@ from app.config import get_settings
 
 settings = get_settings()
 
+from app.config import get_settings
+
+settings = get_settings()
+
+print("=" * 50)
+print("DATABASE_URL =", settings.database_url)
+print("=" * 50)
+
 engine = create_async_engine(
     settings.database_url,
     echo=settings.app_env == "development",

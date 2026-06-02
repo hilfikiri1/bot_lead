@@ -20,6 +20,18 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 
 
+@router.post("/telegram/delete")
+async def delete_telegram_webhook():
+    """Delete the currently registered Telegram webhook."""
+    try:
+        result = await telegram_service.delete_webhook()
+        logger.info("Webhook deleted: %s", result)
+        return {"ok": True, "result": result}
+    except Exception as e:
+        logger.error("Failed to delete webhook: %s", e)
+        raise HTTPException(status_code=502, detail=f"Telegram API error: {e}")
+
+
 def _verify_secret(x_telegram_bot_api_secret_token: str | None) -> bool:
     expected = settings.telegram_webhook_secret
     if not expected:

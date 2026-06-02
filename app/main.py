@@ -15,7 +15,7 @@ from app.database import init_db
 from app.api.telegram import router as telegram_router
 from app.api.admin import router as admin_router
 from app.api.auth import router as auth_router
-from app.services.telegram_service import register_webhook
+from app.services.telegram_service import delete_webhook, register_webhook
 
 settings = get_settings()
 
@@ -42,6 +42,11 @@ async def lifespan(app: FastAPI):
     # Register Telegram webhook
     if settings.telegram_bot_token and settings.webhook_base_url != "https://your-domain.com":
         webhook_url = f"{settings.webhook_base_url}/webhook/telegram"
+        try:
+            deleted = await delete_webhook()
+            logging.getLogger(__name__).info("Existing webhook cleared: %s", deleted)
+        except Exception as e:
+            logging.getLogger(__name__).warning("Webhook deletion failed (continuing): %s", e)
         try:
             result = await register_webhook(webhook_url)
             logging.getLogger(__name__).info("Webhook registered: %s", result)

@@ -104,6 +104,17 @@ async def download_voice(file_id: str) -> bytes:
     return await download_file(file_path)
 
 
+async def delete_webhook() -> dict:
+    """Delete any existing Telegram webhook."""
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.post(
+            f"{TELEGRAM_API}/deleteWebhook",
+            json={"drop_pending_updates": False},
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+
 async def register_webhook(url: str) -> dict:
     """Register the bot webhook with Telegram."""
     async with httpx.AsyncClient(timeout=15) as client:

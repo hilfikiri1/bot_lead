@@ -7,7 +7,6 @@ celery_app = Celery(
     "buybring",
     broker=settings.celery_broker_url,
     backend=settings.celery_result_backend,
-    include=["app.tasks.voice_note_tasks"],
 )
 
 celery_app.conf.update(
@@ -19,7 +18,4 @@ celery_app.conf.update(
     task_track_started=True,
     task_acks_late=True,
     worker_prefetch_multiplier=1,
-    task_routes={
-        "app.tasks.voice_note_tasks.process_voice_note": {"queue": "voice_notes"},
-    },
 )

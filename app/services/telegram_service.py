@@ -111,7 +111,23 @@ async def delete_webhook() -> dict:
             f"{TELEGRAM_API}/deleteWebhook",
             json={"drop_pending_updates": False},
         )
-        resp.raise_for_status()
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            try:
+                error_body = exc.response.json()
+            except Exception:
+                error_body = exc.response.text
+            logger.error(
+                "Telegram deleteWebhook failed [HTTP %s]: %s",
+                exc.response.status_code,
+                error_body,
+            )
+            raise httpx.HTTPStatusError(
+                f"deleteWebhook failed (HTTP {exc.response.status_code}): {error_body}",
+                request=exc.request,
+                response=exc.response,
+            ) from exc
         return resp.json()
 
 
@@ -126,7 +142,23 @@ async def register_webhook(url: str) -> dict:
                 "allowed_updates": ["message", "callback_query"],
             },
         )
-        resp.raise_for_status()
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            try:
+                error_body = exc.response.json()
+            except Exception:
+                error_body = exc.response.text
+            logger.error(
+                "Telegram setWebhook failed [HTTP %s]: %s",
+                exc.response.status_code,
+                error_body,
+            )
+            raise httpx.HTTPStatusError(
+                f"setWebhook failed (HTTP {exc.response.status_code}): {error_body}",
+                request=exc.request,
+                response=exc.response,
+            ) from exc
         return resp.json()
 
 

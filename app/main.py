@@ -46,12 +46,16 @@ async def lifespan(app: FastAPI):
             deleted = await delete_webhook()
             logging.getLogger(__name__).info("Existing webhook cleared: %s", deleted)
         except Exception as e:
-            logging.getLogger(__name__).warning("Webhook deletion failed (continuing): %s", e)
+            logging.getLogger(__name__).warning(
+                "Webhook deletion failed (continuing): %s", e
+            )
         try:
             result = await register_webhook(webhook_url)
             logging.getLogger(__name__).info("Webhook registered: %s", result)
         except Exception as e:
-            logging.getLogger(__name__).warning("Webhook registration failed: %s", e)
+            logging.getLogger(__name__).error(
+                "Webhook registration failed — Telegram response: %s", e
+            )
 
     yield
     # Shutdown

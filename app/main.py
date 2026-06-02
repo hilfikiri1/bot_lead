@@ -31,13 +31,9 @@ structlog.configure(
 )
 logging.basicConfig(level=settings.log_level)
 
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup
     logging.getLogger(__name__).info("Starting Buy & Bring Voice Bot")
-    if settings.app_env == "development":
-        await init_db()
 
     # Register Telegram webhook
     if settings.telegram_bot_token and settings.webhook_base_url != "https://your-domain.com":
@@ -58,10 +54,9 @@ async def lifespan(app: FastAPI):
             )
 
     yield
-    # Shutdown
     logging.getLogger(__name__).info("Shutting down")
 
-
+	
 app = FastAPI(
     title="Buy & Bring Solutions — Voice Bot API",
     description="Automated voice note processing for B2B sourcing calls",

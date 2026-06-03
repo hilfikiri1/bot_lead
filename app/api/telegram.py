@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.database import get_db
 from app.services import telegram_service, approval_service
-from app.tasks.voice_note_tasks import process_voice_note
+from app.tasks.voice_note_tasks import _process as process_voice_note
 
 router = APIRouter(prefix="/webhook", tags=["telegram"])
 logger = logging.getLogger(__name__)
@@ -93,13 +93,23 @@ async def telegram_webhook(
             except Exception as e:
                 logger.warning("Could not send acknowledgement: %s", e)
 
-            process_voice_note.delay(
-                chat_id=chat_id,
-                telegram_user_id=user_id,
-                telegram_message_id=message_id,
-                file_id=file_id,
-                file_extension=extension,
-            )
+            try:
+                await process_voice_note(
+                    chat_id=chat_id,
+                    telegram_user_id=user_id,
+                    telegram_message_id=message_id,
+                    file_id=file_id,
+                    file_extension=extension,
+                )
+            except Exception as e:
+                logger.error("Voice note processing failed: %s", e)
+                try:
+                    await telegram_service.send_message(
+                        chat_id,
+                        "❌ Sorry, something went wrong while processing your voice message. Please try again.",
+                    )
+                except Exception:
+                    pass
             return {"ok": True}
 
         # Text messages

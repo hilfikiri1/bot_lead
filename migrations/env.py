@@ -43,6 +43,7 @@ async def run_async_migrations() -> None:
         configuration,
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
+        connect_args={"timeout": 30},  # Increase timeout to 30 seconds
     )
     async with connectable.connect() as connection:
         await connection.run_sync(do_run_migrations)
@@ -57,3 +58,4 @@ if context.is_offline_mode():
     run_migrations_offline()
 else:
     run_migrations_online()
+

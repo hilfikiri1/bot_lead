@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import logging
 import structlog
+import traceback
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -33,28 +34,43 @@ logging.basicConfig(level=settings.log_level)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logging.getLogger(__name__).info("Starting Buy & Bring Voice Bot")
+    logger = logging.getLogger(__name__)
+    logger.info("Starting Buy & Bring Voice Bot")
 
-    # Register Telegram webhook
-    if settings.telegram_bot_token and settings.webhook_base_url != "https://your-domain.com":
-        webhook_url = f"{settings.webhook_base_url}/webhook/telegram"
-        try:
-            deleted = await delete_webhook()
-            logging.getLogger(__name__).info("Existing webhook cleared: %s", deleted)
-        except Exception as e:
-            logging.getLogger(__name__).warning(
-                "Webhook deletion failed (continuing): %s", e
-            )
-        try:
-            result = await register_webhook(webhook_url)
-            logging.getLogger(__name__).info("Webhook registered: %s", result)
-        except Exception as e:
-            logging.getLogger(__name__).error(
-                "Webhook registration failed — Telegram response: %s", e
-            )
+    try:
+        # Register Telegram webhook
+        if settings.telegram_bot_token and settings.webhook_base_url != "https://your-domain.com":
+            webhook_url = f"{settings.webhook_base_url}/webhook/telegram"
+            try:
+                deleted = await delete_webhook()
+                logger.info("Existing webhook cleared: %s", deleted)
+            except Exception as e:
+                logger.warning(
+                    "Webhook deletion failed (continuing): %s", e
+                )
+            try:
+                result = await register_webhook(webhook_url)
+                logger.info("Webhook registered: %s", result)
+            except Exception as e:
+                logger.error(
+                    "Webhook registration failed — Telegram response: %s", e
+                )
+        else:
+            logger.warning("Telegram bot token or webhook URL not configured properly")
+
+        logger.info("Application startup complete and ready to receive requests")
+    except Exception as e:
+        logger.error("Error during startup: %s", e)
+        logger.error("Traceback: %s", traceback.format_exc())
+        raise
 
     yield
-    logging.getLogger(__name__).info("Shutting down")
+
+    try:
+        logger.info("Shutting down")
+    except Exception as e:
+        logger.error("Error during shutdown: %s", e)
+        logger.error("Traceback: %s", traceback.format_exc())
 
 	
 app = FastAPI(
@@ -88,3 +104,4 @@ async def root():
         "docs": "/docs",
         "health": "/health",
     }
+

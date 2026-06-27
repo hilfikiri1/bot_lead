@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hmac
 import logging
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Request, Header, HTTPException, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -24,6 +25,92 @@ def _verify_secret(x_telegram_bot_api_secret_token: str | None) -> bool:
     if not expected:
         return True
     return hmac.compare_digest(x_telegram_bot_api_secret_token or "", expected)
+
+
+def _is_allowed_user(user_id: int) -> bool:
+    """Check if a Telegram user ID is in the allowed list."""
+    allowed = settings.get_allowed_user_ids()
+    # If no list configured, deny all admin commands by default
+    if not allowed:
+        return False
+    return user_id in allowed
+
+
+async def _handle_kommo_test(chat_id: int, user_id: int, db: AsyncSession) -> None:
+    """
+    Handle /kommo_test command.
+    Read-only connection test: account info + leads count.
+    Saves result to PostgreSQL. Never exposes tokens.
+    """
+    from app.services.kommo_service import test_connection
+    from app.models.integration_check import IntegrationCheck
+
+    # Access check
+    if not _is_allowed_user(user_id):
+        await telegram_service.send_message(chat_id, "Доступ запрещен.")
+        return
+
+    await telegram_service.send_message(chat_id, "🔄 Проверяю связь с Kommo...")
+
+    result = await test_connection()
+    checked_at = datetime.now(tz=timezone.utc)
+
+    # Save to PostgreSQL (no tokens stored)
+    try:
+        account = result.get("account") or {}
+        check = IntegrationCheck(
+            integration_name="kommo",
+            status="ok" if result["success"] else "error",
+            account_id=account.get("account_id"),
+            account_name=account.get("account_name"),
+            details={
+                "subdomain": account.get("subdomain"),
+                "timezone": account.get("timezone"),
+                "leads_accessible": result.get("leads_accessible"),
+                "leads_count": result.get("leads_count"),
+            },
+            error_message=result.get("error"),
+            telegram_user_id=user_id,
+            checked_at=checked_at,
+        )
+        db.add(check)
+        await db.commit()
+        db_saved = True
+    except Exception as e:
+        logger.error("Failed to save integration check to DB: %s", e)
+        db_saved = False
+
+    # Build Telegram response
+    ts = checked_at.strftime("%Y-%m-%d %H:%M UTC")
+
+    if result["success"]:
+        account = result["account"]
+        leads_status = "✅ работает" if result["leads_accessible"] else "⚠️ нет доступа"
+        leads_count = result["leads_count"]
+        db_status = "✅ запись сохранена" if db_saved else "⚠️ ошибка записи"
+
+        msg = (
+            "✅ <b>Связь с Kommo работает</b>\n\n"
+            f"Аккаунт: <b>{account.get('account_name') or '—'}</b>\n"
+            f"Account ID: <code>{account.get('account_id') or '—'}</code>\n"
+            f"Поддомен: {account.get('subdomain') or '—'}.kommo.com\n"
+            f"Часовой пояс: {account.get('timezone') or '—'}\n\n"
+            f"Доступ к сделкам: {leads_status}\n"
+            f"Найдено сделок: {leads_count}\n\n"
+            f"PostgreSQL: {db_status}\n"
+            f"Время проверки: {ts}"
+        )
+    else:
+        error = result.get("error", "Неизвестная ошибка")
+        msg = (
+            "❌ <b>Не удалось подключиться к Kommo</b>\n\n"
+            f"Ошибка: {error}\n\n"
+            "Проверь переменные Railway:\n"
+            "• <code>KOMMO_BASE_URL</code>\n"
+            "• <code>KOMMO_ACCESS_TOKEN</code>"
+        )
+
+    await telegram_service.send_message(chat_id, msg)
 
 
 @router.post("/telegram")
@@ -112,8 +199,22 @@ async def telegram_webhook(
                     pass
             return {"ok": True}
 
-        # Text messages
-        text = message.get("text", "")
+        # Text messages / commands
+        text = message.get("text", "").strip()
+
+        # ─── /kommo_test ──────────────────────────────────────────────────
+        if text.startswith("/kommo_test"):
+            try:
+                await _handle_kommo_test(chat_id, user_id, db)
+            except Exception as e:
+                logger.error("kommo_test handler error: %s", e)
+                try:
+                    await telegram_service.send_message(chat_id, "❌ Внутренняя ошибка при проверке Kommo.")
+                except Exception:
+                    pass
+            return {"ok": True}
+
+        # ─── /start ───────────────────────────────────────────────────────
         if text.startswith("/start"):
             try:
                 await telegram_service.send_message(
@@ -141,5 +242,5 @@ async def telegram_webhook(
     except Exception as e:
         logger.error("Webhook handler error: %s", e)
 
-    # Always return 200 to Telegram — never let it retry endlessly
+    # Always return 200 to Telegram
     return {"ok": True}

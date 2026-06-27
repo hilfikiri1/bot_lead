@@ -1,17 +1,10 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import model_validator
 from functools import lru_cache
-from typing import Optional
+from typing import Optional, List
 
 
-def _build_redis_url(
-    host: str,
-    port: str,
-    user: Optional[str],
-    password: Optional[str],
-    db: int,
-) -> str:
-    """Construct a Redis URL from individual connection components."""
+def _build_redis_url(host, port, user, password, db) -> str:
     if user and password:
         credentials = f"{user}:{password}@"
     elif password:
@@ -27,47 +20,45 @@ class Settings(BaseSettings):
     # Database
     database_url: str = "postgresql+asyncpg://buybring:buybring@db:5432/buybring"
 
-    # Individual Redis connection components (provided by Railway)
+    # Redis (Railway style)
     redishost: Optional[str] = None
     redisport: str = "6379"
     redisuser: Optional[str] = None
     redispassword: Optional[str] = None
-
-    # Redis / Celery — resolved in the validator below
     redis_url: str = "redis://redis:6379/0"
     celery_broker_url: str = "redis://redis:6379/0"
     celery_result_backend: str = "redis://redis:6379/1"
 
     @model_validator(mode="after")
     def resolve_redis_urls(self) -> "Settings":
-        """
-        Prefer explicit CELERY_BROKER_URL / CELERY_RESULT_BACKEND env vars.
-        Fall back to constructing URLs from REDISHOST/REDISPORT/REDISUSER/REDISPASSWORD
-        when those are available (standard Railway Redis variable names).
-        """
         if self.redishost:
-            constructed_db0 = _build_redis_url(
-                self.redishost, self.redisport, self.redisuser, self.redispassword, 0
-            )
-            constructed_db1 = _build_redis_url(
-                self.redishost, self.redisport, self.redisuser, self.redispassword, 1
-            )
-
-            # Only override if the field still holds its default value, meaning
-            # no explicit CELERY_BROKER_URL / CELERY_RESULT_BACKEND was provided.
+            db0 = _build_redis_url(self.redishost, self.redisport, self.redisuser, self.redispassword, 0)
+            db1 = _build_redis_url(self.redishost, self.redisport, self.redisuser, self.redispassword, 1)
             if self.celery_broker_url == "redis://redis:6379/0":
-                self.celery_broker_url = constructed_db0
+                self.celery_broker_url = db0
             if self.celery_result_backend == "redis://redis:6379/1":
-                self.celery_result_backend = constructed_db1
+                self.celery_result_backend = db1
             if self.redis_url == "redis://redis:6379/0":
-                self.redis_url = constructed_db0
-
+                self.redis_url = db0
         return self
 
     # Telegram
     telegram_bot_token: str = ""
     telegram_webhook_secret: str = ""
     webhook_base_url: str = "https://your-domain.com"
+
+    # Allowed Telegram user IDs for admin commands (comma-separated)
+    # Example: ALLOWED_TELEGRAM_USER_IDS=123456789,987654321
+    allowed_telegram_user_ids: str = ""
+
+    def get_allowed_user_ids(self) -> List[int]:
+        """Parse comma-separated user IDs into a list of ints."""
+        if not self.allowed_telegram_user_ids.strip():
+            return []
+        try:
+            return [int(uid.strip()) for uid in self.allowed_telegram_user_ids.split(",") if uid.strip()]
+        except ValueError:
+            return []
 
     # OpenAI
     openai_api_key: str = ""
@@ -94,6 +85,11 @@ class Settings(BaseSettings):
     whatsapp_phone_number_id: str = ""
     whatsapp_access_token: str = ""
     whatsapp_enabled: bool = False
+
+    # Kommo CRM (Stage 1: read-only connection test)
+    # KOMMO_BASE_URL should NOT include /api/v4 — that is added in the service
+    kommo_base_url: str = ""        # e.g. https://semichev66.kommo.com
+    kommo_access_token: str = ""    # Long-lived token from private integration
 
     # App
     app_env: str = "development"

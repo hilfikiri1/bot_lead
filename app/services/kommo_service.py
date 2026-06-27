@@ -123,8 +123,14 @@ async def get_leads(limit: int = 1) -> dict[str, Any]:
 
     embedded = data.get("_embedded", {})
     leads = embedded.get("leads", [])
+    # Kommo returns _page as dict or count directly as int
     page_info = data.get("_page", {})
-    total = page_info.get("count", len(leads))
+    if isinstance(page_info, dict):
+        total = page_info.get("count", len(leads))
+    elif isinstance(page_info, int):
+        total = page_info
+    else:
+        total = len(leads)
 
     return {
         "total": total,

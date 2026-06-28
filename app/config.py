@@ -108,6 +108,8 @@ class Settings(BaseSettings):
     kommo_default_status_id: Optional[int] = None
     # 20 pages x 250 leads = safety cap of 5000 scanned leads.
     kommo_open_leads_max_pages: int = 20
+    kommo_menu_page_size: int = 8
+    telegram_state_ttl_minutes: int = 30
 
     # App
     app_env: str = "development"

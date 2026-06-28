@@ -475,3 +475,281 @@ async def test_connection() -> dict[str, Any]:
 
     result["success"] = True
     return result
+
+
+def _flatten_custom_fields(entity: dict[str, Any]) -> list[dict[str, str]]:
+    """Return human-readable custom-field values from a Kommo entity."""
+    result: list[dict[str, str]] = []
+    for field in entity.get("custom_fields_values") or []:
+        field_name = field.get("field_name") or field.get("field_code") or f"Поле {field.get('field_id')}"
+        field_code = field.get("field_code") or ""
+        values: list[str] = []
+        for item in field.get("values") or []:
+            value = item.get("value")
+            if value not in (None, ""):
+                values.append(str(value))
+        if values:
+            result.append(
+                {
+                    "name": str(field_name),
+                    "code": str(field_code),
+                    "value": ", ".join(values),
+                }
+            )
+    return result
+
+
+def _contact_channels(contact: dict[str, Any]) -> tuple[list[str], list[str]]:
+    phones: list[str] = []
+    emails: list[str] = []
+    for field in contact.get("custom_fields_values") or []:
+        code = (field.get("field_code") or "").upper()
+        for item in field.get("values") or []:
+            value = str(item.get("value") or "").strip()
+            if not value:
+                continue
+            if code == "PHONE":
+                phones.append(value)
+            elif code == "EMAIL":
+                emails.append(value)
+    return phones, emails
+
+
+async def get_recent_common_notes(lead_id: int, limit: int = 5) -> list[dict[str, Any]]:
+    """Return recent common text notes for a lead."""
+    data = await _request(
+        "GET",
+        f"/api/v4/leads/{lead_id}/notes",
+        params={
+            "limit": max(1, min(limit, 50)),
+            "order[updated_at]": "desc",
+            "filter[note_type][]": "common",
+        },
+    )
+    notes = (((data or {}).get("_embedded") or {}).get("notes") or [])
+    normalized: list[dict[str, Any]] = []
+    for note in notes:
+        params = note.get("params") or {}
+        text = params.get("text")
+        if not text:
+            continue
+        normalized.append(
+            {
+                "id": note.get("id"),
+                "text": str(text),
+                "created_at": note.get("created_at"),
+                "updated_at": note.get("updated_at"),
+                "created_by": note.get("created_by"),
+            }
+        )
+    return normalized
+
+
+async def get_lead_details(lead_id: int) -> dict[str, Any]:
+    """Load one lead, its linked contacts, pipeline labels and recent common notes."""
+    if lead_id <= 0:
+        raise ValueError("Некорректный ID сделки.")
+
+    lead = await _request(
+        "GET",
+        f"/api/v4/leads/{lead_id}",
+        params={"with": "contacts"},
+    )
+    if not lead:
+        raise KommoAPIError("Сделка не найдена.", status_code=404)
+
+    try:
+        pipeline_names, status_names = await get_pipeline_index()
+    except Exception as exc:
+        logger.warning("Could not load pipeline labels for lead %s: %s", lead_id, exc)
+        pipeline_names, status_names = {}, {}
+
+    contact_refs = ((lead.get("_embedded") or {}).get("contacts") or [])
+    contacts: list[dict[str, Any]] = []
+    for ref in contact_refs[:5]:
+        contact_id = ref.get("id")
+        if not isinstance(contact_id, int):
+            continue
+        try:
+            contact = await _request("GET", f"/api/v4/contacts/{contact_id}") or {}
+        except Exception as exc:
+            logger.warning("Could not load contact %s for lead %s: %s", contact_id, lead_id, exc)
+            continue
+        phones, emails = _contact_channels(contact)
+        contacts.append(
+            {
+                "id": contact_id,
+                "name": contact.get("name") or "Без имени",
+                "phones": phones,
+                "emails": emails,
+                "custom_fields": _flatten_custom_fields(contact),
+            }
+        )
+
+    try:
+        notes = await get_recent_common_notes(lead_id, limit=5)
+    except Exception as exc:
+        logger.warning("Could not load notes for lead %s: %s", lead_id, exc)
+        notes = []
+
+    pipeline_id = lead.get("pipeline_id")
+    status_id = lead.get("status_id")
+    return {
+        "id": lead.get("id"),
+        "name": lead.get("name") or "Без названия",
+        "price": lead.get("price"),
+        "pipeline_id": pipeline_id,
+        "pipeline_name": pipeline_names.get(pipeline_id, f"Воронка {pipeline_id}"),
+        "status_id": status_id,
+        "status_name": status_names.get((pipeline_id, status_id), f"Этап {status_id}"),
+        "responsible_user_id": lead.get("responsible_user_id"),
+        "created_at": lead.get("created_at"),
+        "updated_at": lead.get("updated_at"),
+        "closed_at": lead.get("closed_at"),
+        "closest_task_at": lead.get("closest_task_at"),
+        "custom_fields": _flatten_custom_fields(lead),
+        "contacts": contacts,
+        "notes": notes,
+        "url": f"{_base_url()}/leads/detail/{lead_id}",
+    }
+
+
+async def get_open_leads_page(page: int = 1, page_size: int | None = None) -> dict[str, Any]:
+    """Return one Telegram menu page of open leads."""
+    page_size = page_size or settings.kommo_menu_page_size
+    page_size = max(1, min(page_size, 20))
+    result = await get_all_open_leads()
+    leads = result.get("leads") or []
+    total = len(leads)
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    page = max(1, min(page, total_pages))
+    start = (page - 1) * page_size
+    return {
+        **result,
+        "leads": leads[start : start + page_size],
+        "page": page,
+        "page_size": page_size,
+        "total_pages": total_pages,
+        "open_count": total,
+    }
+
+
+async def search_open_leads(query: str, limit: int = 20) -> dict[str, Any]:
+    """Search open leads by Kommo ID or text in filled lead fields."""
+    query = query.strip()
+    if not query:
+        return {"leads": [], "open_count": 0, "query": query}
+
+    raw_leads: list[dict[str, Any]] = []
+    if query.isdigit():
+        try:
+            exact = await _request(
+                "GET",
+                f"/api/v4/leads/{int(query)}",
+                params={"with": "contacts"},
+            )
+            if exact and not exact.get("closed_at"):
+                raw_leads = [exact]
+        except KommoAPIError as exc:
+            if exc.status_code != 404:
+                raise
+
+    if not raw_leads:
+        data = await _request(
+            "GET",
+            "/api/v4/leads",
+            params={
+                "query": query,
+                "limit": max(1, min(limit, PAGE_SIZE)),
+                "order[updated_at]": "desc",
+            },
+        )
+        raw_leads = [
+            lead
+            for lead in (((data or {}).get("_embedded") or {}).get("leads") or [])
+            if not lead.get("closed_at")
+        ]
+
+    try:
+        pipeline_names, status_names = await get_pipeline_index()
+    except Exception:
+        pipeline_names, status_names = {}, {}
+
+    leads: list[dict[str, Any]] = []
+    for lead in raw_leads[:limit]:
+        pipeline_id = lead.get("pipeline_id")
+        status_id = lead.get("status_id")
+        leads.append(
+            {
+                "id": lead.get("id"),
+                "name": lead.get("name") or "Без названия",
+                "pipeline_name": pipeline_names.get(pipeline_id, f"Воронка {pipeline_id}"),
+                "status_name": status_names.get((pipeline_id, status_id), f"Этап {status_id}"),
+                "updated_at": lead.get("updated_at"),
+                "url": f"{_base_url()}/leads/detail/{lead.get('id')}",
+            }
+        )
+    return {"leads": leads, "open_count": len(leads), "query": query}
+
+
+async def add_text_note(lead_id: int, text: str, *, source: str = "Telegram") -> dict[str, Any]:
+    """Add a manager-confirmed text note to an existing lead."""
+    clean_text = text.strip()
+    if not clean_text:
+        raise ValueError("Текст примечания пустой.")
+    details = await get_lead_details(lead_id)
+    timestamp = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    note_text = (
+        f"Примечание добавлено через {source}.\n"
+        f"Время: {timestamp}\n\n"
+        f"{clean_text}"
+    )
+    await add_common_note(lead_id, note_text)
+    return {
+        "lead_id": lead_id,
+        "lead_name": details.get("name"),
+        "url": details.get("url"),
+    }
+
+
+async def add_followup_note_from_analysis(
+    *,
+    lead_id: int,
+    conversation_summary: str | None,
+    recommended_next_step: str | None,
+    missing_questions: list[str] | None,
+    transcript: str | None,
+    client_data: dict[str, Any] | None = None,
+    lead_data: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Add a reviewed second-call report to an existing Kommo lead without creating a new one."""
+    details = await get_lead_details(lead_id)
+    client_data = client_data or {}
+    lead_data = lead_data or {}
+
+    note_parts = [
+        "Повторный разговор добавлен через Telegram после подтверждения менеджером.",
+        f"Время: {datetime.now(tz=timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}",
+    ]
+    client_label = client_data.get("name") or client_data.get("company")
+    if client_label:
+        note_parts.append(f"Клиент/компания из разговора: {client_label}")
+    if lead_data.get("product_requested"):
+        note_parts.append(f"Обсуждавшийся запрос: {lead_data['product_requested']}")
+    if lead_data.get("budget"):
+        note_parts.append(f"Бюджет/ориентир: {lead_data['budget']}")
+    if conversation_summary:
+        note_parts.append(f"Краткое резюме: {conversation_summary}")
+    if recommended_next_step:
+        note_parts.append(f"Следующий шаг: {recommended_next_step}")
+    if missing_questions:
+        note_parts.append("Что ещё уточнить:\n- " + "\n- ".join(missing_questions[:20]))
+    if transcript:
+        note_parts.append(f"Транскрипт разговора:\n{transcript[:9000]}")
+
+    await add_common_note(lead_id, "\n\n".join(note_parts))
+    return {
+        "lead_id": lead_id,
+        "lead_name": details.get("name"),
+        "url": details.get("url"),
+    }

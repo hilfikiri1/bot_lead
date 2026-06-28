@@ -4,8 +4,11 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from sqlalchemy import select
+
 from app.celery_app import celery_app
 from app.database import AsyncSessionLocal
+from app.models import VoiceNote
 from app.services import (
     ai_analysis_service,
     crm_service,
@@ -40,6 +43,7 @@ def process_voice_note(
     telegram_message_id: int,
     file_id: str,
     file_extension: str = "ogg",
+    target_kommo_lead_id: int | None = None,
 ):
     try:
         _run(
@@ -49,6 +53,7 @@ def process_voice_note(
                 telegram_message_id=telegram_message_id,
                 file_id=file_id,
                 file_extension=file_extension,
+                target_kommo_lead_id=target_kommo_lead_id,
             )
         )
     except Exception as exc:
@@ -68,8 +73,25 @@ async def _process(
     telegram_message_id: int,
     file_id: str,
     file_extension: str,
+    target_kommo_lead_id: int | None = None,
 ):
     async with AsyncSessionLocal() as db:
+        existing_result = await db.execute(
+            select(VoiceNote.id).where(
+                VoiceNote.telegram_user_id == telegram_user_id,
+                VoiceNote.telegram_message_id == telegram_message_id,
+            )
+        )
+        existing_voice_note_id = existing_result.scalar_one_or_none()
+        if existing_voice_note_id is not None:
+            logger.info(
+                "Duplicate audio task skipped: user_id=%s message_id=%s existing_voice_note_id=%s",
+                telegram_user_id,
+                telegram_message_id,
+                existing_voice_note_id,
+            )
+            return
+
         logger.info("Downloading Telegram audio")
         audio_bytes = await telegram_service.download_voice(file_id)
 
@@ -108,5 +130,6 @@ async def _process(
             report_text=report_text,
             lead_id=lead.id,
             voice_note_id=voice_note.id,
+            target_kommo_lead_id=target_kommo_lead_id,
         )
         logger.info("Approval report sent for voice_note_id=%d", voice_note.id)

@@ -1,19 +1,26 @@
-"""FastAPI router for the Telegram webhook."""
+"""FastAPI router for the Telegram webhook and Kommo manager menu."""
 from __future__ import annotations
 
 import hmac
+import html
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.database import get_db
-from app.services import approval_service, telegram_service
-from app.tasks.voice_note_tasks import _process as process_voice_note
+from app.services import (
+    approval_service,
+    kommo_service,
+    telegram_service,
+    telegram_state_service,
+)
+from app.tasks.voice_note_tasks import process_voice_note
 
 router = APIRouter(prefix="/webhook", tags=["telegram"])
 logger = logging.getLogger(__name__)
@@ -57,6 +64,31 @@ def _is_allowed_user(user_id: int) -> bool:
     if not allowed:
         return False
     return user_id in allowed
+
+
+async def _claim_audio_message(user_id: int, message_id: int) -> bool:
+    """Atomically claim a Telegram audio message so duplicate webhook deliveries are ignored."""
+    redis = Redis.from_url(settings.redis_url, decode_responses=True)
+    key = f"telegram:audio:queued:{user_id}:{message_id}"
+    try:
+        claimed = await redis.set(key, "1", nx=True, ex=24 * 60 * 60)
+        return bool(claimed)
+    except Exception as exc:
+        logger.warning("Could not claim Telegram audio message in Redis: %s", exc)
+        return True
+    finally:
+        await redis.aclose()
+
+
+async def _release_audio_claim(user_id: int, message_id: int) -> None:
+    redis = Redis.from_url(settings.redis_url, decode_responses=True)
+    key = f"telegram:audio:queued:{user_id}:{message_id}"
+    try:
+        await redis.delete(key)
+    except Exception as exc:
+        logger.warning("Could not release Telegram audio claim: %s", exc)
+    finally:
+        await redis.aclose()
 
 
 def _safe_extension(file_name: str | None, mime_type: str | None, default: str) -> str:
@@ -117,14 +149,13 @@ def _extract_audio_attachment(message: dict[str, Any]) -> dict[str, Any] | None:
 
 async def _handle_kommo_test(chat_id: int, user_id: int, db: AsyncSession) -> None:
     from app.models.integration_check import IntegrationCheck
-    from app.services.kommo_service import test_connection
 
     if not _is_allowed_user(user_id):
         await telegram_service.send_message(chat_id, "Доступ запрещён.")
         return
 
     await telegram_service.send_message(chat_id, "🔄 Проверяю связь с Kommo...")
-    result = await test_connection()
+    result = await kommo_service.test_connection()
     checked_at = datetime.now(tz=timezone.utc)
 
     try:
@@ -171,7 +202,7 @@ async def _handle_kommo_test(chat_id: int, user_id: int, db: AsyncSession) -> No
     else:
         message = (
             "❌ <b>Не удалось подключиться к Kommo</b>\n\n"
-            f"Ошибка: {result.get('error', 'Неизвестная ошибка')}\n\n"
+            f"Ошибка: {html.escape(result.get('error', 'Неизвестная ошибка'))}\n\n"
             "Проверьте Railway Variables:\n"
             "• <code>KOMMO_BASE_URL</code>\n"
             "• <code>KOMMO_ACCESS_TOKEN</code>"
@@ -179,24 +210,278 @@ async def _handle_kommo_test(chat_id: int, user_id: int, db: AsyncSession) -> No
     await telegram_service.send_message(chat_id, message)
 
 
-async def _handle_open_leads(chat_id: int, user_id: int) -> None:
+async def _show_lead_page(chat_id: int, user_id: int, page: int = 1) -> None:
     if not _is_allowed_user(user_id):
         await telegram_service.send_message(chat_id, "Доступ запрещён.")
         return
+    await telegram_service.send_message(chat_id, "🔄 Загружаю открытые сделки...")
+    result = await kommo_service.get_open_leads_page(page=page)
+    await telegram_service.send_lead_selection_menu(chat_id, result, page=page)
 
-    from app.services.kommo_service import get_all_open_leads
 
-    await telegram_service.send_message(chat_id, "🔄 Загружаю открытые сделки из Kommo...")
-    try:
-        result = await get_all_open_leads()
-        chunks = telegram_service.format_open_leads_messages(result)
-        await telegram_service.send_message_chunks(chat_id, chunks)
-    except Exception as exc:
-        logger.exception("Open leads listing failed")
+async def _show_lead_details(
+    chat_id: int,
+    lead_id: int,
+    *,
+    return_page: int = 1,
+) -> None:
+    details = await kommo_service.get_lead_details(lead_id)
+    await telegram_service.send_lead_details(
+        chat_id,
+        details,
+        return_page=return_page,
+    )
+
+
+async def _prompt_search(chat_id: int, user_id: int) -> None:
+    await telegram_state_service.set_state(
+        user_id,
+        {"mode": "awaiting_lead_search", "chat_id": chat_id},
+        ttl_seconds=settings.telegram_state_ttl_minutes * 60,
+    )
+    await telegram_service.send_message(
+        chat_id,
+        (
+            "🔎 <b>Поиск сделки</b>\n\n"
+            "Отправьте ID сделки или часть названия клиента/товара."
+        ),
+        reply_markup={
+            "inline_keyboard": [[{"text": "❌ Отмена", "callback_data": "state:cancel"}]]
+        },
+    )
+
+
+async def _prompt_text_note(
+    chat_id: int,
+    user_id: int,
+    lead_id: int,
+    return_page: int,
+) -> None:
+    details = await kommo_service.get_lead_details(lead_id)
+    await telegram_state_service.set_state(
+        user_id,
+        {
+            "mode": "awaiting_text_note",
+            "chat_id": chat_id,
+            "kommo_lead_id": lead_id,
+            "lead_name": details.get("name"),
+            "return_page": return_page,
+        },
+        ttl_seconds=settings.telegram_state_ttl_minutes * 60,
+    )
+    await telegram_service.send_message(
+        chat_id,
+        (
+            "📝 <b>Новое примечание</b>\n\n"
+            f"Сделка: <b>{html.escape(str(details.get('name') or '—'))}</b>\n"
+            f"ID: <code>{lead_id}</code>\n\n"
+            "Отправьте текст примечания одним сообщением. Перед записью в Kommo бот покажет подтверждение."
+        ),
+        reply_markup={
+            "inline_keyboard": [[{"text": "❌ Отмена", "callback_data": "state:cancel"}]]
+        },
+    )
+
+
+async def _prompt_followup_audio(
+    chat_id: int,
+    user_id: int,
+    lead_id: int,
+    return_page: int,
+) -> None:
+    details = await kommo_service.get_lead_details(lead_id)
+    await telegram_state_service.set_state(
+        user_id,
+        {
+            "mode": "awaiting_audio_for_lead",
+            "chat_id": chat_id,
+            "kommo_lead_id": lead_id,
+            "lead_name": details.get("name"),
+            "return_page": return_page,
+        },
+        ttl_seconds=settings.telegram_state_ttl_minutes * 60,
+    )
+    await telegram_service.send_message(
+        chat_id,
+        (
+            "🎙 <b>Второй разговор по существующей сделке</b>\n\n"
+            f"Сделка: <b>{html.escape(str(details.get('name') or '—'))}</b>\n"
+            f"ID: <code>{lead_id}</code>\n\n"
+            "Теперь отправьте голосовое сообщение или файл .m4a/.mp3/.wav/.mp4/.webm. "
+            "После анализа появится кнопка подтверждения. Новая сделка в Kommo создана не будет."
+        ),
+        reply_markup={
+            "inline_keyboard": [[{"text": "❌ Отмена", "callback_data": "state:cancel"}]]
+        },
+    )
+
+
+async def _handle_manager_callback(
+    *,
+    callback_data: str,
+    chat_id: int,
+    user_id: int,
+    db: AsyncSession,
+) -> bool:
+    """Handle menu/lead/note callbacks. Return False for approval callbacks."""
+    if callback_data == "noop":
+        return True
+
+    if callback_data == "menu:home":
+        await telegram_state_service.clear_state(user_id)
+        await telegram_service.send_main_menu(chat_id)
+        return True
+    if callback_data == "menu:test":
+        await _handle_kommo_test(chat_id, user_id, db)
+        return True
+    if callback_data == "menu:search":
+        await _prompt_search(chat_id, user_id)
+        return True
+    if callback_data == "menu:new":
+        await telegram_state_service.clear_state(user_id)
         await telegram_service.send_message(
             chat_id,
-            f"❌ Не удалось получить открытые сделки: {str(exc)[:500]}",
+            (
+                "🎙 Отправьте голосовое сообщение или аудиофайл. После анализа нажмите "
+                "<b>«Добавить лид в Kommo»</b>."
+            ),
+            reply_markup={
+                "inline_keyboard": [[{"text": "🏠 Меню", "callback_data": "menu:home"}]]
+            },
         )
+        return True
+    if callback_data == "menu:update":
+        await telegram_service.send_message(
+            chat_id,
+            "Выберите сделку, которую нужно дополнить новым разговором или примечанием.",
+        )
+        await _show_lead_page(chat_id, user_id, 1)
+        return True
+    if callback_data.startswith("menu:leads:"):
+        page = int(callback_data.rsplit(":", 1)[1])
+        await _show_lead_page(chat_id, user_id, page)
+        return True
+    if callback_data.startswith("lead:view:"):
+        _, _, lead_id_raw, page_raw = callback_data.split(":", 3)
+        await _show_lead_details(chat_id, int(lead_id_raw), return_page=int(page_raw))
+        return True
+    if callback_data.startswith("lead:text:"):
+        _, _, lead_id_raw, page_raw = callback_data.split(":", 3)
+        await _prompt_text_note(chat_id, user_id, int(lead_id_raw), int(page_raw))
+        return True
+    if callback_data.startswith("lead:audio:"):
+        _, _, lead_id_raw, page_raw = callback_data.split(":", 3)
+        await _prompt_followup_audio(chat_id, user_id, int(lead_id_raw), int(page_raw))
+        return True
+    if callback_data == "state:cancel":
+        await telegram_state_service.clear_state(user_id)
+        await telegram_service.send_message(chat_id, "❌ Действие отменено.")
+        await telegram_service.send_main_menu(chat_id)
+        return True
+    if callback_data.startswith("note:cancel:"):
+        _, _, lead_id_raw, page_raw = callback_data.split(":", 3)
+        await telegram_state_service.clear_state(user_id)
+        await telegram_service.send_message(chat_id, "❌ Примечание не добавлено.")
+        await _show_lead_details(chat_id, int(lead_id_raw), return_page=int(page_raw))
+        return True
+    if callback_data.startswith("note:confirm:"):
+        _, _, lead_id_raw, page_raw = callback_data.split(":", 3)
+        lead_id = int(lead_id_raw)
+        state = await telegram_state_service.get_state(user_id)
+        if not state or state.get("mode") != "pending_note_confirmation":
+            await telegram_service.send_message(
+                chat_id,
+                "⚠️ Подтверждение устарело. Откройте сделку и добавьте примечание заново.",
+            )
+            return True
+        if int(state.get("kommo_lead_id") or 0) != lead_id:
+            await telegram_service.send_message(chat_id, "❌ Сделка в подтверждении не совпадает.")
+            return True
+        result = await kommo_service.add_text_note(
+            lead_id,
+            str(state.get("note_text") or ""),
+            source="Telegram",
+        )
+        await telegram_state_service.clear_state(user_id)
+        await telegram_service.send_message(
+            chat_id,
+            (
+                "✅ <b>Примечание добавлено в Kommo</b>\n\n"
+                f"Сделка: {html.escape(str(result.get('lead_name') or '—'))}\n"
+                f"ID: <code>{lead_id}</code>\n"
+                f"<a href=\"{html.escape(str(result.get('url') or ''), quote=True)}\">Открыть сделку</a>"
+            ),
+        )
+        await _show_lead_details(chat_id, lead_id, return_page=int(page_raw))
+        return True
+
+    return not callback_data.startswith("action:")
+
+
+async def _handle_text_state(
+    *,
+    chat_id: int,
+    user_id: int,
+    text: str,
+) -> bool:
+    state = await telegram_state_service.get_state(user_id)
+    if not state:
+        return False
+
+    mode = state.get("mode")
+    if mode == "awaiting_lead_search":
+        await telegram_state_service.clear_state(user_id)
+        await telegram_service.send_message(chat_id, "🔄 Ищу сделки в Kommo...")
+        result = await kommo_service.search_open_leads(text, limit=20)
+        await telegram_service.send_lead_selection_menu(
+            chat_id,
+            result,
+            page=1,
+            search_mode=True,
+        )
+        return True
+
+    if mode == "awaiting_text_note":
+        note_text = text.strip()
+        if not note_text:
+            await telegram_service.send_message(chat_id, "Примечание пустое. Отправьте текст.")
+            return True
+        lead_id = int(state["kommo_lead_id"])
+        return_page = int(state.get("return_page") or 1)
+        lead_name = str(state.get("lead_name") or f"Сделка {lead_id}")
+        await telegram_state_service.set_state(
+            user_id,
+            {
+                **state,
+                "mode": "pending_note_confirmation",
+                "note_text": note_text,
+            },
+            ttl_seconds=settings.telegram_state_ttl_minutes * 60,
+        )
+        await telegram_service.send_note_confirmation(
+            chat_id,
+            lead_id=lead_id,
+            lead_name=lead_name,
+            note_text=note_text,
+            return_page=return_page,
+        )
+        return True
+
+    if mode == "awaiting_audio_for_lead":
+        await telegram_service.send_message(
+            chat_id,
+            "Сейчас ожидается голосовое сообщение или аудиофайл. Для отмены нажмите кнопку «Отмена».",
+        )
+        return True
+
+    if mode == "pending_note_confirmation":
+        await telegram_service.send_message(
+            chat_id,
+            "Сначала подтвердите или отмените примечание кнопкой под предыдущим сообщением.",
+        )
+        return True
+
+    return False
 
 
 @router.post("/telegram")
@@ -233,6 +518,15 @@ async def telegram_webhook(
                 return {"ok": True}
 
             try:
+                handled = await _handle_manager_callback(
+                    callback_data=callback_data,
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    db=db,
+                )
+                if handled:
+                    return {"ok": True}
+
                 result_message = await approval_service.handle_callback(
                     db=db,
                     callback_data=callback_data,
@@ -244,7 +538,7 @@ async def telegram_webhook(
                 logger.exception("Callback handling failed")
                 await telegram_service.send_message(
                     chat_id,
-                    f"❌ Ошибка выполнения действия: {str(exc)[:500]}",
+                    f"❌ Ошибка выполнения действия: {html.escape(str(exc)[:500])}",
                 )
             return {"ok": True}
 
@@ -257,34 +551,49 @@ async def telegram_webhook(
         message_id = message["message_id"]
         text = (message.get("text") or "").strip()
 
+        if not _is_allowed_user(user_id):
+            await telegram_service.send_message(chat_id, "Доступ запрещён.")
+            return {"ok": True}
+
+        if text.startswith(("/start", "/menu")):
+            await telegram_state_service.clear_state(user_id)
+            await telegram_service.send_main_menu(chat_id)
+            return {"ok": True}
+
         if text.startswith("/kommo_test"):
             await _handle_kommo_test(chat_id, user_id, db)
             return {"ok": True}
 
         if text.startswith(("/kommo_leads", "/open_deals", "/deals")):
-            await _handle_open_leads(chat_id, user_id)
+            await _show_lead_page(chat_id, user_id, 1)
             return {"ok": True}
 
-        if text.startswith("/start"):
-            await telegram_service.send_message(
-                chat_id,
-                (
-                    "👋 <b>Buy & Bring Assistant</b>\n\n"
-                    "Доступные действия:\n"
-                    "• отправьте голосовое сообщение или аудиофайл .m4a/.mp3/.wav/.mp4/.webm;\n"
-                    "• после анализа нажмите <b>«Добавить лид в Kommo»</b>;\n"
-                    "• <code>/kommo_leads</code> — показать все открытые сделки;\n"
-                    "• <code>/kommo_test</code> — проверить интеграцию.\n\n"
-                    "Лид в Kommo создаётся только после вашего подтверждения кнопкой."
-                ),
-            )
+        if text.startswith("/lead"):
+            parts = text.split(maxsplit=1)
+            if len(parts) != 2 or not parts[1].strip().isdigit():
+                await telegram_service.send_message(chat_id, "Использование: <code>/lead 123456</code>")
+            else:
+                await _show_lead_details(chat_id, int(parts[1].strip()), return_page=1)
+            return {"ok": True}
+
+        if text and await _handle_text_state(chat_id=chat_id, user_id=user_id, text=text):
             return {"ok": True}
 
         attachment = _extract_audio_attachment(message)
         if attachment:
-            if not _is_allowed_user(user_id):
-                await telegram_service.send_message(chat_id, "Доступ запрещён.")
+            state = await telegram_state_service.get_state(user_id)
+            if state and state.get("mode") in {"awaiting_text_note", "pending_note_confirmation"}:
+                await telegram_service.send_message(
+                    chat_id,
+                    "Сейчас ожидается текст или подтверждение примечания. Отмените действие через меню, чтобы обработать аудио.",
+                )
                 return {"ok": True}
+
+            target_kommo_lead_id: int | None = None
+            target_lead_name: str | None = None
+            if state and state.get("mode") == "awaiting_audio_for_lead":
+                target_kommo_lead_id = int(state.get("kommo_lead_id") or 0) or None
+                target_lead_name = str(state.get("lead_name") or "") or None
 
             max_bytes = min(settings.max_audio_file_size_mb, 20) * 1024 * 1024
             file_size = attachment.get("file_size")
@@ -298,23 +607,54 @@ async def telegram_webhook(
                 )
                 return {"ok": True}
 
-            await telegram_service.send_message(
-                chat_id,
-                "🎙 Аудио получено. Загружаю и распознаю...",
-            )
-            try:
-                await process_voice_note(
-                    chat_id=chat_id,
-                    telegram_user_id=user_id,
-                    telegram_message_id=message_id,
-                    file_id=attachment["file_id"],
-                    file_extension=attachment["file_extension"],
+            if not await _claim_audio_message(user_id, message_id):
+                logger.info(
+                    "Duplicate Telegram audio update ignored: user_id=%s message_id=%s",
+                    user_id,
+                    message_id,
                 )
+                return {"ok": True}
+
+            try:
+                task = process_voice_note.apply_async(
+                    kwargs={
+                        "chat_id": chat_id,
+                        "telegram_user_id": user_id,
+                        "telegram_message_id": message_id,
+                        "file_id": attachment["file_id"],
+                        "file_extension": attachment["file_extension"],
+                        "target_kommo_lead_id": target_kommo_lead_id,
+                    },
+                    queue="voice_notes",
+                )
+                logger.info(
+                    "Telegram audio queued: task_id=%s user_id=%s message_id=%s target_kommo_lead_id=%s",
+                    task.id,
+                    user_id,
+                    message_id,
+                    target_kommo_lead_id,
+                )
+                if target_kommo_lead_id:
+                    await telegram_state_service.clear_state(user_id)
+                    await telegram_service.send_message(
+                        chat_id,
+                        (
+                            "🎙 Аудио поставлено в очередь для обновления существующей сделки.\n"
+                            f"Сделка: <b>{html.escape(target_lead_name or str(target_kommo_lead_id))}</b>\n"
+                            f"ID: <code>{target_kommo_lead_id}</code>"
+                        ),
+                    )
+                else:
+                    await telegram_service.send_message(
+                        chat_id,
+                        "🎙 Аудио получено и поставлено в очередь на обработку нового лида.",
+                    )
             except Exception:
-                logger.exception("Voice/audio processing failed")
+                await _release_audio_claim(user_id, message_id)
+                logger.exception("Could not queue voice/audio processing task")
                 await telegram_service.send_message(
                     chat_id,
-                    "❌ Ошибка обработки аудио. Посмотрите Deploy Logs Railway.",
+                    "❌ Не удалось поставить аудио в очередь. Проверьте Redis и Celery worker.",
                 )
             return {"ok": True}
 
@@ -325,10 +665,7 @@ async def telegram_webhook(
             )
             return {"ok": True}
 
-        await telegram_service.send_message(
-            chat_id,
-            "Отправьте голосовое сообщение/аудиофайл или используйте /kommo_leads.",
-        )
+        await telegram_service.send_main_menu(chat_id)
 
     except Exception:
         logger.exception("Telegram webhook handler error")

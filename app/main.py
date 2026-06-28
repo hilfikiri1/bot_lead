@@ -12,7 +12,7 @@ from app.api.admin import router as admin_router
 from app.api.auth import router as auth_router
 from app.api.telegram import router as telegram_router
 from app.config import get_settings
-from app.services.telegram_service import delete_webhook, register_webhook
+from app.services.telegram_service import delete_webhook, register_webhook, set_bot_commands
 
 settings = get_settings()
 
@@ -48,6 +48,11 @@ async def lifespan(app: FastAPI):
             app_logger.info("Telegram webhook registered")
         except Exception as exc:
             app_logger.error("Webhook registration failed: %s", exc)
+        try:
+            await set_bot_commands()
+            app_logger.info("Telegram bot commands registered")
+        except Exception as exc:
+            app_logger.warning("Telegram command registration failed: %s", exc)
 
     yield
     app_logger.info("Shutting down")
@@ -56,7 +61,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Buy & Bring Solutions — Voice Bot API",
     description="Automated voice-note processing for B2B sourcing calls",
-    version="1.1.0",
+    version="1.2.0",
     lifespan=lifespan,
 )
 
@@ -74,7 +79,7 @@ app.include_router(auth_router)
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "service": "buy-bring-voice-bot", "version": "1.1.0"}
+    return {"status": "ok", "service": "buy-bring-voice-bot", "version": "1.2.0"}
 
 
 @app.get("/")

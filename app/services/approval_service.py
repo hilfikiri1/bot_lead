@@ -28,13 +28,14 @@ async def handle_callback(
     chat_id: int,
 ) -> str:
     parts = callback_data.split(":")
-    if len(parts) != 4 or parts[0] != "action":
+    if len(parts) not in {4, 5} or parts[0] != "action":
         return "Неизвестное действие."
 
-    _, action_type, lead_id_str, voice_note_id_str = parts
+    _, action_type, lead_id_str, voice_note_id_str, *extra = parts
     try:
         lead_id = int(lead_id_str)
         voice_note_id = int(voice_note_id_str)
+        target_kommo_lead_id = int(extra[0]) if extra else None
     except ValueError:
         return "❌ Некорректные данные кнопки."
 
@@ -67,6 +68,16 @@ async def handle_callback(
         return await _execute_whatsapp_draft(db, lead, report, chat_id)
     if action_type == "kommo_create":
         return await _execute_kommo_create(db, lead, voice_note, report)
+    if action_type == "kommo_update":
+        if not target_kommo_lead_id:
+            return "❌ Не указана сделка Kommo для обновления."
+        return await _execute_kommo_update(
+            db,
+            lead,
+            voice_note,
+            report,
+            target_kommo_lead_id,
+        )
     # Backward compatibility for older Telegram reports.
     if action_type == "crm":
         return await _execute_local_crm_save(db, lead, report)
@@ -177,6 +188,91 @@ async def _execute_kommo_create(
             }
             await db.commit()
         return f"❌ Не удалось создать лид в Kommo: {html.escape(str(exc))}"
+
+
+async def _execute_kommo_update(
+    db: AsyncSession,
+    lead: Lead,
+    voice_note: VoiceNote,
+    report: AIReport,
+    target_kommo_lead_id: int,
+) -> str:
+    """Append a reviewed second-call report to an existing Kommo lead once."""
+    existing_result = await db.execute(
+        select(Action)
+        .where(
+            Action.lead_id == lead.id,
+            Action.action_type == "kommo_update",
+            Action.status.in_(["pending", "executed"]),
+        )
+        .order_by(Action.id.desc())
+    )
+    existing = existing_result.scalars().first()
+    if existing:
+        payload = existing.payload or {}
+        if existing.status == "executed":
+            url = payload.get("kommo_url") or ""
+            return (
+                "ℹ️ Этот разговор уже добавлен в выбранную сделку Kommo.\n"
+                f"ID: <code>{payload.get('kommo_lead_id') or target_kommo_lead_id}</code>\n"
+                + (f"<a href=\"{html.escape(url, quote=True)}\">Открыть сделку</a>" if url else "")
+            )
+        return "⏳ Обновление сделки Kommo уже выполняется."
+
+    action = await crm_service.create_action(
+        db,
+        lead,
+        "kommo_update",
+        {
+            "source": "telegram_followup_audio",
+            "voice_note_id": voice_note.id,
+            "kommo_lead_id": target_kommo_lead_id,
+        },
+    )
+
+    try:
+        raw = report.raw_json or {}
+        updated = await kommo_service.add_followup_note_from_analysis(
+            lead_id=target_kommo_lead_id,
+            conversation_summary=report.conversation_summary,
+            recommended_next_step=report.recommended_next_step,
+            missing_questions=report.missing_questions or [],
+            transcript=voice_note.transcript,
+            client_data=raw.get("client") or {},
+            lead_data=raw.get("lead") or {},
+        )
+
+        action.payload = {
+            **(action.payload or {}),
+            "kommo_lead_id": target_kommo_lead_id,
+            "kommo_url": updated.get("url"),
+        }
+        await crm_service.update_action_status(
+            db,
+            action,
+            "executed",
+            approved=True,
+            executed_at=datetime.now(tz=timezone.utc),
+        )
+        return (
+            "✅ <b>Разговор добавлен в существующую сделку Kommo</b>\n\n"
+            f"Сделка: {html.escape(str(updated.get('lead_name') or '—'))}\n"
+            f"ID: <code>{target_kommo_lead_id}</code>\n"
+            "Добавлено: резюме, следующий шаг, вопросы и транскрипт.\n"
+            f"<a href=\"{html.escape(updated['url'], quote=True)}\">Открыть сделку в Kommo</a>"
+        )
+    except Exception as exc:
+        logger.exception("Kommo lead update failed")
+        await db.rollback()
+        refreshed = await db.get(Action, action.id)
+        if refreshed:
+            refreshed.status = "failed"
+            refreshed.payload = {
+                **(refreshed.payload or {}),
+                "safe_error": str(exc)[:500],
+            }
+            await db.commit()
+        return f"❌ Не удалось добавить разговор в Kommo: {html.escape(str(exc))}"
 
 
 async def _execute_gmail_draft(db: AsyncSession, lead: Lead, report: AIReport) -> str:

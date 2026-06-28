@@ -8,6 +8,8 @@ from app.services import (
     whatsapp_service,
     crm_service,
     approval_service,
+    kommo_service,
+    telegram_state_service,
 )
 
 __all__ = [
@@ -20,4 +22,6 @@ __all__ = [
     "whatsapp_service",
     "crm_service",
     "approval_service",
+    "kommo_service",
+    "telegram_state_service",
 ]

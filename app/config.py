@@ -1,7 +1,8 @@
-from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import model_validator
 from functools import lru_cache
-from typing import Optional, List
+from typing import List, Optional
+
+from pydantic import model_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 def _build_redis_url(host, port, user, password, db) -> str:
@@ -32,8 +33,20 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def resolve_redis_urls(self) -> "Settings":
         if self.redishost:
-            db0 = _build_redis_url(self.redishost, self.redisport, self.redisuser, self.redispassword, 0)
-            db1 = _build_redis_url(self.redishost, self.redisport, self.redisuser, self.redispassword, 1)
+            db0 = _build_redis_url(
+                self.redishost,
+                self.redisport,
+                self.redisuser,
+                self.redispassword,
+                0,
+            )
+            db1 = _build_redis_url(
+                self.redishost,
+                self.redisport,
+                self.redisuser,
+                self.redispassword,
+                1,
+            )
             if self.celery_broker_url == "redis://redis:6379/0":
                 self.celery_broker_url = db0
             if self.celery_result_backend == "redis://redis:6379/1":
@@ -46,17 +59,18 @@ class Settings(BaseSettings):
     telegram_bot_token: str = ""
     telegram_webhook_secret: str = ""
     webhook_base_url: str = "https://your-domain.com"
-
-    # Allowed Telegram user IDs for admin commands (comma-separated)
-    # Example: ALLOWED_TELEGRAM_USER_IDS=123456789,987654321
     allowed_telegram_user_ids: str = ""
+    max_audio_file_size_mb: int = 20
 
     def get_allowed_user_ids(self) -> List[int]:
-        """Parse comma-separated user IDs into a list of ints."""
         if not self.allowed_telegram_user_ids.strip():
             return []
         try:
-            return [int(uid.strip()) for uid in self.allowed_telegram_user_ids.split(",") if uid.strip()]
+            return [
+                int(uid.strip())
+                for uid in self.allowed_telegram_user_ids.split(",")
+                if uid.strip()
+            ]
         except ValueError:
             return []
 
@@ -86,10 +100,14 @@ class Settings(BaseSettings):
     whatsapp_access_token: str = ""
     whatsapp_enabled: bool = False
 
-    # Kommo CRM (Stage 1: read-only connection test)
-    # KOMMO_BASE_URL should NOT include /api/v4 — that is added in the service
-    kommo_base_url: str = ""        # e.g. https://semichev66.kommo.com
-    kommo_access_token: str = ""    # Long-lived token from private integration
+    # Kommo CRM
+    kommo_base_url: str = ""
+    kommo_access_token: str = ""
+    # Optional: omit both values to use the first stage of the main pipeline.
+    kommo_default_pipeline_id: Optional[int] = None
+    kommo_default_status_id: Optional[int] = None
+    # 20 pages x 250 leads = safety cap of 5000 scanned leads.
+    kommo_open_leads_max_pages: int = 20
 
     # App
     app_env: str = "development"

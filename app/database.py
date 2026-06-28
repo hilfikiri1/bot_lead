@@ -1,17 +1,11 @@
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
-from app.config import get_settings
-
-settings = get_settings()
 
 from app.config import get_settings
 
 settings = get_settings()
 
-print("=" * 50)
-print("DATABASE_URL =", settings.database_url)
-print("=" * 50)
-
+# Never print DATABASE_URL: it contains the PostgreSQL password.
 engine = create_async_engine(
     settings.database_url,
     echo=settings.app_env == "development",
@@ -42,7 +36,8 @@ async def get_db() -> AsyncSession:
 
 
 async def init_db():
-    """Create all tables (used in tests / dev; production uses Alembic)."""
-    from app.models import client, lead, voice_note, ai_report, action  # noqa
+    """Create all tables in development/tests; production uses Alembic."""
+    from app.models import action, ai_report, client, integration_check, lead, voice_note  # noqa
+
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)

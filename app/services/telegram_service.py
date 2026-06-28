@@ -492,6 +492,16 @@ async def send_lead_details(
                 }
             ],
             [
+                {
+                    "text": "✅ Задача в Kommo",
+                    "callback_data": f"lead:task:{lead_id}:{return_page}",
+                },
+                {
+                    "text": "📅 В календарь",
+                    "callback_data": f"lead:calendar:{lead_id}:{return_page}",
+                },
+            ],
+            [
                 {"text": "🔗 Открыть в Kommo", "url": details.get("url")},
                 {"text": "↩️ К сделкам", "callback_data": f"menu:leads:{return_page}"},
             ],
@@ -535,6 +545,85 @@ async def send_note_confirmation(
             f"ID: <code>{lead_id}</code>\n\n"
             f"<pre>{_esc(preview)}</pre>\n\n"
             "Примечание будет добавлено только после подтверждения."
+        ),
+        reply_markup=keyboard,
+    )
+
+
+async def send_task_confirmation(
+    chat_id: int,
+    *,
+    lead_id: int,
+    lead_name: str,
+    task_text: str,
+    due_display: str,
+    return_page: int = 1,
+) -> dict:
+    preview = task_text.strip()
+    if len(preview) > 1500:
+        preview = preview[:1499] + "…"
+    keyboard = {
+        "inline_keyboard": [
+            [
+                {
+                    "text": "✅ Создать задачу",
+                    "callback_data": f"task:confirm:{lead_id}:{return_page}",
+                },
+                {
+                    "text": "❌ Отмена",
+                    "callback_data": f"task:cancel:{lead_id}:{return_page}",
+                },
+            ]
+        ]
+    }
+    return await send_message(
+        chat_id,
+        (
+            "✅ <b>Проверка задачи Kommo</b>\n\n"
+            f"Сделка: <b>{_esc(lead_name)}</b>\n"
+            f"ID: <code>{lead_id}</code>\n"
+            f"Срок: <b>{_esc(due_display)}</b>\n\n"
+            f"<pre>{_esc(preview)}</pre>\n\n"
+            "Задача будет создана только после подтверждения."
+        ),
+        reply_markup=keyboard,
+    )
+
+
+async def send_calendar_confirmation(
+    chat_id: int,
+    *,
+    lead_id: int,
+    lead_name: str,
+    title: str,
+    start_display: str,
+    duration_minutes: int,
+    return_page: int = 1,
+) -> dict:
+    keyboard = {
+        "inline_keyboard": [
+            [
+                {
+                    "text": "✅ Создать событие",
+                    "callback_data": f"calendar:confirm:{lead_id}:{return_page}",
+                },
+                {
+                    "text": "❌ Отмена",
+                    "callback_data": f"calendar:cancel:{lead_id}:{return_page}",
+                },
+            ]
+        ]
+    }
+    return await send_message(
+        chat_id,
+        (
+            "📅 <b>Проверка события календаря</b>\n\n"
+            f"Сделка: <b>{_esc(lead_name)}</b>\n"
+            f"ID: <code>{lead_id}</code>\n"
+            f"Название: {_esc(title)}\n"
+            f"Начало: <b>{_esc(start_display)}</b>\n"
+            f"Длительность: {duration_minutes} мин.\n\n"
+            "Событие будет создано только после подтверждения."
         ),
         reply_markup=keyboard,
     )

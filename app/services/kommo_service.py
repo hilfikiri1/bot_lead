@@ -634,13 +634,44 @@ async def get_open_leads_page(page: int = 1, page_size: int | None = None) -> di
     }
 
 
+def _normalize_search_text(value: Any) -> str:
+    text = str(value or "").casefold().replace("ё", "е")
+    text = re.sub(r"[^\w]+", " ", text, flags=re.UNICODE)
+    return " ".join(text.split())
+
+
+def _lead_name_match_score(name: Any, query: str) -> int | None:
+    """Return a lower-is-better score for partial lead-title matching."""
+    normalized_name = _normalize_search_text(name)
+    normalized_query = _normalize_search_text(query)
+    if not normalized_name or not normalized_query:
+        return None
+    if normalized_name == normalized_query:
+        return 0
+    if normalized_name.startswith(normalized_query):
+        return 1
+    if normalized_query in normalized_name:
+        return 2
+    tokens = normalized_query.split()
+    if tokens and all(token in normalized_name for token in tokens):
+        return 3
+    return None
+
+
 async def search_open_leads(query: str, limit: int = 20) -> dict[str, Any]:
-    """Search open leads by Kommo ID or text in filled lead fields."""
+    """
+    Search open leads by exact Kommo ID and by a partial fragment of the lead title.
+
+    The local title scan is intentional: numeric prefixes such as ``90`` and title
+    fragments such as ``надувная`` must match a lead named ``90 Надувная горка``.
+    """
     query = query.strip()
     if not query:
         return {"leads": [], "open_count": 0, "query": query}
 
-    raw_leads: list[dict[str, Any]] = []
+    limit = max(1, min(limit, 50))
+    matches: dict[int, tuple[int, dict[str, Any]]] = {}
+
     if query.isdigit():
         try:
             exact = await _request(
@@ -648,48 +679,40 @@ async def search_open_leads(query: str, limit: int = 20) -> dict[str, Any]:
                 f"/api/v4/leads/{int(query)}",
                 params={"with": "contacts"},
             )
-            if exact and not exact.get("closed_at"):
-                raw_leads = [exact]
+            if exact and not exact.get("closed_at") and isinstance(exact.get("id"), int):
+                matches[int(exact["id"])] = (-1, exact)
         except KommoAPIError as exc:
             if exc.status_code != 404:
                 raise
 
-    if not raw_leads:
-        data = await _request(
-            "GET",
-            "/api/v4/leads",
-            params={
-                "query": query,
-                "limit": max(1, min(limit, PAGE_SIZE)),
-                "order[updated_at]": "desc",
-            },
-        )
-        raw_leads = [
-            lead
-            for lead in (((data or {}).get("_embedded") or {}).get("leads") or [])
-            if not lead.get("closed_at")
-        ]
+    # Kommo's query behaviour can vary for numeric strings and partial names.
+    # Scan the normalized open-lead titles as the source of truth for this menu.
+    all_open = await get_all_open_leads()
+    for lead in all_open.get("leads") or []:
+        lead_id = lead.get("id")
+        if not isinstance(lead_id, int):
+            continue
+        score = _lead_name_match_score(lead.get("name"), query)
+        if score is not None:
+            previous = matches.get(lead_id)
+            if previous is None or score < previous[0]:
+                matches[lead_id] = (score, lead)
 
-    try:
-        pipeline_names, status_names = await get_pipeline_index()
-    except Exception:
-        pipeline_names, status_names = {}, {}
-
-    leads: list[dict[str, Any]] = []
-    for lead in raw_leads[:limit]:
-        pipeline_id = lead.get("pipeline_id")
-        status_id = lead.get("status_id")
-        leads.append(
-            {
-                "id": lead.get("id"),
-                "name": lead.get("name") or "Без названия",
-                "pipeline_name": pipeline_names.get(pipeline_id, f"Воронка {pipeline_id}"),
-                "status_name": status_names.get((pipeline_id, status_id), f"Этап {status_id}"),
-                "updated_at": lead.get("updated_at"),
-                "url": f"{_base_url()}/leads/detail/{lead.get('id')}",
-            }
-        )
-    return {"leads": leads, "open_count": len(leads), "query": query}
+    ordered = sorted(
+        matches.values(),
+        key=lambda item: (
+            item[0],
+            -(int(item[1].get("updated_at") or 0)),
+            int(item[1].get("id") or 0),
+        ),
+    )
+    leads = [item[1] for item in ordered[:limit]]
+    return {
+        "leads": leads,
+        "open_count": len(leads),
+        "query": query,
+        "search_kind": "partial_title",
+    }
 
 
 async def add_text_note(lead_id: int, text: str, *, source: str = "Telegram") -> dict[str, Any]:
@@ -751,5 +774,44 @@ async def add_followup_note_from_analysis(
     return {
         "lead_id": lead_id,
         "lead_name": details.get("name"),
+        "url": details.get("url"),
+    }
+
+
+async def create_lead_task(
+    *,
+    lead_id: int,
+    text: str,
+    complete_till: int,
+    responsible_user_id: int | None = None,
+) -> dict[str, Any]:
+    """Create a manager-confirmed Kommo task attached to a lead."""
+    clean_text = text.strip()
+    if not clean_text:
+        raise ValueError("Текст задачи пустой.")
+    if complete_till <= int(datetime.now(tz=timezone.utc).timestamp()):
+        raise ValueError("Срок задачи должен быть в будущем.")
+
+    details = await get_lead_details(lead_id)
+    payload: dict[str, Any] = {
+        "entity_id": lead_id,
+        "entity_type": "leads",
+        "complete_till": int(complete_till),
+        "task_type_id": int(settings.kommo_default_task_type_id or 1),
+        "text": clean_text[:1000],
+    }
+    assignee = responsible_user_id or details.get("responsible_user_id")
+    if isinstance(assignee, int) and assignee > 0:
+        payload["responsible_user_id"] = assignee
+
+    data = await _request("POST", "/api/v4/tasks", json_body=[payload])
+    tasks = (((data or {}).get("_embedded") or {}).get("tasks") or [])
+    created = tasks[0] if tasks else {}
+    return {
+        "task_id": created.get("id"),
+        "lead_id": lead_id,
+        "lead_name": details.get("name"),
+        "complete_till": complete_till,
+        "text": clean_text,
         "url": details.get("url"),
     }

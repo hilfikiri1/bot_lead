@@ -110,6 +110,9 @@ class Settings(BaseSettings):
     kommo_open_leads_max_pages: int = 20
     kommo_menu_page_size: int = 8
     telegram_state_ttl_minutes: int = 30
+    audio_queue_fallback_seconds: int = 45
+    manager_timezone: str = "Europe/Warsaw"
+    kommo_default_task_type_id: int = 1
 
     # App
     app_env: str = "development"

@@ -177,6 +177,7 @@ def _request_icloud(
     current_url = url
     request_headers = {
         "User-Agent": "BuyBringTelegramAssistant/1.0",
+        "Accept": "application/xml, text/xml, text/calendar, */*",
         **(headers or {}),
     }
 
@@ -216,6 +217,13 @@ def _ensure_caldav_success(response: httpx.Response, operation: str) -> None:
             "iCloud отклонил авторизацию. Проверьте ICLOUD_USERNAME и специальный пароль приложения."
         )
     preview = response.text.replace("\n", " ")[:300]
+    logger.warning(
+        "iCloud CalDAV operation failed: operation=%s status=%s url=%s body=%s",
+        operation,
+        response.status_code,
+        str(response.request.url),
+        preview or "<empty>",
+    )
     raise CalendarIntegrationError(
         f"iCloud CalDAV: не удалось выполнить «{operation}» "
         f"(HTTP {response.status_code}). {preview}"
@@ -258,16 +266,60 @@ def _first_property_href(xml_bytes: bytes, property_tag: str) -> str | None:
     return None
 
 
-def _discover_calendar_home() -> str:
-    base_url = (settings.icloud_caldav_url or "https://caldav.icloud.com/").strip()
-    if not base_url.endswith("/"):
-        base_url += "/"
+def _caldav_discovery_candidates() -> list[str]:
+    configured = (
+        settings.icloud_caldav_url
+        or "https://caldav.icloud.com/.well-known/caldav"
+    ).strip()
+    configured = configured.rstrip("/")
 
+    candidates: list[str] = []
+    for candidate in (
+        configured,
+        "https://caldav.icloud.com/.well-known/caldav",
+        "https://caldav.icloud.com/",
+    ):
+        if candidate and candidate not in candidates:
+            candidates.append(candidate)
+    return candidates
+
+
+def _discover_calendar_home() -> str:
     principal_xml = """<?xml version="1.0" encoding="utf-8" ?>
 <d:propfind xmlns:d="DAV:">
   <d:prop><d:current-user-principal /></d:prop>
 </d:propfind>"""
-    principal_response, final_base_url = _propfind(base_url, principal_xml, depth=0)
+
+    principal_response: bytes | None = None
+    final_base_url: str | None = None
+    failures: list[str] = []
+
+    for candidate in _caldav_discovery_candidates():
+        try:
+            principal_response, final_base_url = _propfind(
+                candidate, principal_xml, depth=0
+            )
+            principal_href = _first_property_href(
+                principal_response,
+                f"{{{DAV_NS}}}current-user-principal",
+            )
+            if principal_href:
+                break
+            failures.append(f"{candidate}: current-user-principal отсутствует")
+        except CalendarIntegrationError as exc:
+            failures.append(f"{candidate}: {exc}")
+            logger.warning("iCloud CalDAV discovery failed for %s: %s", candidate, exc)
+            principal_response = None
+            final_base_url = None
+    else:
+        raise CalendarIntegrationError(
+            "iCloud CalDAV не смог определить адрес календарей. "
+            "Проверьте ICLOUD_CALDAV_URL, Apple ID и пароль приложения. "
+            "Рекомендуемый URL: https://caldav.icloud.com/.well-known/caldav"
+        )
+
+    assert principal_response is not None
+    assert final_base_url is not None
     principal_href = _first_property_href(
         principal_response,
         f"{{{DAV_NS}}}current-user-principal",

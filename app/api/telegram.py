@@ -683,7 +683,7 @@ async def _handle_manager_callback(
         await telegram_service.send_message(
             chat_id,
             (
-                "✅ <b>Событие создано в Google Calendar</b>\n\n"
+                f"✅ <b>Событие создано в {html.escape(calendar_service.provider_label())}</b>\n\n"
                 f"Сделка: {html.escape(str(state.get('lead_name') or '—'))}\n"
                 f"Название: {html.escape(str(state.get('calendar_title') or '—'))}\n"
                 f"Начало: {html.escape(str(state.get('start_display') or '—'))}\n"
@@ -999,6 +999,33 @@ async def telegram_webhook(
                 "file_extension": attachment["file_extension"],
                 "target_kommo_lead_id": target_kommo_lead_id,
             }
+            processing_mode = (settings.audio_processing_mode or "direct").strip().lower()
+
+            if processing_mode != "celery":
+                logger.info(
+                    "Telegram audio started in direct mode: user_id=%s message_id=%s target_kommo_lead_id=%s",
+                    user_id,
+                    message_id,
+                    target_kommo_lead_id,
+                )
+                _spawn_background(process_voice_note_async(**process_kwargs))
+                if target_kommo_lead_id:
+                    await telegram_state_service.clear_state(user_id)
+                    await telegram_service.send_message(
+                        chat_id,
+                        (
+                            "🎙 Аудио получено. Начинаю обработку для существующей сделки.\n"
+                            f"Сделка: <b>{html.escape(target_lead_name or str(target_kommo_lead_id))}</b>\n"
+                            f"ID: <code>{target_kommo_lead_id}</code>"
+                        ),
+                    )
+                else:
+                    await telegram_service.send_message(
+                        chat_id,
+                        "🎙 Аудио получено. Начинаю расшифровку и анализ нового лида.",
+                    )
+                return {"ok": True}
+
             try:
                 task = process_voice_note.apply_async(
                     kwargs=process_kwargs,
@@ -1038,11 +1065,11 @@ async def telegram_webhook(
                         ),
                     )
             except Exception:
-                logger.exception("Could not queue voice/audio processing task; starting fallback")
+                logger.exception("Could not queue voice/audio processing task; starting direct processing")
                 _spawn_background(process_voice_note_async(**process_kwargs))
                 await telegram_service.send_message(
                     chat_id,
-                    "⚠️ Очередь Redis/Celery недоступна. Запускаю резервную обработку аудио на основном сервере.",
+                    "⚠️ Очередь Redis/Celery недоступна. Начинаю обработку аудио на основном сервере.",
                 )
             return {"ok": True}
 

@@ -181,6 +181,109 @@ async def get_pipeline_index() -> tuple[dict[int, str], dict[tuple[int, int], st
     return pipeline_names, status_names
 
 
+async def _resolve_configured_lead_placement() -> dict[str, int]:
+    """Validate configured pipeline/status IDs before sending a create request.
+
+    A stale or copied STATUS_ID makes Kommo reject the whole lead with
+    NotSupportedChoice.  Invalid values are ignored so Kommo can place the lead
+    into the first stage of the selected or main pipeline.
+    """
+    configured_pipeline = settings.kommo_default_pipeline_id
+    configured_status = settings.kommo_default_status_id
+    if not configured_pipeline and not configured_status:
+        return {}
+
+    try:
+        data = await _request("GET", "/api/v4/leads/pipelines")
+    except Exception as exc:
+        logger.warning(
+            "Could not validate Kommo pipeline/status; using Kommo defaults: %s",
+            exc,
+        )
+        return {}
+
+    pipelines = ((data or {}).get("_embedded") or {}).get("pipelines", [])
+    pipeline_by_id = {
+        pipeline.get("id"): pipeline
+        for pipeline in pipelines
+        if isinstance(pipeline.get("id"), int)
+    }
+
+    selected_pipeline = None
+    if configured_pipeline:
+        selected_pipeline = pipeline_by_id.get(configured_pipeline)
+        if selected_pipeline is None:
+            logger.warning(
+                "KOMMO_DEFAULT_PIPELINE_ID=%s does not exist; using Kommo default",
+                configured_pipeline,
+            )
+            return {}
+    elif configured_status:
+        for pipeline in pipelines:
+            statuses = ((pipeline.get("_embedded") or {}).get("statuses") or [])
+            if any(status.get("id") == configured_status for status in statuses):
+                selected_pipeline = pipeline
+                break
+        if selected_pipeline is None:
+            logger.warning(
+                "KOMMO_DEFAULT_STATUS_ID=%s does not exist; using Kommo default",
+                configured_status,
+            )
+            return {}
+
+    if selected_pipeline is None:
+        return {}
+
+    pipeline_id = selected_pipeline.get("id")
+    result: dict[str, int] = {"pipeline_id": pipeline_id}
+    if configured_status:
+        statuses = ((selected_pipeline.get("_embedded") or {}).get("statuses") or [])
+        valid_status_ids = {
+            status.get("id")
+            for status in statuses
+            if isinstance(status.get("id"), int)
+        }
+        if configured_status in valid_status_ids:
+            result["status_id"] = configured_status
+        else:
+            logger.warning(
+                "KOMMO_DEFAULT_STATUS_ID=%s is not part of pipeline %s; "
+                "creating in the pipeline default stage",
+                configured_status,
+                pipeline_id,
+            )
+    return result
+
+
+async def _submit_new_lead(lead_payload: dict[str, Any], endpoint: str) -> Any:
+    """Submit a lead and retry once without invalid placement metadata."""
+    try:
+        return await _request("POST", endpoint, json_body=[lead_payload])
+    except KommoAPIError as exc:
+        error_text = str(exc)
+        has_placement = "status_id" in lead_payload or "pipeline_id" in lead_payload
+        invalid_placement = (
+            exc.status_code == 400
+            and has_placement
+            and (
+                "NotSupportedChoice" in error_text
+                or "status_id" in error_text
+                or "pipeline_id" in error_text
+            )
+        )
+        if not invalid_placement:
+            raise
+
+        safe_payload = dict(lead_payload)
+        safe_payload.pop("status_id", None)
+        safe_payload.pop("pipeline_id", None)
+        logger.warning(
+            "Kommo rejected configured pipeline/status; retrying lead creation "
+            "with Kommo default placement"
+        )
+        return await _request("POST", endpoint, json_body=[safe_payload])
+
+
 async def get_all_open_leads(max_pages: int | None = None) -> dict[str, Any]:
     """
     Fetch all leads page by page and keep only leads without closed_at.
@@ -347,11 +450,7 @@ async def create_lead_from_analysis(
 ) -> dict[str, Any]:
     """Create one Kommo lead after explicit human approval in Telegram."""
     lead_payload: dict[str, Any] = {"name": _lead_title(client_data, lead_data)}
-
-    if settings.kommo_default_pipeline_id:
-        lead_payload["pipeline_id"] = settings.kommo_default_pipeline_id
-    if settings.kommo_default_status_id:
-        lead_payload["status_id"] = settings.kommo_default_status_id
+    lead_payload.update(await _resolve_configured_lead_placement())
 
     phone = client_data.get("phone")
     email = client_data.get("email")
@@ -366,11 +465,7 @@ async def create_lead_from_analysis(
 
     if existing_contact_id:
         lead_payload["_embedded"] = {"contacts": [{"id": existing_contact_id}]}
-        data = await _request(
-            "POST",
-            "/api/v4/leads/complex",
-            json_body=[lead_payload],
-        )
+        data = await _submit_new_lead(lead_payload, "/api/v4/leads/complex")
     elif any([client_data.get("name"), client_data.get("company"), phone, email]):
         field_ids = await get_contact_field_ids()
         custom_values: list[dict[str, Any]] = []
@@ -392,17 +487,9 @@ async def create_lead_from_analysis(
         if custom_values:
             contact_payload["custom_fields_values"] = custom_values
         lead_payload["_embedded"] = {"contacts": [contact_payload]}
-        data = await _request(
-            "POST",
-            "/api/v4/leads/complex",
-            json_body=[lead_payload],
-        )
+        data = await _submit_new_lead(lead_payload, "/api/v4/leads/complex")
     else:
-        data = await _request(
-            "POST",
-            "/api/v4/leads",
-            json_body=[lead_payload],
-        )
+        data = await _submit_new_lead(lead_payload, "/api/v4/leads")
 
     created_leads = (((data or {}).get("_embedded") or {}).get("leads") or [])
     if not created_leads:

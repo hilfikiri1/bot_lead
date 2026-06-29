@@ -87,7 +87,17 @@ class Settings(BaseSettings):
     aws_region: str = "eu-central-1"
     s3_bucket_name: str = "buybring-audio"
 
-    # Google
+    # Calendar
+    # Use "icloud" for Apple Calendar on Mac/iPhone, or "google".
+    calendar_provider: str = "icloud"
+
+    # iCloud Calendar (CalDAV)
+    icloud_username: str = ""
+    icloud_app_specific_password: str = ""
+    icloud_calendar_name: str = "BBS Работа"
+    icloud_caldav_url: str = "https://caldav.icloud.com/"
+
+    # Google Calendar (optional legacy provider)
     google_client_id: str = ""
     google_client_secret: str = ""
     google_redirect_uri: str = "http://localhost:8000/auth/google/callback"
@@ -110,6 +120,9 @@ class Settings(BaseSettings):
     kommo_open_leads_max_pages: int = 20
     kommo_menu_page_size: int = 8
     telegram_state_ttl_minutes: int = 30
+    # "direct" starts processing immediately inside the web service.
+    # "celery" sends the job to the voice_notes queue and keeps a fallback watchdog.
+    audio_processing_mode: str = "direct"
     audio_queue_fallback_seconds: int = 45
     manager_timezone: str = "Europe/Warsaw"
     kommo_default_task_type_id: int = 1

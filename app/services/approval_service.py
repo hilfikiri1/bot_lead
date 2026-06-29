@@ -1,9 +1,10 @@
 """Process Telegram inline-button approvals."""
 from __future__ import annotations
 
+import asyncio
 import html
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -19,6 +20,17 @@ from app.services import (
 from app.services.telegram_service import send_message
 
 logger = logging.getLogger(__name__)
+
+
+def _pending_action_is_recent(action: Action, minutes: int = 10) -> bool:
+    if action.status != "pending":
+        return False
+    created_at = action.created_at
+    if created_at is None:
+        return True
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=timezone.utc)
+    return datetime.now(tz=timezone.utc) - created_at < timedelta(minutes=minutes)
 
 
 async def handle_callback(
@@ -113,7 +125,17 @@ async def _execute_kommo_create(
                 f"ID: <code>{payload['kommo_lead_id']}</code>\n"
                 + (f"<a href=\"{html.escape(url, quote=True)}\">Открыть сделку</a>" if url else "")
             )
-        return "⏳ Создание лида в Kommo уже выполняется."
+        if _pending_action_is_recent(existing):
+            return "⏳ Создание лида в Kommo уже выполняется."
+        # A previous deployment could leave a pending action forever after an
+        # exception. Mark stale pending actions failed and allow a safe retry.
+        if existing.status == "pending":
+            existing.status = "failed"
+            existing.payload = {
+                **payload,
+                "safe_error": "stale pending action automatically released",
+            }
+            await db.commit()
 
     action = await crm_service.create_action(
         db,
@@ -121,6 +143,9 @@ async def _execute_kommo_create(
         "kommo_create",
         {"source": "telegram_voice_note", "voice_note_id": voice_note.id},
     )
+    # Save the scalar ID before any rollback. ORM attributes may be expired after
+    # rollback and touching action.id can otherwise trigger MissingGreenlet.
+    action_id = int(action.id)
 
     try:
         raw = report.raw_json or {}
@@ -179,7 +204,7 @@ async def _execute_kommo_create(
         logger.exception("Kommo lead creation failed")
         await db.rollback()
         # Re-load after rollback before changing action state.
-        refreshed = await db.get(Action, action.id)
+        refreshed = await db.get(Action, action_id)
         if refreshed:
             refreshed.status = "failed"
             refreshed.payload = {
@@ -217,7 +242,15 @@ async def _execute_kommo_update(
                 f"ID: <code>{payload.get('kommo_lead_id') or target_kommo_lead_id}</code>\n"
                 + (f"<a href=\"{html.escape(url, quote=True)}\">Открыть сделку</a>" if url else "")
             )
-        return "⏳ Обновление сделки Kommo уже выполняется."
+        if _pending_action_is_recent(existing):
+            return "⏳ Обновление сделки Kommo уже выполняется."
+        if existing.status == "pending":
+            existing.status = "failed"
+            existing.payload = {
+                **payload,
+                "safe_error": "stale pending action automatically released",
+            }
+            await db.commit()
 
     action = await crm_service.create_action(
         db,
@@ -229,6 +262,7 @@ async def _execute_kommo_update(
             "kommo_lead_id": target_kommo_lead_id,
         },
     )
+    action_id = int(action.id)
 
     try:
         raw = report.raw_json or {}
@@ -264,7 +298,7 @@ async def _execute_kommo_update(
     except Exception as exc:
         logger.exception("Kommo lead update failed")
         await db.rollback()
-        refreshed = await db.get(Action, action.id)
+        refreshed = await db.get(Action, action_id)
         if refreshed:
             refreshed.status = "failed"
             refreshed.payload = {
@@ -317,11 +351,12 @@ async def _execute_calendar_event(db: AsyncSession, lead: Lead, report: AIReport
         },
     )
     try:
-        event_id = calendar_service.create_event(
-            title=report.calendar_title or "Follow-up call",
-            description=report.calendar_description or "",
-            start_time_iso=report.calendar_start_time,
-            duration_minutes=report.calendar_duration_minutes or 15,
+        event_id = await asyncio.to_thread(
+            calendar_service.create_event,
+            report.calendar_title or "Follow-up call",
+            report.calendar_description or "",
+            report.calendar_start_time,
+            report.calendar_duration_minutes or 15,
         )
         await crm_service.update_action_status(
             db,
@@ -330,7 +365,10 @@ async def _execute_calendar_event(db: AsyncSession, lead: Lead, report: AIReport
             approved=True,
             executed_at=datetime.now(tz=timezone.utc),
         )
-        return f"✅ Событие календаря создано (ID: {html.escape(str(event_id))})."
+        return (
+            f"✅ Событие создано в {html.escape(calendar_service.provider_label())} "
+            f"(ID: {html.escape(str(event_id))})."
+        )
     except Exception as exc:
         logger.error("Calendar event failed: %s", exc)
         await crm_service.update_action_status(db, action, "failed")

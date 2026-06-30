@@ -247,3 +247,11 @@ buybring/
 ├── .env.example
 └── README.md
 ```
+
+---
+
+## Phase 1 (2026-06-29)
+
+В проект добавлены безопасное подтверждение создания лидов Kommo, защита от дублей, статусы аудио, русский AI-отчёт, обновлённый Telegram UX и защита admin API.
+
+Подробности и инструкции Railway: [`PHASE1_RELEASE_NOTES.md`](PHASE1_RELEASE_NOTES.md).

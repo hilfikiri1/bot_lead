@@ -132,6 +132,25 @@ class Settings(BaseSettings):
     secret_key: str = "change-me"
     log_level: str = "INFO"
 
+    # Security / web API
+    admin_api_key: str = ""
+    cors_allowed_origins: str = ""
+    enable_google_oauth_routes: bool = False
+    expose_api_docs: bool = False
+
+    def get_cors_origins(self) -> List[str]:
+        if not self.cors_allowed_origins.strip():
+            return []
+        return [
+            value.strip()
+            for value in self.cors_allowed_origins.split(",")
+            if value.strip()
+        ]
+
+    @property
+    def is_production(self) -> bool:
+        return self.app_env.strip().lower() == "production"
+
 
 @lru_cache
 def get_settings() -> Settings:

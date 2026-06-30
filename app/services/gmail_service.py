@@ -2,11 +2,11 @@
 gmail_service.py
 Creates Gmail drafts using the Gmail API. Never sends automatically.
 """
+
 from __future__ import annotations
 
 import base64
 import logging
-import os
 from email.mime.text import MIMEText
 from pathlib import Path
 
@@ -69,10 +69,15 @@ def create_draft(
         mime["to"] = to
         mime["subject"] = subject
         raw = base64.urlsafe_b64encode(mime.as_bytes()).decode()
-        draft = service.users().drafts().create(
-            userId="me",
-            body={"message": {"raw": raw}},
-        ).execute()
+        draft = (
+            service.users()
+            .drafts()
+            .create(
+                userId="me",
+                body={"message": {"raw": raw}},
+            )
+            .execute()
+        )
         draft_id = draft["id"]
         logger.info("Gmail draft created: %s", draft_id)
         return draft_id

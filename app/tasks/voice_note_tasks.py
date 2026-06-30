@@ -1,16 +1,15 @@
-"""Telegram audio -> transcription -> AI analysis -> local DB -> approval report."""
+"""Reliable Telegram audio -> transcription -> Russian AI analysis pipeline."""
+
 from __future__ import annotations
 
 import asyncio
 import logging
 
 from redis.asyncio import Redis
-from sqlalchemy import select
 
 from app.celery_app import celery_app
 from app.config import get_settings
 from app.database import AsyncSessionLocal
-from app.models import VoiceNote
 from app.services import (
     ai_analysis_service,
     crm_service,
@@ -37,36 +36,29 @@ def _processing_key(telegram_user_id: int, telegram_message_id: int) -> str:
     return f"telegram:audio:processing:{telegram_user_id}:{telegram_message_id}"
 
 
-async def _acquire_processing_lock(
-    telegram_user_id: int,
-    telegram_message_id: int,
-) -> bool:
+async def _acquire_processing_lock(user_id: int, message_id: int) -> bool:
     redis = Redis.from_url(settings.redis_url, decode_responses=True)
     try:
-        acquired = await redis.set(
-            _processing_key(telegram_user_id, telegram_message_id),
-            "processing",
-            nx=True,
-            ex=PROCESSING_LOCK_TTL_SECONDS,
+        return bool(
+            await redis.set(
+                _processing_key(user_id, message_id),
+                "processing",
+                nx=True,
+                ex=PROCESSING_LOCK_TTL_SECONDS,
+            )
         )
-        return bool(acquired)
     except Exception as exc:
-        # PostgreSQL duplicate protection still exists, so a Redis outage must not
-        # make audio permanently unprocessable.
         logger.warning("Could not acquire audio processing lock: %s", exc)
         return True
     finally:
         await redis.aclose()
 
 
-async def _mark_processing_done(
-    telegram_user_id: int,
-    telegram_message_id: int,
-) -> None:
+async def _mark_processing_done(user_id: int, message_id: int) -> None:
     redis = Redis.from_url(settings.redis_url, decode_responses=True)
     try:
         await redis.set(
-            _processing_key(telegram_user_id, telegram_message_id),
+            _processing_key(user_id, message_id),
             "done",
             ex=PROCESSING_LOCK_TTL_SECONDS,
         )
@@ -76,13 +68,10 @@ async def _mark_processing_done(
         await redis.aclose()
 
 
-async def _release_processing_lock(
-    telegram_user_id: int,
-    telegram_message_id: int,
-) -> None:
+async def _release_processing_lock(user_id: int, message_id: int) -> None:
     redis = Redis.from_url(settings.redis_url, decode_responses=True)
     try:
-        await redis.delete(_processing_key(telegram_user_id, telegram_message_id))
+        await redis.delete(_processing_key(user_id, message_id))
     except Exception as exc:
         logger.warning("Could not release audio processing lock: %s", exc)
     finally:
@@ -92,9 +81,11 @@ async def _release_processing_lock(
 @celery_app.task(
     bind=True,
     name="app.tasks.voice_note_tasks.process_voice_note",
-    max_retries=3,
-    default_retry_delay=10,
+    max_retries=2,
+    default_retry_delay=15,
     acks_late=True,
+    soft_time_limit=15 * 60,
+    time_limit=17 * 60,
 )
 def process_voice_note(
     self,
@@ -114,17 +105,21 @@ def process_voice_note(
                 file_id=file_id,
                 file_extension=file_extension,
                 target_kommo_lead_id=target_kommo_lead_id,
+                notify_failure=False,
             )
         )
     except Exception as exc:
         logger.exception("Audio processing failed")
+        if self.request.retries < self.max_retries:
+            raise self.retry(exc=exc)
         _run(
             telegram_service.send_message(
-                chat_id=chat_id,
-                text="❌ Ошибка обработки аудио. Подробности сохранены в Railway Logs.",
+                chat_id,
+                "❌ <b>Не удалось обработать аудио</b>\n\n"
+                "Откройте <b>Статус обработки</b> в меню и попробуйте отправить файл ещё раз.",
             )
         )
-        raise self.retry(exc=exc)
+        raise
 
 
 async def process_voice_note_async(
@@ -135,8 +130,8 @@ async def process_voice_note_async(
     file_id: str,
     file_extension: str = "ogg",
     target_kommo_lead_id: int | None = None,
+    notify_failure: bool = True,
 ) -> None:
-    """Run the same pipeline inside the web process as a safe queue fallback."""
     await _process(
         chat_id=chat_id,
         telegram_user_id=telegram_user_id,
@@ -144,17 +139,20 @@ async def process_voice_note_async(
         file_id=file_id,
         file_extension=file_extension,
         target_kommo_lead_id=target_kommo_lead_id,
+        notify_failure=notify_failure,
     )
 
 
 async def _process(
+    *,
     chat_id: int,
     telegram_user_id: int,
     telegram_message_id: int,
     file_id: str,
     file_extension: str,
     target_kommo_lead_id: int | None = None,
-):
+    notify_failure: bool = True,
+) -> None:
     if not await _acquire_processing_lock(telegram_user_id, telegram_message_id):
         logger.info(
             "Audio processing already claimed: user_id=%s message_id=%s",
@@ -163,51 +161,73 @@ async def _process(
         )
         return
 
+    voice_note = None
     try:
         async with AsyncSessionLocal() as db:
-            existing_result = await db.execute(
-                select(VoiceNote.id).where(
-                    VoiceNote.telegram_user_id == telegram_user_id,
-                    VoiceNote.telegram_message_id == telegram_message_id,
-                )
+            voice_note, created = await crm_service.get_or_create_voice_note_job(
+                db,
+                telegram_user_id=telegram_user_id,
+                telegram_message_id=telegram_message_id,
+                processing_status="received",
             )
-            existing_voice_note_id = existing_result.scalar_one_or_none()
-            if existing_voice_note_id is not None:
+            if not created and voice_note.processing_status == "ready":
                 logger.info(
-                    "Duplicate audio task skipped: user_id=%s message_id=%s existing_voice_note_id=%s",
-                    telegram_user_id,
-                    telegram_message_id,
-                    existing_voice_note_id,
+                    "Completed duplicate audio job skipped: voice_note_id=%s",
+                    voice_note.id,
                 )
                 await _mark_processing_done(telegram_user_id, telegram_message_id)
                 return
+            if not created and voice_note.processing_status in {
+                "downloading",
+                "transcribing",
+                "analyzing",
+                "saving",
+            }:
+                logger.info(
+                    "Active duplicate audio job skipped: voice_note_id=%s",
+                    voice_note.id,
+                )
+                return
 
+            await crm_service.update_voice_note_status(db, voice_note, "downloading")
+            await telegram_service.send_processing_step(
+                chat_id,
+                "download",
+                target_kommo_lead_id=target_kommo_lead_id,
+            )
             logger.info("Downloading Telegram audio")
             audio_bytes = await telegram_service.download_voice(file_id)
+            audio_url = await storage_service.save_audio(
+                audio_bytes, extension=file_extension
+            )
 
-            audio_url = await storage_service.save_audio(audio_bytes, extension=file_extension)
-            logger.info("Audio saved to configured storage")
-
-            await telegram_service.send_message(chat_id, "🔄 Расшифровываю аудио...")
+            await crm_service.update_voice_note_status(db, voice_note, "transcribing")
+            await telegram_service.send_processing_step(
+                chat_id,
+                "transcribe",
+                target_kommo_lead_id=target_kommo_lead_id,
+            )
             transcript, language = await transcription_service.transcribe_audio(
                 audio_bytes,
                 filename=f"audio.{file_extension}",
             )
             logger.info("Transcription complete: %d chars", len(transcript))
 
-            await telegram_service.send_message(chat_id, "🧠 Анализирую разговор...")
+            await crm_service.update_voice_note_status(db, voice_note, "analyzing")
+            await telegram_service.send_processing_step(
+                chat_id,
+                "analyze",
+                target_kommo_lead_id=target_kommo_lead_id,
+            )
             analysis = await ai_analysis_service.analyse_transcript(transcript)
 
-            client_data = analysis.get("client", {})
-            lead_data = analysis.get("lead", {})
-
-            client = await crm_service.upsert_client(db, client_data)
-            lead = await crm_service.create_lead(db, client, lead_data)
-            voice_note = await crm_service.save_voice_note(
-                db=db,
+            await crm_service.update_voice_note_status(db, voice_note, "saving")
+            client = await crm_service.upsert_client(db, analysis.get("client", {}))
+            lead = await crm_service.create_lead(db, client, analysis.get("lead", {}))
+            voice_note = await crm_service.complete_voice_note_job(
+                db,
+                voice_note,
                 lead=lead,
-                telegram_user_id=telegram_user_id,
-                telegram_message_id=telegram_message_id,
                 audio_url=audio_url,
                 transcript=transcript,
                 language=language,
@@ -225,6 +245,30 @@ async def _process(
             logger.info("Approval report sent for voice_note_id=%d", voice_note.id)
 
         await _mark_processing_done(telegram_user_id, telegram_message_id)
-    except Exception:
+    except Exception as exc:
+        logger.exception("Voice note pipeline failed")
+        if voice_note is not None:
+            try:
+                async with AsyncSessionLocal() as error_db:
+                    refreshed = await error_db.get(type(voice_note), int(voice_note.id))
+                    if refreshed:
+                        await crm_service.update_voice_note_status(
+                            error_db,
+                            refreshed,
+                            "failed",
+                            error=str(exc),
+                            finished=True,
+                        )
+            except Exception:
+                logger.exception("Could not persist failed audio status")
+        if notify_failure:
+            try:
+                await telegram_service.send_message(
+                    chat_id,
+                    "❌ <b>Обработка аудио остановлена</b>\n\n"
+                    "Ошибка сохранена в статусе задания. Откройте /jobs и повторите отправку файла.",
+                )
+            except Exception:
+                logger.exception("Could not notify user about failed audio processing")
         await _release_processing_lock(telegram_user_id, telegram_message_id)
         raise

@@ -1,6 +1,7 @@
 """
 auth.py — Google OAuth2 flow for Gmail & Calendar access.
 """
+
 from fastapi import APIRouter, Request
 from fastapi.responses import RedirectResponse, HTMLResponse
 from google_auth_oauthlib.flow import Flow
@@ -28,7 +29,6 @@ async def google_login():
 async def google_callback(request: Request):
     """Handle Google OAuth callback and save credentials."""
     from pathlib import Path
-    from google.oauth2.credentials import Credentials
 
     flow = Flow.from_client_secrets_file(
         settings.google_credentials_file,
@@ -40,4 +40,6 @@ async def google_callback(request: Request):
     token_path = Path(settings.google_token_file)
     token_path.parent.mkdir(parents=True, exist_ok=True)
     token_path.write_text(creds.to_json())
-    return HTMLResponse("<h2>✅ Google authorization successful! You can close this tab.</h2>")
+    return HTMLResponse(
+        "<h2>✅ Google authorization successful! You can close this tab.</h2>"
+    )

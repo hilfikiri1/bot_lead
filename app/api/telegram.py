@@ -1,4 +1,5 @@
 """FastAPI router for the Telegram webhook and Kommo manager menu."""
+
 from __future__ import annotations
 
 import asyncio
@@ -21,6 +22,7 @@ from app.database import get_db
 from app.services import (
     approval_service,
     calendar_service,
+    crm_service,
     kommo_service,
     telegram_service,
     telegram_state_service,
@@ -173,7 +175,10 @@ def _manager_tz() -> ZoneInfo:
     try:
         return ZoneInfo(settings.manager_timezone)
     except Exception:
-        logger.warning("Invalid MANAGER_TIMEZONE=%s, falling back to UTC", settings.manager_timezone)
+        logger.warning(
+            "Invalid MANAGER_TIMEZONE=%s, falling back to UTC",
+            settings.manager_timezone,
+        )
         return ZoneInfo("UTC")
 
 
@@ -222,7 +227,30 @@ def _parse_manager_datetime(value: str) -> datetime:
 
 
 def _format_manager_datetime(value: datetime) -> str:
-    return value.astimezone(_manager_tz()).strftime("%d.%m.%Y %H:%M") + f" ({settings.manager_timezone})"
+    return (
+        value.astimezone(_manager_tz()).strftime("%d.%m.%Y %H:%M")
+        + f" ({settings.manager_timezone})"
+    )
+
+
+def _quick_manager_datetime(choice: str) -> datetime:
+    tz = _manager_tz()
+    now = datetime.now(tz=tz)
+    mapping = {
+        "today17": (0, 17, 0),
+        "tomorrow10": (1, 10, 0),
+        "tomorrow15": (1, 15, 0),
+        "tomorrow18": (1, 18, 0),
+    }
+    if choice not in mapping:
+        raise ValueError("Неизвестный быстрый срок.")
+    days, hour, minute = mapping[choice]
+    target = (now + timedelta(days=days)).replace(
+        hour=hour, minute=minute, second=0, microsecond=0
+    )
+    if target <= now:
+        target += timedelta(days=1)
+    return target
 
 
 async def _audio_queue_watchdog(
@@ -235,7 +263,9 @@ async def _audio_queue_watchdog(
     await asyncio.sleep(delay)
 
     try:
-        state = await asyncio.to_thread(lambda: AsyncResult(task_id, app=celery_app).state)
+        state = await asyncio.to_thread(
+            lambda: AsyncResult(task_id, app=celery_app).state
+        )
     except Exception as exc:
         logger.warning("Could not read Celery task state %s: %s", task_id, exc)
         state = "PENDING"
@@ -319,6 +349,53 @@ async def _handle_kommo_test(chat_id: int, user_id: int, db: AsyncSession) -> No
     await telegram_service.send_message(chat_id, message)
 
 
+async def _show_audio_jobs(
+    chat_id: int,
+    user_id: int,
+    db: AsyncSession,
+) -> None:
+    jobs = await crm_service.recent_audio_jobs(db, telegram_user_id=user_id, limit=8)
+    await telegram_service.send_message(
+        chat_id,
+        telegram_service.format_audio_jobs(jobs),
+        reply_markup={
+            "inline_keyboard": [
+                [{"text": "🔄 Обновить", "callback_data": "menu:jobs"}],
+                [{"text": "🏠 Главное меню", "callback_data": "menu:home"}],
+            ]
+        },
+    )
+
+
+async def _show_creation_preview(
+    chat_id: int,
+    user_id: int,
+    db: AsyncSession | None,
+    *,
+    lead_id: int,
+    voice_note_id: int,
+    draft: dict[str, Any] | None = None,
+) -> None:
+    if draft is None:
+        if db is None:
+            raise ValueError("Database session is required for a new preview")
+        draft = await approval_service.build_kommo_creation_draft(
+            db, lead_id=lead_id, voice_note_id=voice_note_id
+        )
+    await telegram_state_service.set_state(
+        user_id,
+        {
+            "mode": "kommo_create_preview",
+            "chat_id": chat_id,
+            "local_lead_id": lead_id,
+            "voice_note_id": voice_note_id,
+            "draft": draft,
+        },
+        ttl_seconds=settings.telegram_state_ttl_minutes * 60,
+    )
+    await telegram_service.send_kommo_creation_preview(chat_id, draft)
+
+
 async def _show_lead_page(chat_id: int, user_id: int, page: int = 1) -> None:
     if not _is_allowed_user(user_id):
         await telegram_service.send_message(chat_id, "Доступ запрещён.")
@@ -355,7 +432,9 @@ async def _prompt_search(chat_id: int, user_id: int) -> None:
             "Отправьте ID сделки или часть названия клиента/товара."
         ),
         reply_markup={
-            "inline_keyboard": [[{"text": "❌ Отмена", "callback_data": "state:cancel"}]]
+            "inline_keyboard": [
+                [{"text": "❌ Отмена", "callback_data": "state:cancel"}]
+            ]
         },
     )
 
@@ -387,7 +466,9 @@ async def _prompt_text_note(
             "Отправьте текст примечания одним сообщением. Перед записью в Kommo бот покажет подтверждение."
         ),
         reply_markup={
-            "inline_keyboard": [[{"text": "❌ Отмена", "callback_data": "state:cancel"}]]
+            "inline_keyboard": [
+                [{"text": "❌ Отмена", "callback_data": "state:cancel"}]
+            ]
         },
     )
 
@@ -420,7 +501,9 @@ async def _prompt_followup_audio(
             "После анализа появится кнопка подтверждения. Новая сделка в Kommo создана не будет."
         ),
         reply_markup={
-            "inline_keyboard": [[{"text": "❌ Отмена", "callback_data": "state:cancel"}]]
+            "inline_keyboard": [
+                [{"text": "❌ Отмена", "callback_data": "state:cancel"}]
+            ]
         },
     )
 
@@ -435,7 +518,7 @@ async def _prompt_kommo_task(
     await telegram_state_service.set_state(
         user_id,
         {
-            "mode": "awaiting_task_input",
+            "mode": "awaiting_task_text",
             "chat_id": chat_id,
             "kommo_lead_id": lead_id,
             "lead_name": details.get("name"),
@@ -447,16 +530,15 @@ async def _prompt_kommo_task(
     await telegram_service.send_message(
         chat_id,
         (
-            "✅ <b>Новая задача в Kommo</b>\n\n"
-            f"Сделка: <b>{html.escape(str(details.get('name') or '—'))}</b>\n"
-            f"ID: <code>{lead_id}</code>\n\n"
-            "Отправьте одним сообщением:\n"
-            "<code>Текст задачи | ДД.ММ.ГГГГ ЧЧ:ММ</code>\n\n"
-            "Пример:\n"
-            "<code>Позвонить клиенту и уточнить количество | завтра 10:00</code>"
+            "✅ <b>Шаг 1 из 2 · Новая задача</b>\n\n"
+            f"Сделка: <b>{html.escape(str(details.get('name') or '—'))}</b>\n\n"
+            "Напишите, что нужно сделать. Например: "
+            "<i>Позвонить клиенту и уточнить количество</i>."
         ),
         reply_markup={
-            "inline_keyboard": [[{"text": "❌ Отмена", "callback_data": "state:cancel"}]]
+            "inline_keyboard": [
+                [{"text": "❌ Отмена", "callback_data": "state:cancel"}]
+            ]
         },
     )
 
@@ -471,7 +553,7 @@ async def _prompt_calendar_event(
     await telegram_state_service.set_state(
         user_id,
         {
-            "mode": "awaiting_calendar_input",
+            "mode": "awaiting_calendar_title",
             "chat_id": chat_id,
             "kommo_lead_id": lead_id,
             "lead_name": details.get("name"),
@@ -483,16 +565,14 @@ async def _prompt_calendar_event(
     await telegram_service.send_message(
         chat_id,
         (
-            "📅 <b>Новое событие календаря</b>\n\n"
-            f"Сделка: <b>{html.escape(str(details.get('name') or '—'))}</b>\n"
-            f"ID: <code>{lead_id}</code>\n\n"
-            "Отправьте одним сообщением:\n"
-            "<code>Название | ДД.ММ.ГГГГ ЧЧ:ММ | длительность в минутах</code>\n\n"
-            "Пример:\n"
-            "<code>Созвон с клиентом | завтра 10:00 | 30</code>"
+            "📅 <b>Шаг 1 из 3 · Событие</b>\n\n"
+            f"Сделка: <b>{html.escape(str(details.get('name') or '—'))}</b>\n\n"
+            "Напишите название события. Например: <i>Созвон с клиентом</i>."
         ),
         reply_markup={
-            "inline_keyboard": [[{"text": "❌ Отмена", "callback_data": "state:cancel"}]]
+            "inline_keyboard": [
+                [{"text": "❌ Отмена", "callback_data": "state:cancel"}]
+            ]
         },
     )
 
@@ -515,6 +595,9 @@ async def _handle_manager_callback(
     if callback_data == "menu:test":
         await _handle_kommo_test(chat_id, user_id, db)
         return True
+    if callback_data == "menu:jobs":
+        await _show_audio_jobs(chat_id, user_id, db)
+        return True
     if callback_data == "menu:search":
         await _prompt_search(chat_id, user_id)
         return True
@@ -523,8 +606,9 @@ async def _handle_manager_callback(
         await telegram_service.send_message(
             chat_id,
             (
-                "🎙 Отправьте голосовое сообщение или аудиофайл. После анализа нажмите "
-                "<b>«Добавить лид в Kommo»</b>."
+                "🎙 <b>Новый разговор</b>\n\n"
+                "Отправьте голосовое сообщение или аудиофайл. Бот покажет прогресс, "
+                "сформирует анализ на русском и подготовит карточку нового лида."
             ),
             reply_markup={
                 "inline_keyboard": [[{"text": "🏠 Меню", "callback_data": "menu:home"}]]
@@ -562,6 +646,203 @@ async def _handle_manager_callback(
         _, _, lead_id_raw, page_raw = callback_data.split(":", 3)
         await _prompt_calendar_event(chat_id, user_id, int(lead_id_raw), int(page_raw))
         return True
+    if callback_data.startswith("leadcreate:preview:"):
+        _, _, lead_id_raw, voice_note_id_raw = callback_data.split(":", 3)
+        await _show_creation_preview(
+            chat_id,
+            user_id,
+            db,
+            lead_id=int(lead_id_raw),
+            voice_note_id=int(voice_note_id_raw),
+        )
+        return True
+    if callback_data.startswith("leadcreate:edit:"):
+        field = callback_data.rsplit(":", 1)[1]
+        state = await telegram_state_service.get_state(user_id)
+        if not state or state.get("mode") != "kommo_create_preview":
+            await telegram_service.send_message(
+                chat_id, "⚠️ Предпросмотр устарел. Подготовьте лид заново."
+            )
+            return True
+        prompts = {
+            "number": "Введите внутренний номер лида. Например: <code>174</code>. Отправьте <code>-</code>, чтобы убрать номер.",
+            "name": "Введите полное название сделки. Например: <code>174 Лазерная резка металла</code>.",
+            "client": "Введите имя клиента. Отправьте <code>-</code>, если имя неизвестно.",
+            "product": "Кратко укажите, что ищет клиент.",
+            "budget": "Введите бюджет или ориентир. Отправьте <code>-</code>, если не указан.",
+            "city": "Введите город доставки. Отправьте <code>-</code>, если не указан.",
+        }
+        if field not in prompts:
+            await telegram_service.send_message(chat_id, "❌ Неизвестное поле.")
+            return True
+        await telegram_state_service.set_state(
+            user_id,
+            {**state, "mode": "kommo_create_edit", "edit_field": field},
+            ttl_seconds=settings.telegram_state_ttl_minutes * 60,
+        )
+        await telegram_service.send_message(
+            chat_id,
+            f"✏️ <b>Редактирование</b>\n\n{prompts[field]}",
+            reply_markup={
+                "inline_keyboard": [
+                    [{"text": "↩️ К предпросмотру", "callback_data": "leadcreate:back"}]
+                ]
+            },
+        )
+        return True
+    if callback_data == "leadcreate:back":
+        state = await telegram_state_service.get_state(user_id)
+        if not state or not state.get("draft"):
+            await telegram_service.send_message(chat_id, "⚠️ Предпросмотр устарел.")
+            return True
+        await _show_creation_preview(
+            chat_id,
+            user_id,
+            db,
+            lead_id=int(state["local_lead_id"]),
+            voice_note_id=int(state["voice_note_id"]),
+            draft=dict(state["draft"]),
+        )
+        return True
+    if callback_data == "leadcreate:cancel":
+        await telegram_state_service.clear_state(user_id)
+        await telegram_service.send_message(
+            chat_id, "❌ Создание лида отменено. Данные в Kommo не изменялись."
+        )
+        await telegram_service.send_main_menu(chat_id)
+        return True
+    if callback_data == "leadcreate:confirm":
+        state = await telegram_state_service.get_state(user_id)
+        if not state or state.get("mode") != "kommo_create_preview":
+            await telegram_service.send_message(
+                chat_id, "⚠️ Подтверждение устарело. Подготовьте лид заново."
+            )
+            return True
+        await telegram_service.send_message(chat_id, "⏳ Создаю лид в Kommo…")
+        result = await approval_service.execute_kommo_create_from_draft(
+            db,
+            lead_id=int(state["local_lead_id"]),
+            voice_note_id=int(state["voice_note_id"]),
+            draft=dict(state["draft"]),
+            telegram_user_id=user_id,
+        )
+        await telegram_state_service.clear_state(user_id)
+        await telegram_service.send_message(chat_id, result)
+        await telegram_service.send_main_menu(chat_id)
+        return True
+
+    if callback_data.startswith("taskdate:"):
+        choice = callback_data.split(":", 1)[1]
+        state = await telegram_state_service.get_state(user_id)
+        if not state or state.get("mode") != "awaiting_task_date":
+            await telegram_service.send_message(chat_id, "⚠️ Мастер задачи устарел.")
+            return True
+        if choice == "custom":
+            await telegram_state_service.set_state(
+                user_id,
+                {**state, "mode": "awaiting_task_custom_date"},
+                ttl_seconds=settings.telegram_state_ttl_minutes * 60,
+            )
+            await telegram_service.send_message(
+                chat_id,
+                "🕒 Введите дату и время. Например: <code>завтра 10:00</code> или <code>30.06.2026 15:30</code>.",
+            )
+            return True
+        due_dt = _quick_manager_datetime(choice)
+        due_display = _format_manager_datetime(due_dt)
+        await telegram_state_service.set_state(
+            user_id,
+            {
+                **state,
+                "mode": "pending_task_confirmation",
+                "complete_till": int(due_dt.astimezone(timezone.utc).timestamp()),
+                "due_display": due_display,
+            },
+            ttl_seconds=settings.telegram_state_ttl_minutes * 60,
+        )
+        await telegram_service.send_task_confirmation(
+            chat_id,
+            lead_id=int(state["kommo_lead_id"]),
+            lead_name=str(state.get("lead_name") or "—"),
+            task_text=str(state.get("task_text") or ""),
+            due_display=due_display,
+            return_page=int(state.get("return_page") or 1),
+        )
+        return True
+
+    if callback_data.startswith("caldate:"):
+        choice = callback_data.split(":", 1)[1]
+        state = await telegram_state_service.get_state(user_id)
+        if not state or state.get("mode") != "awaiting_calendar_date":
+            await telegram_service.send_message(chat_id, "⚠️ Мастер календаря устарел.")
+            return True
+        if choice == "custom":
+            await telegram_state_service.set_state(
+                user_id,
+                {**state, "mode": "awaiting_calendar_custom_date"},
+                ttl_seconds=settings.telegram_state_ttl_minutes * 60,
+            )
+            await telegram_service.send_message(
+                chat_id,
+                "🕒 Введите дату и время. Например: <code>завтра 10:00</code> или <code>30.06.2026 15:30</code>.",
+            )
+            return True
+        start_dt = _quick_manager_datetime(choice)
+        await telegram_state_service.set_state(
+            user_id,
+            {
+                **state,
+                "mode": "awaiting_calendar_duration",
+                "start_iso": start_dt.isoformat(),
+                "start_display": _format_manager_datetime(start_dt),
+            },
+            ttl_seconds=settings.telegram_state_ttl_minutes * 60,
+        )
+        await telegram_service.send_message(
+            chat_id,
+            "⏱ <b>Шаг 3 из 3 · Длительность</b>\n\nВыберите продолжительность:",
+            reply_markup={
+                "inline_keyboard": [
+                    [
+                        {"text": "15 мин", "callback_data": "caldur:15"},
+                        {"text": "30 мин", "callback_data": "caldur:30"},
+                    ],
+                    [
+                        {"text": "45 мин", "callback_data": "caldur:45"},
+                        {"text": "60 мин", "callback_data": "caldur:60"},
+                    ],
+                    [{"text": "❌ Отмена", "callback_data": "state:cancel"}],
+                ]
+            },
+        )
+        return True
+
+    if callback_data.startswith("caldur:"):
+        duration = int(callback_data.split(":", 1)[1])
+        state = await telegram_state_service.get_state(user_id)
+        if not state or state.get("mode") != "awaiting_calendar_duration":
+            await telegram_service.send_message(chat_id, "⚠️ Мастер календаря устарел.")
+            return True
+        await telegram_state_service.set_state(
+            user_id,
+            {
+                **state,
+                "mode": "pending_calendar_confirmation",
+                "duration_minutes": duration,
+            },
+            ttl_seconds=settings.telegram_state_ttl_minutes * 60,
+        )
+        await telegram_service.send_calendar_confirmation(
+            chat_id,
+            lead_id=int(state["kommo_lead_id"]),
+            lead_name=str(state.get("lead_name") or "—"),
+            title=str(state.get("calendar_title") or "Созвон с клиентом"),
+            start_display=str(state.get("start_display") or "—"),
+            duration_minutes=duration,
+            return_page=int(state.get("return_page") or 1),
+        )
+        return True
+
     if callback_data == "state:cancel":
         await telegram_state_service.clear_state(user_id)
         await telegram_service.send_message(chat_id, "❌ Действие отменено.")
@@ -584,7 +865,9 @@ async def _handle_manager_callback(
             )
             return True
         if int(state.get("kommo_lead_id") or 0) != lead_id:
-            await telegram_service.send_message(chat_id, "❌ Сделка в подтверждении не совпадает.")
+            await telegram_service.send_message(
+                chat_id, "❌ Сделка в подтверждении не совпадает."
+            )
             return True
         result = await kommo_service.add_text_note(
             lead_id,
@@ -616,10 +899,14 @@ async def _handle_manager_callback(
         lead_id = int(lead_id_raw)
         state = await telegram_state_service.get_state(user_id)
         if not state or state.get("mode") != "pending_task_confirmation":
-            await telegram_service.send_message(chat_id, "⚠️ Подтверждение задачи устарело.")
+            await telegram_service.send_message(
+                chat_id, "⚠️ Подтверждение задачи устарело."
+            )
             return True
         if int(state.get("kommo_lead_id") or 0) != lead_id:
-            await telegram_service.send_message(chat_id, "❌ Сделка в подтверждении не совпадает.")
+            await telegram_service.send_message(
+                chat_id, "❌ Сделка в подтверждении не совпадает."
+            )
             return True
         result = await kommo_service.create_lead_task(
             lead_id=lead_id,
@@ -662,10 +949,14 @@ async def _handle_manager_callback(
         lead_id = int(lead_id_raw)
         state = await telegram_state_service.get_state(user_id)
         if not state or state.get("mode") != "pending_calendar_confirmation":
-            await telegram_service.send_message(chat_id, "⚠️ Подтверждение события устарело.")
+            await telegram_service.send_message(
+                chat_id, "⚠️ Подтверждение события устарело."
+            )
             return True
         if int(state.get("kommo_lead_id") or 0) != lead_id:
-            await telegram_service.send_message(chat_id, "❌ Сделка в подтверждении не совпадает.")
+            await telegram_service.send_message(
+                chat_id, "❌ Сделка в подтверждении не совпадает."
+            )
             return True
         description = (
             f"Kommo: {state.get('lead_name') or lead_id}\n"
@@ -719,27 +1010,102 @@ async def _handle_text_state(
         )
         return True
 
-    if mode == "awaiting_task_input":
-        parts = [part.strip() for part in text.split("|", 1)]
-        if len(parts) != 2 or not parts[0] or not parts[1]:
-            await telegram_service.send_message(
-                chat_id,
-                "Используйте формат: <code>Текст задачи | завтра 10:00</code>",
-            )
+    if mode == "kommo_create_edit":
+        field = str(state.get("edit_field") or "")
+        value = text.strip()
+        draft = dict(state.get("draft") or {})
+        if value == "-":
+            value = ""
+        mapping = {
+            "number": "lead_number",
+            "name": "lead_name",
+            "client": "client_name",
+            "product": "product_requested",
+            "budget": "budget",
+            "city": "city",
+        }
+        target = mapping.get(field)
+        if not target:
+            await telegram_service.send_message(chat_id, "❌ Неизвестное поле.")
             return True
+        draft[target] = value or None
+        if field == "number":
+            base = str(
+                draft.get("lead_name")
+                or draft.get("product_requested")
+                or "Новый запрос"
+            )
+            base_without_number = base
+            if base.split(maxsplit=1)[0].isdigit():
+                base_without_number = (
+                    base.split(maxsplit=1)[1]
+                    if len(base.split(maxsplit=1)) > 1
+                    else "Новый запрос"
+                )
+            draft["lead_name"] = (
+                f"{value} {base_without_number}".strip()
+                if value
+                else base_without_number
+            )
+        elif field == "product" and not draft.get("lead_name"):
+            draft["lead_name"] = value
+        await _show_creation_preview(
+            chat_id,
+            user_id,
+            db=None,
+            lead_id=int(state["local_lead_id"]),
+            voice_note_id=int(state["voice_note_id"]),
+            draft=draft,
+        )
+        return True
+
+    if mode == "awaiting_task_text":
+        task_text = text.strip()
+        if not task_text:
+            await telegram_service.send_message(chat_id, "Текст задачи пустой.")
+            return True
+        await telegram_state_service.set_state(
+            user_id,
+            {**state, "mode": "awaiting_task_date", "task_text": task_text},
+            ttl_seconds=settings.telegram_state_ttl_minutes * 60,
+        )
+        await telegram_service.send_message(
+            chat_id,
+            "🕒 <b>Шаг 2 из 2 · Срок задачи</b>\n\nВыберите время или введите своё:",
+            reply_markup={
+                "inline_keyboard": [
+                    [
+                        {"text": "Сегодня 17:00", "callback_data": "taskdate:today17"},
+                        {
+                            "text": "Завтра 10:00",
+                            "callback_data": "taskdate:tomorrow10",
+                        },
+                    ],
+                    [
+                        {
+                            "text": "Завтра 15:00",
+                            "callback_data": "taskdate:tomorrow15",
+                        },
+                        {"text": "Другая дата", "callback_data": "taskdate:custom"},
+                    ],
+                    [{"text": "❌ Отмена", "callback_data": "state:cancel"}],
+                ]
+            },
+        )
+        return True
+
+    if mode in {"awaiting_task_date", "awaiting_task_custom_date"}:
         try:
-            due_dt = _parse_manager_datetime(parts[1])
+            due_dt = _parse_manager_datetime(text)
         except ValueError as exc:
             await telegram_service.send_message(chat_id, f"❌ {html.escape(str(exc))}")
             return True
-
         due_display = _format_manager_datetime(due_dt)
         await telegram_state_service.set_state(
             user_id,
             {
                 **state,
                 "mode": "pending_task_confirmation",
-                "task_text": parts[0],
                 "complete_till": int(due_dt.astimezone(timezone.utc).timestamp()),
                 "due_display": due_display,
             },
@@ -749,57 +1115,82 @@ async def _handle_text_state(
             chat_id,
             lead_id=int(state["kommo_lead_id"]),
             lead_name=str(state.get("lead_name") or "—"),
-            task_text=parts[0],
+            task_text=str(state.get("task_text") or ""),
             due_display=due_display,
             return_page=int(state.get("return_page") or 1),
         )
         return True
 
-    if mode == "awaiting_calendar_input":
-        parts = [part.strip() for part in text.split("|")]
-        if len(parts) not in {2, 3} or not parts[0] or not parts[1]:
-            await telegram_service.send_message(
-                chat_id,
-                "Используйте формат: <code>Созвон с клиентом | завтра 10:00 | 30</code>",
-            )
+    if mode == "awaiting_calendar_title":
+        title = text.strip()
+        if not title:
+            await telegram_service.send_message(chat_id, "Название события пустое.")
             return True
+        await telegram_state_service.set_state(
+            user_id,
+            {**state, "mode": "awaiting_calendar_date", "calendar_title": title},
+            ttl_seconds=settings.telegram_state_ttl_minutes * 60,
+        )
+        await telegram_service.send_message(
+            chat_id,
+            "🕒 <b>Шаг 2 из 3 · Дата и время</b>\n\nВыберите вариант или введите свою дату:",
+            reply_markup={
+                "inline_keyboard": [
+                    [
+                        {"text": "Сегодня 17:00", "callback_data": "caldate:today17"},
+                        {"text": "Завтра 10:00", "callback_data": "caldate:tomorrow10"},
+                    ],
+                    [
+                        {"text": "Завтра 15:00", "callback_data": "caldate:tomorrow15"},
+                        {"text": "Другая дата", "callback_data": "caldate:custom"},
+                    ],
+                    [{"text": "❌ Отмена", "callback_data": "state:cancel"}],
+                ]
+            },
+        )
+        return True
+
+    if mode in {"awaiting_calendar_date", "awaiting_calendar_custom_date"}:
         try:
-            start_dt = _parse_manager_datetime(parts[1])
-            duration = int(parts[2]) if len(parts) == 3 and parts[2] else 30
-            if not 5 <= duration <= 480:
-                raise ValueError("Длительность должна быть от 5 до 480 минут.")
+            start_dt = _parse_manager_datetime(text)
         except ValueError as exc:
             await telegram_service.send_message(chat_id, f"❌ {html.escape(str(exc))}")
             return True
-
-        start_display = _format_manager_datetime(start_dt)
         await telegram_state_service.set_state(
             user_id,
             {
                 **state,
-                "mode": "pending_calendar_confirmation",
-                "calendar_title": parts[0],
+                "mode": "awaiting_calendar_duration",
                 "start_iso": start_dt.isoformat(),
-                "start_display": start_display,
-                "duration_minutes": duration,
+                "start_display": _format_manager_datetime(start_dt),
             },
             ttl_seconds=settings.telegram_state_ttl_minutes * 60,
         )
-        await telegram_service.send_calendar_confirmation(
+        await telegram_service.send_message(
             chat_id,
-            lead_id=int(state["kommo_lead_id"]),
-            lead_name=str(state.get("lead_name") or "—"),
-            title=parts[0],
-            start_display=start_display,
-            duration_minutes=duration,
-            return_page=int(state.get("return_page") or 1),
+            "⏱ <b>Шаг 3 из 3 · Длительность</b>\n\nВыберите продолжительность:",
+            reply_markup={
+                "inline_keyboard": [
+                    [
+                        {"text": "15 мин", "callback_data": "caldur:15"},
+                        {"text": "30 мин", "callback_data": "caldur:30"},
+                    ],
+                    [
+                        {"text": "45 мин", "callback_data": "caldur:45"},
+                        {"text": "60 мин", "callback_data": "caldur:60"},
+                    ],
+                    [{"text": "❌ Отмена", "callback_data": "state:cancel"}],
+                ]
+            },
         )
         return True
 
     if mode == "awaiting_text_note":
         note_text = text.strip()
         if not note_text:
-            await telegram_service.send_message(chat_id, "Примечание пустое. Отправьте текст.")
+            await telegram_service.send_message(
+                chat_id, "Примечание пустое. Отправьте текст."
+            )
             return True
         lead_id = int(state["kommo_lead_id"])
         return_page = int(state.get("return_page") or 1)
@@ -933,6 +1324,10 @@ async def telegram_webhook(
             await _handle_kommo_test(chat_id, user_id, db)
             return {"ok": True}
 
+        if text.startswith("/jobs"):
+            await _show_audio_jobs(chat_id, user_id, db)
+            return {"ok": True}
+
         if text.startswith(("/kommo_leads", "/open_deals", "/deals")):
             await _show_lead_page(chat_id, user_id, 1)
             return {"ok": True}
@@ -940,12 +1335,16 @@ async def telegram_webhook(
         if text.startswith("/lead"):
             parts = text.split(maxsplit=1)
             if len(parts) != 2 or not parts[1].strip().isdigit():
-                await telegram_service.send_message(chat_id, "Использование: <code>/lead 123456</code>")
+                await telegram_service.send_message(
+                    chat_id, "Использование: <code>/lead 123456</code>"
+                )
             else:
                 await _show_lead_details(chat_id, int(parts[1].strip()), return_page=1)
             return {"ok": True}
 
-        if text and await _handle_text_state(chat_id=chat_id, user_id=user_id, text=text):
+        if text and await _handle_text_state(
+            chat_id=chat_id, user_id=user_id, text=text
+        ):
             return {"ok": True}
 
         attachment = _extract_audio_attachment(message)
@@ -954,10 +1353,17 @@ async def telegram_webhook(
             if state and state.get("mode") in {
                 "awaiting_text_note",
                 "pending_note_confirmation",
-                "awaiting_task_input",
+                "awaiting_task_text",
+                "awaiting_task_date",
+                "awaiting_task_custom_date",
                 "pending_task_confirmation",
-                "awaiting_calendar_input",
+                "awaiting_calendar_title",
+                "awaiting_calendar_date",
+                "awaiting_calendar_custom_date",
+                "awaiting_calendar_duration",
                 "pending_calendar_confirmation",
+                "kommo_create_edit",
+                "kommo_create_preview",
             }:
                 await telegram_service.send_message(
                     chat_id,
@@ -999,7 +1405,9 @@ async def telegram_webhook(
                 "file_extension": attachment["file_extension"],
                 "target_kommo_lead_id": target_kommo_lead_id,
             }
-            processing_mode = (settings.audio_processing_mode or "direct").strip().lower()
+            processing_mode = (
+                (settings.audio_processing_mode or "direct").strip().lower()
+            )
 
             if processing_mode != "celery":
                 logger.info(
@@ -1065,7 +1473,9 @@ async def telegram_webhook(
                         ),
                     )
             except Exception:
-                logger.exception("Could not queue voice/audio processing task; starting direct processing")
+                logger.exception(
+                    "Could not queue voice/audio processing task; starting direct processing"
+                )
                 _spawn_background(process_voice_note_async(**process_kwargs))
                 await telegram_service.send_message(
                     chat_id,

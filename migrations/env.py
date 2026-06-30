@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 from alembic import context
 
 from app.database import Base
-from app.models import client, lead, voice_note, ai_report, action  # noqa – register models
+from app.models import action, ai_report, client, integration_check, lead, voice_note  # noqa: F401
 
 config = context.config
 
@@ -36,6 +36,7 @@ def do_run_migrations(connection: Connection) -> None:
 
 async def run_async_migrations() -> None:
     from app.config import get_settings
+
     settings = get_settings()
     configuration = config.get_section(config.config_ini_section, {})
     configuration["sqlalchemy.url"] = settings.database_url

@@ -19,7 +19,9 @@ celery_app.conf.update(
     task_track_started=True,
     worker_concurrency=2,
     task_acks_late=True,
+    task_reject_on_worker_lost=True,
     worker_prefetch_multiplier=1,
+    result_expires=24 * 60 * 60,
     task_routes={
         "app.tasks.voice_note_tasks.process_voice_note": {"queue": "voice_notes"},
     },

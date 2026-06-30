@@ -2,9 +2,9 @@
 storage_service.py
 Handles saving audio files to local disk or S3-compatible storage.
 """
+
 from __future__ import annotations
 
-import os
 import uuid
 import logging
 from pathlib import Path

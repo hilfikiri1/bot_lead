@@ -48,7 +48,7 @@ services:
   worker:
     build: .
     restart: unless-stopped
-    command: celery -A app.celery_app worker --loglevel=info --concurrency=4
+    command: celery -A app.celery_app:celery_app worker --loglevel=info -Q voice_notes --concurrency=2
     env_file: .env
     volumes:
       - .:/app
@@ -62,7 +62,7 @@ services:
   flower:
     build: .
     restart: unless-stopped
-    command: celery -A app.celery_app flower --port=5555
+    command: celery -A app.celery_app:celery_app flower --port=5555
     env_file: .env
     ports:
       - "5555:5555"

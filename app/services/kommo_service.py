@@ -8,6 +8,7 @@ Supports:
 
 All write operations must be initiated by an explicit Telegram button click.
 """
+
 from __future__ import annotations
 
 import logging
@@ -171,7 +172,7 @@ async def get_pipeline_index() -> tuple[dict[int, str], dict[tuple[int, int], st
         if not isinstance(pipeline_id, int):
             continue
         pipeline_names[pipeline_id] = pipeline.get("name") or f"Воронка {pipeline_id}"
-        statuses = ((pipeline.get("_embedded") or {}).get("statuses") or [])
+        statuses = (pipeline.get("_embedded") or {}).get("statuses") or []
         for status in statuses:
             status_id = status.get("id")
             if isinstance(status_id, int):
@@ -220,7 +221,7 @@ async def _resolve_configured_lead_placement() -> dict[str, int]:
             return {}
     elif configured_status:
         for pipeline in pipelines:
-            statuses = ((pipeline.get("_embedded") or {}).get("statuses") or [])
+            statuses = (pipeline.get("_embedded") or {}).get("statuses") or []
             if any(status.get("id") == configured_status for status in statuses):
                 selected_pipeline = pipeline
                 break
@@ -237,11 +238,9 @@ async def _resolve_configured_lead_placement() -> dict[str, int]:
     pipeline_id = selected_pipeline.get("id")
     result: dict[str, int] = {"pipeline_id": pipeline_id}
     if configured_status:
-        statuses = ((selected_pipeline.get("_embedded") or {}).get("statuses") or [])
+        statuses = (selected_pipeline.get("_embedded") or {}).get("statuses") or []
         valid_status_ids = {
-            status.get("id")
-            for status in statuses
-            if isinstance(status.get("id"), int)
+            status.get("id") for status in statuses if isinstance(status.get("id"), int)
         }
         if configured_status in valid_status_ids:
             result["status_id"] = configured_status
@@ -311,7 +310,7 @@ async def get_all_open_leads(max_pages: int | None = None) -> dict[str, Any]:
         if data is None:
             break
 
-        page_leads = ((data.get("_embedded") or {}).get("leads") or [])
+        page_leads = (data.get("_embedded") or {}).get("leads") or []
         scanned += len(page_leads)
         for lead in page_leads:
             if not lead.get("closed_at"):
@@ -338,7 +337,9 @@ async def get_all_open_leads(max_pages: int | None = None) -> dict[str, Any]:
                 "name": lead.get("name") or "Без названия",
                 "price": lead.get("price"),
                 "pipeline_id": pipeline_id,
-                "pipeline_name": pipeline_names.get(pipeline_id, f"Воронка {pipeline_id}"),
+                "pipeline_name": pipeline_names.get(
+                    pipeline_id, f"Воронка {pipeline_id}"
+                ),
                 "status_id": status_id,
                 "status_name": status_names.get(
                     (pipeline_id, status_id), f"Этап {status_id}"
@@ -364,7 +365,9 @@ def _normalize_phone(value: str | None) -> str:
     return re.sub(r"\D", "", value or "")
 
 
-def _contact_has_exact_value(contact: dict[str, Any], phone: str | None, email: str | None) -> bool:
+def _contact_has_exact_value(
+    contact: dict[str, Any], phone: str | None, email: str | None
+) -> bool:
     normalized_phone = _normalize_phone(phone)
     normalized_email = (email or "").strip().lower()
 
@@ -393,7 +396,7 @@ async def find_existing_contact(phone: str | None, email: str | None) -> int | N
         )
         if data is None:
             continue
-        contacts = ((data.get("_embedded") or {}).get("contacts") or [])
+        contacts = (data.get("_embedded") or {}).get("contacts") or []
         for contact in contacts:
             if _contact_has_exact_value(contact, phone, email):
                 contact_id = contact.get("id")
@@ -418,11 +421,48 @@ async def get_contact_field_ids() -> dict[str, int]:
     return result
 
 
-def _lead_title(client_data: dict[str, Any], lead_data: dict[str, Any]) -> str:
-    client_name = (client_data.get("name") or client_data.get("company") or "").strip()
-    product = (lead_data.get("product_requested") or "Новый запрос из Telegram").strip()
-    title = f"{client_name} — {product}" if client_name else product
-    return title[:255]
+def _lead_title(
+    client_data: dict[str, Any],
+    lead_data: dict[str, Any],
+    *,
+    lead_name_override: str | None = None,
+) -> str:
+    override = (lead_name_override or "").strip()
+    if override:
+        return override[:255]
+    number = str(lead_data.get("lead_number") or "").strip()
+    proposed = str(lead_data.get("proposed_name") or "").strip()
+    product = str(lead_data.get("product_requested") or "Новый запрос").strip()
+    base = proposed or product
+    if number and not base.startswith(number):
+        base = f"{number} {base}"
+    return base[:255]
+
+
+async def get_default_lead_placement_preview() -> dict[str, Any]:
+    """Return the validated destination displayed before lead creation."""
+    placement = await _resolve_configured_lead_placement()
+    pipeline_names, status_names = await get_pipeline_index()
+    pipeline_id = placement.get("pipeline_id")
+    status_id = placement.get("status_id")
+    if pipeline_id is None:
+        return {
+            "pipeline_id": None,
+            "status_id": None,
+            "pipeline_name": "Основная воронка Kommo",
+            "status_name": "Первый доступный этап",
+        }
+    return {
+        "pipeline_id": pipeline_id,
+        "status_id": status_id,
+        "pipeline_name": pipeline_names.get(pipeline_id, f"Воронка {pipeline_id}"),
+        "status_name": status_names.get(
+            (pipeline_id, status_id),
+            "Первый этап выбранной воронки"
+            if status_id is None
+            else f"Этап {status_id}",
+        ),
+    }
 
 
 async def add_common_note(lead_id: int, text: str) -> bool:
@@ -447,17 +487,22 @@ async def create_lead_from_analysis(
     recommended_next_step: str | None,
     missing_questions: list[str] | None,
     transcript: str | None,
+    lead_name_override: str | None = None,
 ) -> dict[str, Any]:
     """Create one Kommo lead after explicit human approval in Telegram."""
-    lead_payload: dict[str, Any] = {"name": _lead_title(client_data, lead_data)}
+    lead_payload: dict[str, Any] = {
+        "name": _lead_title(
+            client_data,
+            lead_data,
+            lead_name_override=lead_name_override,
+        )
+    }
     lead_payload.update(await _resolve_configured_lead_placement())
 
     phone = client_data.get("phone")
     email = client_data.get("email")
     contact_name = (
-        client_data.get("name")
-        or client_data.get("company")
-        or "Контакт из Telegram"
+        client_data.get("name") or client_data.get("company") or "Контакт из Telegram"
     )
 
     existing_contact_id = await find_existing_contact(phone, email)
@@ -491,7 +536,7 @@ async def create_lead_from_analysis(
     else:
         data = await _submit_new_lead(lead_payload, "/api/v4/leads")
 
-    created_leads = (((data or {}).get("_embedded") or {}).get("leads") or [])
+    created_leads = ((data or {}).get("_embedded") or {}).get("leads") or []
     if not created_leads:
         raise KommoAPIError("Kommo не вернул созданную сделку в ответе.")
 
@@ -500,7 +545,7 @@ async def create_lead_from_analysis(
     if not isinstance(lead_id, int):
         raise KommoAPIError("Kommo вернул сделку без корректного ID.")
 
-    embedded_contacts = ((created.get("_embedded") or {}).get("contacts") or [])
+    embedded_contacts = (created.get("_embedded") or {}).get("contacts") or []
     if not contact_id and embedded_contacts:
         maybe_contact_id = embedded_contacts[0].get("id")
         if isinstance(maybe_contact_id, int):
@@ -527,10 +572,26 @@ async def create_lead_from_analysis(
     except Exception as exc:
         logger.warning("Lead %s created, but note could not be added: %s", lead_id, exc)
 
+    pipeline_id = created.get("pipeline_id") or lead_payload.get("pipeline_id")
+    status_id = created.get("status_id") or lead_payload.get("status_id")
+    try:
+        pipeline_names, status_names = await get_pipeline_index()
+    except Exception:
+        pipeline_names, status_names = {}, {}
+
     return {
         "lead_id": lead_id,
         "lead_name": created.get("name") or lead_payload["name"],
         "contact_id": contact_id,
+        "pipeline_id": pipeline_id,
+        "pipeline_name": pipeline_names.get(
+            pipeline_id, f"Воронка {pipeline_id}" if pipeline_id else "—"
+        ),
+        "status_id": status_id,
+        "status_name": status_names.get(
+            (pipeline_id, status_id),
+            f"Этап {status_id}" if status_id else "Первый этап",
+        ),
         "note_saved": note_saved,
         "url": f"{_base_url()}/leads/detail/{lead_id}",
     }
@@ -568,7 +629,11 @@ def _flatten_custom_fields(entity: dict[str, Any]) -> list[dict[str, str]]:
     """Return human-readable custom-field values from a Kommo entity."""
     result: list[dict[str, str]] = []
     for field in entity.get("custom_fields_values") or []:
-        field_name = field.get("field_name") or field.get("field_code") or f"Поле {field.get('field_id')}"
+        field_name = (
+            field.get("field_name")
+            or field.get("field_code")
+            or f"Поле {field.get('field_id')}"
+        )
         field_code = field.get("field_code") or ""
         values: list[str] = []
         for item in field.get("values") or []:
@@ -613,7 +678,7 @@ async def get_recent_common_notes(lead_id: int, limit: int = 5) -> list[dict[str
             "filter[note_type][]": "common",
         },
     )
-    notes = (((data or {}).get("_embedded") or {}).get("notes") or [])
+    notes = ((data or {}).get("_embedded") or {}).get("notes") or []
     normalized: list[dict[str, Any]] = []
     for note in notes:
         params = note.get("params") or {}
@@ -651,7 +716,7 @@ async def get_lead_details(lead_id: int) -> dict[str, Any]:
         logger.warning("Could not load pipeline labels for lead %s: %s", lead_id, exc)
         pipeline_names, status_names = {}, {}
 
-    contact_refs = ((lead.get("_embedded") or {}).get("contacts") or [])
+    contact_refs = (lead.get("_embedded") or {}).get("contacts") or []
     contacts: list[dict[str, Any]] = []
     for ref in contact_refs[:5]:
         contact_id = ref.get("id")
@@ -660,7 +725,9 @@ async def get_lead_details(lead_id: int) -> dict[str, Any]:
         try:
             contact = await _request("GET", f"/api/v4/contacts/{contact_id}") or {}
         except Exception as exc:
-            logger.warning("Could not load contact %s for lead %s: %s", contact_id, lead_id, exc)
+            logger.warning(
+                "Could not load contact %s for lead %s: %s", contact_id, lead_id, exc
+            )
             continue
         phones, emails = _contact_channels(contact)
         contacts.append(
@@ -701,7 +768,9 @@ async def get_lead_details(lead_id: int) -> dict[str, Any]:
     }
 
 
-async def get_open_leads_page(page: int = 1, page_size: int | None = None) -> dict[str, Any]:
+async def get_open_leads_page(
+    page: int = 1, page_size: int | None = None
+) -> dict[str, Any]:
     """Return one Telegram menu page of open leads."""
     page_size = page_size or settings.kommo_menu_page_size
     page_size = max(1, min(page_size, 20))
@@ -766,7 +835,11 @@ async def search_open_leads(query: str, limit: int = 20) -> dict[str, Any]:
                 f"/api/v4/leads/{int(query)}",
                 params={"with": "contacts"},
             )
-            if exact and not exact.get("closed_at") and isinstance(exact.get("id"), int):
+            if (
+                exact
+                and not exact.get("closed_at")
+                and isinstance(exact.get("id"), int)
+            ):
                 matches[int(exact["id"])] = (-1, exact)
         except KommoAPIError as exc:
             if exc.status_code != 404:
@@ -802,7 +875,9 @@ async def search_open_leads(query: str, limit: int = 20) -> dict[str, Any]:
     }
 
 
-async def add_text_note(lead_id: int, text: str, *, source: str = "Telegram") -> dict[str, Any]:
+async def add_text_note(
+    lead_id: int, text: str, *, source: str = "Telegram"
+) -> dict[str, Any]:
     """Add a manager-confirmed text note to an existing lead."""
     clean_text = text.strip()
     if not clean_text:
@@ -892,7 +967,7 @@ async def create_lead_task(
         payload["responsible_user_id"] = assignee
 
     data = await _request("POST", "/api/v4/tasks", json_body=[payload])
-    tasks = (((data or {}).get("_embedded") or {}).get("tasks") or [])
+    tasks = ((data or {}).get("_embedded") or {}).get("tasks") or []
     created = tasks[0] if tasks else {}
     return {
         "task_id": created.get("id"),

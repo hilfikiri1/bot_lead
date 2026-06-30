@@ -1,27 +1,5 @@
-from app.services import (
-    telegram_service,
-    transcription_service,
-    ai_analysis_service,
-    storage_service,
-    gmail_service,
-    calendar_service,
-    whatsapp_service,
-    crm_service,
-    approval_service,
-    kommo_service,
-    telegram_state_service,
-)
+"""Application service package.
 
-__all__ = [
-    "telegram_service",
-    "transcription_service",
-    "ai_analysis_service",
-    "storage_service",
-    "gmail_service",
-    "calendar_service",
-    "whatsapp_service",
-    "crm_service",
-    "approval_service",
-    "kommo_service",
-    "telegram_state_service",
-]
+Service modules are imported explicitly by consumers. This prevents expensive
+third-party clients from being initialized merely by importing the package.
+"""

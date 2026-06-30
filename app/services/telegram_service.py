@@ -1,13 +1,8 @@
-"""
-Telegram Bot API helpers.
+"""Telegram Bot API transport and polished Russian-language CRM interface."""
 
-The bot token is embedded in Telegram API URLs, so this module never raises
-httpx errors containing the full request URL and therefore the token.
-"""
 from __future__ import annotations
 
 import html
-import logging
 from datetime import datetime, timezone
 from typing import Any
 
@@ -16,9 +11,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 
 from app.config import get_settings
 
-logger = logging.getLogger(__name__)
 settings = get_settings()
-
 TELEGRAM_API = f"https://api.telegram.org/bot{settings.telegram_bot_token}"
 TELEGRAM_FILE_API = f"https://api.telegram.org/file/bot{settings.telegram_bot_token}"
 TELEGRAM_MESSAGE_LIMIT = 4096
@@ -58,10 +51,7 @@ async def send_message(
     if reply_markup:
         payload["reply_markup"] = reply_markup
     async with httpx.AsyncClient(timeout=30) as client:
-        response = await client.post(
-            f"{TELEGRAM_API}/sendMessage",
-            json=payload,
-        )
+        response = await client.post(f"{TELEGRAM_API}/sendMessage", json=payload)
         _ensure_success(response, "sendMessage")
         return response.json()
 
@@ -71,11 +61,9 @@ async def send_message_chunks(
     chunks: list[str],
     parse_mode: str = "HTML",
 ) -> None:
-    """Send preformatted chunks sequentially, keeping below Telegram limits."""
     for chunk in chunks:
         if not chunk:
             continue
-        # Defensive fallback in case a formatter generated an oversized chunk.
         if len(chunk) <= TELEGRAM_MESSAGE_LIMIT:
             await send_message(chat_id, chunk, parse_mode=parse_mode)
             continue
@@ -95,55 +83,45 @@ async def send_report(
     voice_note_id: int,
     target_kommo_lead_id: int | None = None,
 ) -> dict:
-    """Send the structured AI report with explicit human-approval buttons."""
     if target_kommo_lead_id:
-        primary_button = {
-            "text": "📝 Добавить разговор в выбранную сделку",
+        primary = {
+            "text": "✅ Добавить к сделке",
             "callback_data": (
                 f"action:kommo_update:{lead_id}:{voice_note_id}:{target_kommo_lead_id}"
             ),
         }
     else:
-        primary_button = {
-            "text": "➕ Добавить лид в Kommo",
-            "callback_data": f"action:kommo_create:{lead_id}:{voice_note_id}",
+        primary = {
+            "text": "📥 Подготовить новый лид",
+            "callback_data": f"leadcreate:preview:{lead_id}:{voice_note_id}",
         }
 
-    inline_keyboard = [
-        [primary_button],
-        [
-            {
-                "text": "✉️ Создать черновик Gmail",
-                "callback_data": f"action:gmail:{lead_id}:{voice_note_id}",
-            },
-            {
-                "text": "📅 Добавить в календарь",
-                "callback_data": f"action:calendar:{lead_id}:{voice_note_id}",
-            },
-        ],
-        [
-            {
-                "text": "💬 Показать WhatsApp-текст",
-                "callback_data": f"action:whatsapp:{lead_id}:{voice_note_id}",
-            },
-            {
-                "text": "❌ Ничего не делать",
-                "callback_data": f"action:cancel:{lead_id}:{voice_note_id}",
-            },
-        ],
-    ]
-    async with httpx.AsyncClient(timeout=30) as client:
-        response = await client.post(
-            f"{TELEGRAM_API}/sendMessage",
-            json={
-                "chat_id": chat_id,
-                "text": report_text,
-                "parse_mode": "HTML",
-                "reply_markup": {"inline_keyboard": inline_keyboard},
-            },
-        )
-        _ensure_success(response, "sendMessage(report)")
-        return response.json()
+    keyboard = {
+        "inline_keyboard": [
+            [primary],
+            [
+                {
+                    "text": "💬 Текст клиенту",
+                    "callback_data": f"action:whatsapp:{lead_id}:{voice_note_id}",
+                },
+                {
+                    "text": "📅 Следующий контакт",
+                    "callback_data": f"action:calendar:{lead_id}:{voice_note_id}",
+                },
+            ],
+            [
+                {
+                    "text": "✉️ Черновик email",
+                    "callback_data": f"action:gmail:{lead_id}:{voice_note_id}",
+                },
+                {
+                    "text": "❌ Закрыть",
+                    "callback_data": f"action:cancel:{lead_id}:{voice_note_id}",
+                },
+            ],
+        ]
+    }
+    return await send_message(chat_id, report_text, reply_markup=keyboard)
 
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=10))
@@ -165,26 +143,22 @@ async def answer_callback_query(callback_query_id: str, text: str = "") -> dict:
 async def get_file_path(file_id: str) -> str:
     async with httpx.AsyncClient(timeout=15) as client:
         response = await client.get(
-            f"{TELEGRAM_API}/getFile",
-            params={"file_id": file_id},
+            f"{TELEGRAM_API}/getFile", params={"file_id": file_id}
         )
         _ensure_success(response, "getFile")
-        data = response.json()
-        return data["result"]["file_path"]
+        return response.json()["result"]["file_path"]
 
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=10))
 async def download_file(file_path: str) -> bytes:
-    url = f"{TELEGRAM_FILE_API}/{file_path}"
     async with httpx.AsyncClient(timeout=90) as client:
-        response = await client.get(url)
+        response = await client.get(f"{TELEGRAM_FILE_API}/{file_path}")
         _ensure_success(response, "downloadFile")
         return response.content
 
 
 async def download_voice(file_id: str) -> bytes:
-    file_path = await get_file_path(file_id)
-    return await download_file(file_path)
+    return await download_file(await get_file_path(file_id))
 
 
 async def delete_webhook() -> dict:
@@ -212,14 +186,14 @@ async def register_webhook(url: str) -> dict:
 
 
 async def set_bot_commands() -> dict:
-    """Expose one main /menu command plus diagnostics in Telegram UI."""
     commands = [
-        {"command": "menu", "description": "Открыть меню Kommo"},
+        {"command": "menu", "description": "Главное меню"},
+        {"command": "jobs", "description": "Статус обработки аудио"},
+        {"command": "kommo_test", "description": "Проверить Kommo"},
     ]
     async with httpx.AsyncClient(timeout=15) as client:
         response = await client.post(
-            f"{TELEGRAM_API}/setMyCommands",
-            json={"commands": commands},
+            f"{TELEGRAM_API}/setMyCommands", json={"commands": commands}
         )
         _ensure_success(response, "setMyCommands")
         return response.json()
@@ -233,119 +207,106 @@ def _format_unix_timestamp(value: Any) -> str:
     if not value:
         return "—"
     try:
-        return datetime.fromtimestamp(int(value), tz=timezone.utc).strftime("%d.%m.%Y %H:%M UTC")
+        return datetime.fromtimestamp(int(value), tz=timezone.utc).strftime(
+            "%d.%m.%Y %H:%M UTC"
+        )
     except (TypeError, ValueError, OSError):
         return str(value)
 
 
-def format_open_leads_messages(result: dict[str, Any]) -> list[str]:
-    """Format all open Kommo leads into Telegram-safe message chunks."""
-    leads = result.get("leads") or []
-    count = result.get("open_count", len(leads))
-
-    if not leads:
-        return ["✅ <b>Открытых сделок в Kommo нет.</b>"]
-
-    header = (
-        f"📋 <b>Открытые сделки Kommo: {count}</b>\n"
-        "Сначала показаны недавно обновлённые сделки.\n"
-    )
-    if result.get("truncated"):
-        header += (
-            f"⚠️ Проверены только первые {result.get('page_cap')} страниц. "
-            "Увеличьте KOMMO_OPEN_LEADS_MAX_PAGES для полной выборки.\n"
-        )
-
-    chunks: list[str] = []
-    current = header
-
-    for index, lead in enumerate(leads, start=1):
-        price = lead.get("price")
-        price_line = f"\n💰 Бюджет сделки: {_esc(price)}" if price else ""
-        task_line = (
-            f"\n⏰ Ближайшая задача: {_esc(_format_unix_timestamp(lead.get('closest_task_at')))}"
-            if lead.get("closest_task_at")
-            else ""
-        )
-        entry = (
-            f"\n<b>{index}. {_esc(lead.get('name'))}</b>\n"
-            f"ID: <code>{_esc(lead.get('id'))}</code>\n"
-            f"Воронка: {_esc(lead.get('pipeline_name'))}\n"
-            f"Этап: {_esc(lead.get('status_name'))}"
-            f"{price_line}{task_line}\n"
-            f"🔗 <a href=\"{html.escape(lead.get('url') or '', quote=True)}\">Открыть в Kommo</a>\n"
-        )
-        if len(current) + len(entry) > SAFE_MESSAGE_CHUNK:
-            chunks.append(current)
-            current = entry.lstrip("\n")
-        else:
-            current += entry
-
-    if current:
-        chunks.append(current)
-    return chunks
+def _list(items: list[Any] | None, *, empty: str = "Не указано", limit: int = 8) -> str:
+    values = [str(item).strip() for item in (items or []) if str(item).strip()]
+    if not values:
+        return f"<i>{_esc(empty)}</i>"
+    return "\n".join(f"• {_esc(item)}" for item in values[:limit])
 
 
 def format_report(report: dict, transcript: str) -> str:
-    client = report.get("client", {})
-    lead = report.get("lead", {})
-    email = report.get("email", {})
-    whatsapp = report.get("whatsapp", {})
-    calendar = report.get("calendar", {})
+    """Compact professional manager card; manager content is Russian."""
+    client = report.get("client") or {}
+    lead = report.get("lead") or {}
+    whatsapp = report.get("whatsapp") or {}
+    task = report.get("manager_task") or {}
+    facts = report.get("confirmed_facts") or report.get("what_manager_said") or []
+    risks = report.get("risks") or report.get("mistakes_or_weak_points") or []
+    confidence = float(report.get("confidence_score") or 0)
+    confidence_badge = (
+        "🟢" if confidence >= 0.8 else "🟡" if confidence >= 0.6 else "🔴"
+    )
+    review = (
+        "Нужна проверка"
+        if report.get("needs_human_review")
+        else "Данные достаточно полные"
+    )
 
-    def _list(items: list) -> str:
-        if not items:
-            return "  <i>Не указано</i>"
-        return "\n".join(f"  • {_esc(item)}" for item in items)
-
-    confidence = report.get("confidence_score", 0) or 0
-    review_flag = "⚠️ <b>Требуется проверка менеджера</b>\n\n" if report.get("needs_human_review") else ""
+    client_label = client.get("name") or client.get("company") or "Не определён"
+    location = (
+        " / ".join(
+            str(value) for value in (lead.get("country"), lead.get("city")) if value
+        )
+        or "—"
+    )
+    task_text = task.get("title") or report.get("recommended_next_step") or "—"
+    due = task.get("due_at") or "дата не определена"
+    polish_text = whatsapp.get("message") or "Черновик не сформирован"
 
     return (
-        f"{review_flag}"
-        f"<b>🎙 Анализ голосового сообщения</b>\n"
-        f"{'─' * 30}\n\n"
-        f"<b>👤 Клиент</b>\n"
-        f"Имя: {_esc(client.get('name'))}\n"
+        "✨ <b>BBS • Анализ разговора</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"{confidence_badge} Уверенность: <b>{confidence:.0%}</b> · {_esc(review)}\n\n"
+        f"👤 <b>{_esc(client_label)}</b>\n"
         f"Компания: {_esc(client.get('company'))}\n"
         f"Телефон: {_esc(client.get('phone'))}\n"
-        f"Email: {_esc(client.get('email'))}\n"
-        f"Язык: {_esc(client.get('language'))}\n\n"
-        f"<b>📦 Запрос</b>\n"
-        f"Товар: {_esc(lead.get('product_requested'))}\n"
+        f"Email: {_esc(client.get('email'))}\n\n"
+        f"📦 <b>{_esc(lead.get('product_requested'))}</b>\n"
+        f"Количество: {_esc(lead.get('quantity'))}\n"
         f"Бюджет: {_esc(lead.get('budget'))}\n"
-        f"Страна/город: {_esc(lead.get('country'))} / {_esc(lead.get('city'))}\n"
-        f"Срочность: {_esc(lead.get('urgency'))}\n"
-        f"Статус: {_esc(lead.get('status'))}\n\n"
-        f"<b>📝 Резюме</b>\n{_esc(report.get('conversation_summary'))}\n\n"
-        f"<b>✅ Что было сказано</b>\n{_list(report.get('what_manager_said', []))}\n\n"
-        f"<b>⚠️ Слабые места</b>\n{_list(report.get('mistakes_or_weak_points', []))}\n\n"
-        f"<b>❓ Что уточнить</b>\n{_list(report.get('missing_questions', []))}\n\n"
-        f"<b>➡️ Следующий шаг</b>\n{_esc(report.get('recommended_next_step'))}\n\n"
-        f"<b>✉️ Черновик письма</b>\n"
-        f"Тема: {_esc(email.get('subject'))}\n"
-        f"<pre>{_esc(email.get('body'))}</pre>\n\n"
-        f"<b>💬 Черновик WhatsApp</b>\n<pre>{_esc(whatsapp.get('message'))}</pre>\n\n"
-        f"<b>📅 Следующий контакт</b>\n"
-        f"Название: {_esc(calendar.get('title'))}\n"
-        f"Когда: {_esc(calendar.get('start_time'))}\n"
-        f"<pre>{_esc(calendar.get('description'))}</pre>\n\n"
-        f"<i>Уверенность анализа: {confidence:.0%}</i>"
+        f"Локация: {_esc(location)}\n"
+        f"Сроки: {_esc(lead.get('timeline'))}\n\n"
+        f"🧾 <b>Кратко</b>\n{_esc(report.get('conversation_summary'))}\n\n"
+        f"✅ <b>Что подтверждено</b>\n{_list(facts)}\n\n"
+        f"❓ <b>Что ещё выяснить</b>\n{_list(report.get('missing_questions'))}\n\n"
+        f"⚠️ <b>Риски</b>\n{_list(risks, empty='Явных рисков не выявлено')}\n\n"
+        f"🎯 <b>Следующий шаг</b>\n{_esc(report.get('recommended_next_step'))}\n\n"
+        f"✅ <b>Задача менеджеру</b>\n{_esc(task_text)}\n"
+        f"Срок: {_esc(due)}\n\n"
+        f"🇵🇱 <b>Сообщение клиенту</b>\n<pre>{_esc(polish_text[:1300])}</pre>"
     )
+
+
+async def send_processing_step(
+    chat_id: int,
+    step: str,
+    *,
+    target_kommo_lead_id: int | None = None,
+) -> dict:
+    steps = {
+        "download": "📥 <b>Аудио получено</b>\nСкачиваю файл и проверяю формат…",
+        "transcribe": "🎧 <b>Шаг 1 из 3</b>\nРасшифровываю разговор…",
+        "analyze": "🧠 <b>Шаг 2 из 3</b>\nВыделяю факты, вопросы и следующий шаг…",
+        "save": "💾 <b>Шаг 3 из 3</b>\nСохраняю результат и готовлю карточку…",
+    }
+    suffix = (
+        f"\n\nСделка Kommo: <code>{target_kommo_lead_id}</code>"
+        if target_kommo_lead_id
+        else ""
+    )
+    return await send_message(chat_id, steps.get(step, "⏳ Обрабатываю…") + suffix)
 
 
 async def send_main_menu(chat_id: int) -> dict:
     keyboard = {
         "inline_keyboard": [
             [
-                {"text": "📋 Открытые сделки", "callback_data": "menu:leads:1"},
+                {"text": "🎙 Новый разговор", "callback_data": "menu:new"},
                 {"text": "🔎 Найти сделку", "callback_data": "menu:search"},
             ],
             [
-                {"text": "🎙 Новый лид из аудио", "callback_data": "menu:new"},
-                {"text": "📝 Обновить существующий лид", "callback_data": "menu:update"},
+                {"text": "📋 Открытые сделки", "callback_data": "menu:leads:1"},
+                {"text": "🧭 Статус аудио", "callback_data": "menu:jobs"},
             ],
             [
+                {"text": "📝 Дополнить сделку", "callback_data": "menu:update"},
                 {"text": "🔌 Проверить Kommo", "callback_data": "menu:test"},
             ],
         ]
@@ -353,15 +314,17 @@ async def send_main_menu(chat_id: int) -> dict:
     return await send_message(
         chat_id,
         (
-            "🏠 <b>Меню Buy & Bring Assistant</b>\n\n"
-            "Выберите действие. Для второго разговора откройте сделку и нажмите "
-            "<b>«Добавить разговор»</b>."
+            "✨ <b>BBS • CRM Assistant</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "Работа со сделками Kommo прямо в Telegram.\n\n"
+            "Отправьте аудио для нового лида или выберите существующую сделку, "
+            "чтобы добавить разговор, примечание, задачу или событие."
         ),
         reply_markup=keyboard,
     )
 
 
-def _short_button_title(value: Any, limit: int = 42) -> str:
+def _short_button_title(value: Any, limit: int = 38) -> str:
     text = str(value or "Без названия").replace("\n", " ").strip()
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
@@ -377,96 +340,94 @@ async def send_lead_selection_menu(
     total = result.get("open_count", len(leads))
     total_pages = result.get("total_pages", 1)
     page = result.get("page", page)
-
     if not leads:
-        keyboard = {"inline_keyboard": [[{"text": "↩️ В меню", "callback_data": "menu:home"}]]}
-        title = "По вашему запросу открытые сделки не найдены." if search_mode else "Открытых сделок нет."
-        return await send_message(chat_id, f"✅ {title}", reply_markup=keyboard)
+        return await send_message(
+            chat_id,
+            "🔎 <b>Ничего не найдено</b>\n\nПопробуйте номер или часть названия товара.",
+            reply_markup={
+                "inline_keyboard": [
+                    [{"text": "🔎 Повторить поиск", "callback_data": "menu:search"}],
+                    [{"text": "🏠 Главное меню", "callback_data": "menu:home"}],
+                ]
+            },
+        )
 
     rows: list[list[dict[str, Any]]] = []
     for lead in leads:
         lead_id = lead.get("id")
-        if not isinstance(lead_id, int):
-            continue
-        label = f"{lead_id} · {_short_button_title(lead.get('name'))}"
-        rows.append(
-            [
-                {
-                    "text": label,
-                    "callback_data": f"lead:view:{lead_id}:{page}",
-                }
-            ]
-        )
-
+        if isinstance(lead_id, int):
+            rows.append(
+                [
+                    {
+                        "text": f"{_short_button_title(lead.get('name'))}",
+                        "callback_data": f"lead:view:{lead_id}:{page}",
+                    }
+                ]
+            )
     if not search_mode and total_pages > 1:
         nav: list[dict[str, Any]] = []
         if page > 1:
-            nav.append({"text": "⬅️", "callback_data": f"menu:leads:{page - 1}"})
-        nav.append({"text": f"{page}/{total_pages}", "callback_data": "noop"})
+            nav.append({"text": "←", "callback_data": f"menu:leads:{page - 1}"})
+        nav.append({"text": f"{page} / {total_pages}", "callback_data": "noop"})
         if page < total_pages:
-            nav.append({"text": "➡️", "callback_data": f"menu:leads:{page + 1}"})
+            nav.append({"text": "→", "callback_data": f"menu:leads:{page + 1}"})
         rows.append(nav)
-
     rows.append(
         [
-            {"text": "🔎 Новый поиск", "callback_data": "menu:search"},
+            {"text": "🔎 Поиск", "callback_data": "menu:search"},
             {"text": "🏠 Меню", "callback_data": "menu:home"},
         ]
     )
-
-    if search_mode:
-        heading = f"🔎 <b>Результаты поиска: {total}</b>"
-    else:
-        heading = f"📋 <b>Открытые сделки: {total}</b>\nСтраница {page} из {total_pages}"
-    return await send_message(chat_id, heading, reply_markup={"inline_keyboard": rows})
+    title = "Результаты поиска" if search_mode else "Открытые сделки"
+    subtitle = (
+        f"Найдено: <b>{total}</b>"
+        if search_mode
+        else f"Всего: <b>{total}</b> · страница {page}/{total_pages}"
+    )
+    return await send_message(
+        chat_id,
+        f"📋 <b>{title}</b>\n{subtitle}\n\nВыберите сделку:",
+        reply_markup={"inline_keyboard": rows},
+    )
 
 
 def format_lead_details(details: dict[str, Any]) -> str:
     contacts = details.get("contacts") or []
-    contact_lines: list[str] = []
-    for contact in contacts[:5]:
-        line = f"• <b>{_esc(contact.get('name'))}</b>"
-        phones = contact.get("phones") or []
-        emails = contact.get("emails") or []
-        if phones:
-            line += f"\n  Телефон: {_esc(', '.join(phones))}"
-        if emails:
-            line += f"\n  Email: {_esc(', '.join(emails))}"
-        contact_lines.append(line)
-    contacts_text = "\n".join(contact_lines) if contact_lines else "• Контакты не привязаны"
+    contact = contacts[0] if contacts else {}
+    phones = ", ".join(contact.get("phones") or []) or "—"
+    emails = ", ".join(contact.get("emails") or []) or "—"
 
-    custom_fields = details.get("custom_fields") or []
+    fields = details.get("custom_fields") or []
     field_lines = [
-        f"• {_esc(field.get('name'))}: {_esc(field.get('value'))}"
-        for field in custom_fields[:12]
+        f"• {_esc(item.get('name'))}: {_esc(item.get('value'))}" for item in fields[:8]
     ]
-    fields_text = "\n".join(field_lines) if field_lines else "• Дополнительные поля не заполнены"
+    fields_text = (
+        "\n".join(field_lines)
+        if field_lines
+        else "<i>Дополнительные поля не заполнены</i>"
+    )
 
     notes = details.get("notes") or []
     note_lines: list[str] = []
-    for note in notes[:3]:
-        text = str(note.get("text") or "").strip().replace("\n", " ")
-        if len(text) > 350:
-            text = text[:349] + "…"
-        note_lines.append(
-            f"• {_format_unix_timestamp(note.get('created_at') or note.get('updated_at'))}\n  {_esc(text)}"
-        )
-    notes_text = "\n".join(note_lines) if note_lines else "• Текстовых примечаний пока нет"
+    for note in notes[:2]:
+        text = " ".join(str(note.get("text") or "").split())
+        note_lines.append(f"• {_esc(text[:420])}")
+    notes_text = "\n".join(note_lines) if note_lines else "<i>Примечаний пока нет</i>"
 
-    price = details.get("price")
-    price_text = _esc(price) if price not in (None, 0, "") else "—"
     return (
-        f"📌 <b>{_esc(details.get('name'))}</b>\n"
+        "📌 <b>Карточка сделки</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"<b>{_esc(details.get('name'))}</b>\n"
         f"ID: <code>{_esc(details.get('id'))}</code>\n"
+        f"Этап: <b>{_esc(details.get('status_name'))}</b>\n"
         f"Воронка: {_esc(details.get('pipeline_name'))}\n"
-        f"Этап: {_esc(details.get('status_name'))}\n"
-        f"Бюджет сделки: {price_text}\n"
-        f"Ответственный ID: <code>{_esc(details.get('responsible_user_id'))}</code>\n"
-        f"Обновлено: {_esc(_format_unix_timestamp(details.get('updated_at')))}\n"
+        f"Бюджет: {_esc(details.get('price'))}\n"
         f"Ближайшая задача: {_esc(_format_unix_timestamp(details.get('closest_task_at')))}\n\n"
-        f"<b>👤 Контакты</b>\n{contacts_text}\n\n"
-        f"<b>📄 Поля сделки</b>\n{fields_text}\n\n"
-        f"<b>🗒 Последние примечания</b>\n{notes_text}"
+        f"👤 <b>{_esc(contact.get('name') or 'Контакт не указан')}</b>\n"
+        f"Телефон: {_esc(phones)}\n"
+        f"Email: {_esc(emails)}\n\n"
+        f"📄 <b>Данные сделки</b>\n{fields_text}\n\n"
+        f"🗒 <b>Последние примечания</b>\n{notes_text}"
     )
 
 
@@ -481,36 +442,78 @@ async def send_lead_details(
         "inline_keyboard": [
             [
                 {
-                    "text": "📝 Добавить текстовое примечание",
-                    "callback_data": f"lead:text:{lead_id}:{return_page}",
-                }
-            ],
-            [
-                {
-                    "text": "🎙 Добавить второй разговор",
+                    "text": "🎙 Новый разговор",
                     "callback_data": f"lead:audio:{lead_id}:{return_page}",
-                }
+                },
+                {
+                    "text": "📝 Примечание",
+                    "callback_data": f"lead:text:{lead_id}:{return_page}",
+                },
             ],
             [
                 {
-                    "text": "✅ Задача в Kommo",
+                    "text": "✅ Задача",
                     "callback_data": f"lead:task:{lead_id}:{return_page}",
                 },
                 {
-                    "text": "📅 В календарь",
+                    "text": "📅 Календарь",
                     "callback_data": f"lead:calendar:{lead_id}:{return_page}",
                 },
             ],
             [
-                {"text": "🔗 Открыть в Kommo", "url": details.get("url")},
-                {"text": "↩️ К сделкам", "callback_data": f"menu:leads:{return_page}"},
+                {"text": "🔗 Открыть Kommo", "url": details.get("url")},
+                {"text": "↩️ К списку", "callback_data": f"menu:leads:{return_page}"},
             ],
             [{"text": "🏠 Главное меню", "callback_data": "menu:home"}],
         ]
     }
     return await send_message(
+        chat_id, format_lead_details(details), reply_markup=keyboard
+    )
+
+
+async def send_kommo_creation_preview(chat_id: int, draft: dict[str, Any]) -> dict:
+    keyboard = {
+        "inline_keyboard": [
+            [{"text": "✅ Создать лид", "callback_data": "leadcreate:confirm"}],
+            [
+                {"text": "🔢 Номер", "callback_data": "leadcreate:edit:number"},
+                {"text": "✏️ Название", "callback_data": "leadcreate:edit:name"},
+            ],
+            [
+                {"text": "👤 Клиент", "callback_data": "leadcreate:edit:client"},
+                {"text": "📦 Товар", "callback_data": "leadcreate:edit:product"},
+            ],
+            [
+                {"text": "💰 Бюджет", "callback_data": "leadcreate:edit:budget"},
+                {"text": "📍 Город", "callback_data": "leadcreate:edit:city"},
+            ],
+            [{"text": "❌ Отмена", "callback_data": "leadcreate:cancel"}],
+        ]
+    }
+    location = (
+        " / ".join(
+            str(value) for value in (draft.get("country"), draft.get("city")) if value
+        )
+        or "—"
+    )
+    return await send_message(
         chat_id,
-        format_lead_details(details),
+        (
+            "📥 <b>Проверка нового лида</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            f"Название: <b>{_esc(draft.get('lead_name'))}</b>\n"
+            f"Номер: {_esc(draft.get('lead_number'))}\n"
+            f"Клиент: {_esc(draft.get('client_name'))}\n"
+            f"Компания: {_esc(draft.get('company'))}\n"
+            f"Товар: {_esc(draft.get('product_requested'))}\n"
+            f"Бюджет: {_esc(draft.get('budget'))}\n"
+            f"Локация: {_esc(location)}\n\n"
+            f"🎯 Следующий шаг: {_esc(draft.get('next_step'))}\n\n"
+            f"Воронка: {_esc(draft.get('pipeline_name'))}\n"
+            f"Этап: {_esc(draft.get('status_name'))}\n\n"
+            "Данные попадут в Kommo только после подтверждения."
+        ),
         reply_markup=keyboard,
     )
 
@@ -523,30 +526,28 @@ async def send_note_confirmation(
     note_text: str,
     return_page: int = 1,
 ) -> dict:
-    preview = note_text.strip()
-    if len(preview) > 2500:
-        preview = preview[:2499] + "…"
-    keyboard = {
-        "inline_keyboard": [
-            [
-                {
-                    "text": "✅ Добавить в Kommo",
-                    "callback_data": f"note:confirm:{lead_id}:{return_page}",
-                },
-                {"text": "❌ Отмена", "callback_data": f"note:cancel:{lead_id}:{return_page}"},
-            ]
-        ]
-    }
+    preview = note_text.strip()[:2500]
     return await send_message(
         chat_id,
         (
-            f"📝 <b>Проверка примечания</b>\n\n"
-            f"Сделка: <b>{_esc(lead_name)}</b>\n"
-            f"ID: <code>{lead_id}</code>\n\n"
-            f"<pre>{_esc(preview)}</pre>\n\n"
-            "Примечание будет добавлено только после подтверждения."
+            "📝 <b>Проверка примечания</b>\n\n"
+            f"Сделка: <b>{_esc(lead_name)}</b>\n\n"
+            f"<pre>{_esc(preview)}</pre>"
         ),
-        reply_markup=keyboard,
+        reply_markup={
+            "inline_keyboard": [
+                [
+                    {
+                        "text": "✅ Добавить",
+                        "callback_data": f"note:confirm:{lead_id}:{return_page}",
+                    },
+                    {
+                        "text": "❌ Отмена",
+                        "callback_data": f"note:cancel:{lead_id}:{return_page}",
+                    },
+                ]
+            ]
+        },
     )
 
 
@@ -559,34 +560,35 @@ async def send_task_confirmation(
     due_display: str,
     return_page: int = 1,
 ) -> dict:
-    preview = task_text.strip()
-    if len(preview) > 1500:
-        preview = preview[:1499] + "…"
-    keyboard = {
-        "inline_keyboard": [
-            [
-                {
-                    "text": "✅ Создать задачу",
-                    "callback_data": f"task:confirm:{lead_id}:{return_page}",
-                },
-                {
-                    "text": "❌ Отмена",
-                    "callback_data": f"task:cancel:{lead_id}:{return_page}",
-                },
-            ]
-        ]
-    }
     return await send_message(
         chat_id,
         (
-            "✅ <b>Проверка задачи Kommo</b>\n\n"
+            "✅ <b>Проверка задачи</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
             f"Сделка: <b>{_esc(lead_name)}</b>\n"
-            f"ID: <code>{lead_id}</code>\n"
             f"Срок: <b>{_esc(due_display)}</b>\n\n"
-            f"<pre>{_esc(preview)}</pre>\n\n"
-            "Задача будет создана только после подтверждения."
+            f"{_esc(task_text)}"
         ),
-        reply_markup=keyboard,
+        reply_markup={
+            "inline_keyboard": [
+                [
+                    {
+                        "text": "✅ Создать",
+                        "callback_data": f"task:confirm:{lead_id}:{return_page}",
+                    },
+                    {
+                        "text": "✏️ Изменить",
+                        "callback_data": f"lead:task:{lead_id}:{return_page}",
+                    },
+                ],
+                [
+                    {
+                        "text": "❌ Отмена",
+                        "callback_data": f"task:cancel:{lead_id}:{return_page}",
+                    }
+                ],
+            ]
+        },
     )
 
 
@@ -600,30 +602,50 @@ async def send_calendar_confirmation(
     duration_minutes: int,
     return_page: int = 1,
 ) -> dict:
-    keyboard = {
-        "inline_keyboard": [
-            [
-                {
-                    "text": "✅ Создать событие",
-                    "callback_data": f"calendar:confirm:{lead_id}:{return_page}",
-                },
-                {
-                    "text": "❌ Отмена",
-                    "callback_data": f"calendar:cancel:{lead_id}:{return_page}",
-                },
-            ]
-        ]
-    }
     return await send_message(
         chat_id,
         (
-            "📅 <b>Проверка события календаря</b>\n\n"
+            "📅 <b>Проверка события</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
             f"Сделка: <b>{_esc(lead_name)}</b>\n"
-            f"ID: <code>{lead_id}</code>\n"
-            f"Название: {_esc(title)}\n"
+            f"Событие: {_esc(title)}\n"
             f"Начало: <b>{_esc(start_display)}</b>\n"
-            f"Длительность: {duration_minutes} мин.\n\n"
-            "Событие будет создано только после подтверждения."
+            f"Длительность: {duration_minutes} мин."
         ),
-        reply_markup=keyboard,
+        reply_markup={
+            "inline_keyboard": [
+                [
+                    {
+                        "text": "✅ Создать",
+                        "callback_data": f"calendar:confirm:{lead_id}:{return_page}",
+                    },
+                    {
+                        "text": "❌ Отмена",
+                        "callback_data": f"calendar:cancel:{lead_id}:{return_page}",
+                    },
+                ]
+            ]
+        },
     )
+
+
+def format_audio_jobs(jobs: list[Any]) -> str:
+    labels = {
+        "received": "📥 Получено",
+        "downloading": "⬇️ Скачивание",
+        "transcribing": "🎧 Транскрибация",
+        "analyzing": "🧠 Анализ",
+        "saving": "💾 Сохранение",
+        "ready": "✅ Готово",
+        "failed": "❌ Ошибка",
+    }
+    if not jobs:
+        return "🧭 <b>Статус обработки</b>\n\nАудиозаписей пока нет."
+    lines = ["🧭 <b>Последние аудиозаписи</b>", "━━━━━━━━━━━━━━━━━━"]
+    for job in jobs:
+        created = job.created_at.strftime("%d.%m %H:%M") if job.created_at else "—"
+        lines.append(
+            f"{labels.get(job.processing_status, job.processing_status)} · {created}\n"
+            f"ID сообщения: <code>{job.telegram_message_id or '—'}</code>"
+        )
+    return "\n\n".join(lines)

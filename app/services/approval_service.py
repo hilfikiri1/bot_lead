@@ -12,11 +12,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.config import get_settings
 from app.models import Action, AIReport, Lead, VoiceNote
 from app.services import calendar_service, crm_service, gmail_service, kommo_service
 from app.services.telegram_service import send_message
 
 logger = logging.getLogger(__name__)
+settings = get_settings()
 
 
 def _pending_action_is_recent(action: Action, minutes: int = 10) -> bool:
@@ -128,16 +130,62 @@ async def execute_kommo_create_from_draft(
     lead, voice_note, report = await _load_context(db, lead_id, voice_note_id)
 
     if lead.kommo_lead_id:
-        url = lead.kommo_url or ""
-        return (
-            "ℹ️ <b>Этот разговор уже связан с лидом Kommo</b>\n\n"
-            f"ID: <code>{lead.kommo_lead_id}</code>\n"
-            + (
-                f'<a href="{html.escape(url, quote=True)}">Открыть сделку</a>'
-                if url
-                else ""
+        raw = report.raw_json or {}
+        try:
+            notes_added = await kommo_service.save_analysis_to_kommo_notes(
+                int(lead.kommo_lead_id),
+                client_data={
+                    "name": draft.get("client_name"),
+                    "phone": draft.get("phone"),
+                    "email": draft.get("email"),
+                    "company": draft.get("company"),
+                    "language": draft.get("language"),
+                },
+                lead_data={
+                    **(raw.get("lead") or {}),
+                    "product_requested": draft.get("product_requested")
+                    or lead.product_requested,
+                    "budget": draft.get("budget") or lead.budget,
+                    "country": draft.get("country") or lead.country,
+                    "city": draft.get("city") or lead.city,
+                },
+                conversation_summary=report.conversation_summary,
+                recommended_next_step=draft.get("next_step")
+                or report.recommended_next_step,
+                missing_questions=report.missing_questions or [],
+                transcript=voice_note.transcript,
+                confirmed_facts=raw.get("confirmed_facts") or [],
+                risks=raw.get("risks") or [],
+                whatsapp_message=report.whatsapp_message,
             )
-        )
+            url = lead.kommo_url or ""
+            return (
+                "✅ <b>Анализ добавлен в примечания Kommo</b>\n\n"
+                f"ID сделки: <code>{lead.kommo_lead_id}</code>\n"
+                f"Добавлено примечаний: {notes_added}\n"
+                + (
+                    f'<a href="{html.escape(url, quote=True)}">Открыть сделку</a>'
+                    if url
+                    else ""
+                )
+            )
+        except Exception as exc:
+            logger.warning(
+                "Could not backfill Kommo notes for lead %s: %s",
+                lead.kommo_lead_id,
+                exc,
+            )
+            url = lead.kommo_url or ""
+            return (
+                "ℹ️ <b>Этот разговор уже связан с лидом Kommo</b>\n\n"
+                f"ID: <code>{lead.kommo_lead_id}</code>\n"
+                f"⚠️ Не удалось добавить анализ в примечания: {html.escape(str(exc)[:300])}\n"
+                + (
+                    f'<a href="{html.escape(url, quote=True)}">Открыть сделку</a>'
+                    if url
+                    else ""
+                )
+            )
 
     idempotency_key = f"kommo_create:voice_note:{voice_note.id}"
     action = await crm_service.create_action(
@@ -215,6 +263,9 @@ async def execute_kommo_create_from_draft(
             missing_questions=report.missing_questions or [],
             transcript=voice_note.transcript,
             lead_name_override=str(draft.get("lead_name") or "").strip() or None,
+            confirmed_facts=raw.get("confirmed_facts") or [],
+            risks=raw.get("risks") or [],
+            whatsapp_message=report.whatsapp_message,
         )
 
         refreshed = await db.get(Action, action_id)
@@ -262,7 +313,7 @@ async def execute_kommo_create_from_draft(
             )
 
         note_status = (
-            "✅ примечание добавлено"
+            f"✅ добавлено примечаний: {created.get('notes_added', 1)}"
             if created.get("note_saved")
             else "⚠️ сделка создана, примечание не добавлено"
         )
@@ -278,6 +329,80 @@ async def execute_kommo_create_from_draft(
     except Exception as exc:
         logger.exception("Kommo lead creation failed")
         await db.rollback()
+        lead_title = str(draft.get("lead_name") or "").strip()
+        if lead_title:
+            try:
+                recovered = await kommo_service.find_recent_lead_by_name(lead_title)
+            except Exception as recovery_exc:
+                logger.warning("Lead recovery lookup failed: %s", recovery_exc)
+                recovered = None
+            if recovered and isinstance(recovered.get("id"), int):
+                refreshed = await db.get(Action, action_id)
+                if refreshed:
+                    await crm_service.save_kommo_mapping(
+                        db,
+                        lead_id=lead.id,
+                        kommo_lead_id=int(recovered["id"]),
+                        kommo_contact_id=None,
+                        pipeline_id=recovered.get("pipeline_id"),
+                        status_id=recovered.get("status_id"),
+                        url=f"{settings.kommo_base_url.rstrip('/')}/leads/detail/{recovered['id']}",
+                    )
+                    try:
+                        raw = report.raw_json or {}
+                        notes_added = await kommo_service.save_analysis_to_kommo_notes(
+                            int(recovered["id"]),
+                            client_data={
+                                "name": draft.get("client_name"),
+                                "phone": draft.get("phone"),
+                                "email": draft.get("email"),
+                                "company": draft.get("company"),
+                                "language": draft.get("language"),
+                            },
+                            lead_data={
+                                **(raw.get("lead") or {}),
+                                "product_requested": draft.get("product_requested")
+                                or lead.product_requested,
+                                "budget": draft.get("budget") or lead.budget,
+                                "country": draft.get("country") or lead.country,
+                                "city": draft.get("city") or lead.city,
+                            },
+                            conversation_summary=report.conversation_summary,
+                            recommended_next_step=draft.get("next_step")
+                            or report.recommended_next_step,
+                            missing_questions=report.missing_questions or [],
+                            transcript=voice_note.transcript,
+                            confirmed_facts=raw.get("confirmed_facts") or [],
+                            risks=raw.get("risks") or [],
+                            whatsapp_message=report.whatsapp_message,
+                        )
+                    except Exception as note_exc:
+                        logger.warning(
+                            "Recovered lead %s but notes failed: %s",
+                            recovered["id"],
+                            note_exc,
+                        )
+                        notes_added = 0
+                    if refreshed:
+                        refreshed.payload = {
+                            **(refreshed.payload or {}),
+                            "kommo_lead_id": recovered["id"],
+                            "kommo_url": f"{settings.kommo_base_url.rstrip('/')}/leads/detail/{recovered['id']}",
+                            "recovered_after_error": True,
+                        }
+                        await crm_service.update_action_status(
+                            db,
+                            refreshed,
+                            "executed",
+                            approved=True,
+                            executed_at=datetime.now(tz=timezone.utc),
+                        )
+                    return (
+                        "✅ <b>Лид найден в Kommo и связан с разговором</b>\n\n"
+                        f"ID: <code>{recovered['id']}</code>\n"
+                        f"Добавлено примечаний: {notes_added}\n"
+                        f'<a href="{html.escape(f"{settings.kommo_base_url.rstrip('/')}/leads/detail/{recovered['id']}", quote=True)}">Открыть сделку</a>'
+                    )
         refreshed = await db.get(Action, action_id)
         if refreshed:
             await crm_service.update_action_status(
@@ -486,13 +611,25 @@ async def _execute_calendar_event(
     if action.status == "executed":
         return "ℹ️ Событие для этого отчёта уже создано."
     try:
-        event_id = await asyncio.to_thread(
-            calendar_service.create_event,
+        result = await asyncio.to_thread(
+            calendar_service.create_event_with_fallback,
             report.calendar_title or "Повторный контакт",
             report.calendar_description or "",
             report.calendar_start_time,
             report.calendar_duration_minutes or 15,
         )
+        if not result["success"]:
+            await crm_service.update_action_status(
+                db,
+                action,
+                "failed",
+                error_message=str(result.get("error") or "calendar fallback"),
+            )
+            return (
+                "⚠️ <b>Календарь не принял событие напрямую</b>\n\n"
+                f"{html.escape(str(result.get('error') or 'Неизвестная ошибка'))}\n\n"
+                "Повторите через карточку сделки или выполните /calendar_test."
+            )
         await crm_service.update_action_status(
             db,
             action,
@@ -501,8 +638,9 @@ async def _execute_calendar_event(
             executed_at=datetime.now(tz=timezone.utc),
         )
         return (
-            f"✅ Событие создано в {html.escape(calendar_service.provider_label())} "
-            f"(ID: {html.escape(str(event_id))})."
+            f"✅ Событие создано в {html.escape(result['provider'])} "
+            f"(ID: {html.escape(str(result['event_id']))}). "
+            "Напоминание: за 10 минут до начала."
         )
     except Exception as exc:
         await crm_service.update_action_status(

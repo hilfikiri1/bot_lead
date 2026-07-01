@@ -140,8 +140,14 @@ def _normalise_analysis(data: dict[str, Any]) -> dict[str, Any]:
     data.setdefault("risks", data.get("mistakes_or_weak_points") or [])
     data.setdefault("recommended_next_step", "Уточнить недостающие данные у клиента.")
     data.setdefault("manager_task", {"title": None, "due_at": None})
+    if not isinstance(data.get("manager_task"), dict):
+        data["manager_task"] = {"title": None, "due_at": None}
     data.setdefault("email", {"subject": "", "body": ""})
+    if not isinstance(data.get("email"), dict):
+        data["email"] = {"subject": "", "body": ""}
     data.setdefault("whatsapp", {"message": ""})
+    if not isinstance(data.get("whatsapp"), dict):
+        data["whatsapp"] = {"message": ""}
     data.setdefault(
         "calendar",
         {
@@ -151,6 +157,13 @@ def _normalise_analysis(data: dict[str, Any]) -> dict[str, Any]:
             "duration_minutes": 15,
         },
     )
+    if not isinstance(data.get("calendar"), dict):
+        data["calendar"] = {
+            "title": "Повторный контакт с клиентом",
+            "description": data.get("recommended_next_step") or "",
+            "start_time": None,
+            "duration_minutes": 15,
+        }
     data.setdefault("confidence_score", 0.0)
     data.setdefault("needs_human_review", True)
 
@@ -197,6 +210,9 @@ def _validate_schema(data: dict[str, Any]) -> None:
         data.get("lead"), dict
     ):
         raise ValueError("AI response client/lead must be objects")
+    for key in ("email", "whatsapp", "calendar", "manager_task"):
+        if not isinstance(data.get(key), dict):
+            raise ValueError(f"AI response field {key} must be an object")
     for key in (
         "confirmed_facts",
         "what_manager_said",

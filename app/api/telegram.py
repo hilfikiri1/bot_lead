@@ -349,6 +349,123 @@ async def _handle_kommo_test(chat_id: int, user_id: int, db: AsyncSession) -> No
     await telegram_service.send_message(chat_id, message)
 
 
+async def _handle_calendar_test(chat_id: int, user_id: int) -> None:
+    if not _is_allowed_user(user_id):
+        await telegram_service.send_message(chat_id, "Доступ запрещён.")
+        return
+
+    provider = calendar_service.provider_label()
+    await telegram_service.send_message(
+        chat_id, f"🔄 Проверяю подключение к {html.escape(provider)}..."
+    )
+    try:
+        if (settings.calendar_provider or "icloud").strip().lower() == "icloud":
+            details = await asyncio.to_thread(calendar_service.test_icloud_connection)
+            await telegram_service.send_message(
+                chat_id,
+                (
+                    f"✅ <b>{html.escape(provider)} доступен</b>\n\n"
+                    f"{html.escape(details)}\n\n"
+                    "Можно создавать напоминания из карточки сделки или кнопки "
+                    "«Следующий контакт»."
+                ),
+            )
+            return
+
+        test_result = await asyncio.to_thread(
+            calendar_service.create_event_with_fallback,
+            "Тест Telegram Assistant",
+            "Проверка интеграции календаря",
+            None,
+            15,
+        )
+        if test_result["success"]:
+            await telegram_service.send_message(
+                chat_id,
+                (
+                    f"✅ <b>{html.escape(provider)} работает</b>\n\n"
+                    f"Тестовое событие создано. ID: "
+                    f"<code>{html.escape(str(test_result['event_id']))}</code>"
+                ),
+            )
+        else:
+            await telegram_service.send_message(
+                chat_id,
+                f"❌ {html.escape(str(test_result.get('error') or 'Ошибка календаря'))}",
+            )
+    except calendar_service.CalendarIntegrationError as exc:
+        await telegram_service.send_message(
+            chat_id,
+            (
+                "❌ <b>Календарь не настроен</b>\n\n"
+                f"{html.escape(str(exc))}\n\n"
+                "Проверьте Railway Variables:\n"
+                "• <code>ICLOUD_USERNAME</code>\n"
+                "• <code>ICLOUD_APP_SPECIFIC_PASSWORD</code>\n"
+                "• <code>ICLOUD_CALENDAR_NAME</code>\n"
+                "• <code>ICLOUD_CALDAV_URL</code>"
+            ),
+        )
+
+
+async def _deliver_calendar_result(
+    chat_id: int,
+    *,
+    title: str,
+    description: str,
+    start_iso: str,
+    duration_minutes: int,
+    lead_name: str | None = None,
+    start_display: str | None = None,
+) -> None:
+    result = await asyncio.to_thread(
+        calendar_service.create_event_with_fallback,
+        title,
+        description,
+        start_iso,
+        duration_minutes,
+    )
+    if result["success"]:
+        await telegram_service.send_message(
+            chat_id,
+            (
+                f"✅ <b>Событие создано в {html.escape(result['provider'])}</b>\n\n"
+                + (
+                    f"Сделка: {html.escape(lead_name)}\n"
+                    if lead_name
+                    else ""
+                )
+                + f"Название: {html.escape(title)}\n"
+                + (
+                    f"Начало: {html.escape(start_display)}\n"
+                    if start_display
+                    else ""
+                )
+                + f"Event ID: <code>{html.escape(str(result['event_id']))}</code>\n"
+                "Напоминание: за 10 минут до начала."
+            ),
+        )
+        return
+
+    await telegram_service.send_message(
+        chat_id,
+        (
+            "⚠️ <b>Не удалось записать событие напрямую в календарь</b>\n\n"
+            f"{html.escape(str(result.get('error') or 'Неизвестная ошибка'))}\n\n"
+            "Отправляю файл <code>.ics</code>. Откройте его на iPhone или Mac и "
+            "нажмите «Добавить в календарь»."
+        ),
+    )
+    ics_bytes = str(result.get("ics_content") or "").encode("utf-8")
+    if ics_bytes:
+        await telegram_service.send_document(
+            chat_id,
+            filename="reminder.ics",
+            content=ics_bytes,
+            caption=f"📅 {html.escape(title)}",
+        )
+
+
 async def _show_audio_jobs(
     chat_id: int,
     user_id: int,
@@ -963,24 +1080,26 @@ async def _handle_manager_callback(
             f"Lead ID: {lead_id}\n"
             f"{state.get('lead_url') or ''}"
         )
-        event_id = await asyncio.to_thread(
-            calendar_service.create_event,
-            str(state.get("calendar_title") or "Созвон с клиентом"),
-            description,
-            str(state.get("start_iso") or ""),
-            int(state.get("duration_minutes") or 30),
-        )
+        try:
+            await _deliver_calendar_result(
+                chat_id,
+                title=str(state.get("calendar_title") or "Созвон с клиентом"),
+                description=description,
+                start_iso=str(state.get("start_iso") or ""),
+                duration_minutes=int(state.get("duration_minutes") or 30),
+                lead_name=str(state.get("lead_name") or "—"),
+                start_display=str(state.get("start_display") or "—"),
+            )
+        except Exception as exc:
+            await telegram_service.send_message(
+                chat_id,
+                (
+                    "❌ <b>Не удалось создать напоминание</b>\n\n"
+                    f"{html.escape(str(exc)[:500])}"
+                ),
+            )
+            return True
         await telegram_state_service.clear_state(user_id)
-        await telegram_service.send_message(
-            chat_id,
-            (
-                f"✅ <b>Событие создано в {html.escape(calendar_service.provider_label())}</b>\n\n"
-                f"Сделка: {html.escape(str(state.get('lead_name') or '—'))}\n"
-                f"Название: {html.escape(str(state.get('calendar_title') or '—'))}\n"
-                f"Начало: {html.escape(str(state.get('start_display') or '—'))}\n"
-                f"Event ID: <code>{html.escape(str(event_id))}</code>"
-            ),
-        )
         await _show_lead_details(chat_id, lead_id, return_page=int(page_raw))
         return True
 
@@ -1322,6 +1441,10 @@ async def telegram_webhook(
 
         if text.startswith("/kommo_test"):
             await _handle_kommo_test(chat_id, user_id, db)
+            return {"ok": True}
+
+        if text.startswith("/calendar_test"):
+            await _handle_calendar_test(chat_id, user_id)
             return {"ok": True}
 
         if text.startswith("/jobs"):

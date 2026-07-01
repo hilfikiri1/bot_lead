@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
@@ -25,6 +25,8 @@ settings = get_settings()
 
 REQUEST_TIMEOUT = 20.0
 PAGE_SIZE = 250
+MAX_NOTE_CHARS = 14000
+MAX_TRANSCRIPT_CHUNK = 8000
 
 
 class KommoAPIError(RuntimeError):
@@ -131,6 +133,191 @@ async def get_account_info() -> dict[str, Any]:
         "currency": data.get("currency"),
         "version": data.get("version"),
     }
+
+
+def _extract_embedded_items(data: Any, entity_key: str) -> list[dict[str, Any]]:
+    """Parse Kommo responses that may be a wrapper dict or a bare list.
+
+    ``/api/v4/leads/complex`` sometimes returns ``[{"id": ...}]`` instead of
+    ``{"_embedded": {"leads": [...]}}``.
+    """
+    if isinstance(data, list):
+        return [item for item in data if isinstance(item, dict)]
+    if isinstance(data, dict):
+        embedded = data.get("_embedded")
+        if isinstance(embedded, dict):
+            items = embedded.get(entity_key) or []
+            if isinstance(items, list):
+                return [item for item in items if isinstance(item, dict)]
+        if entity_key == "leads" and isinstance(data.get("id"), int):
+            return [data]
+        if entity_key == "tasks" and isinstance(data.get("id"), int):
+            return [data]
+    return []
+
+
+def _chunk_text(text: str, limit: int) -> list[str]:
+    clean = (text or "").strip()
+    if not clean:
+        return []
+    if len(clean) <= limit:
+        return [clean]
+    chunks: list[str] = []
+    start = 0
+    while start < len(clean):
+        chunks.append(clean[start : start + limit])
+        start += limit
+    return chunks
+
+
+def _format_optional_lines(label: str, value: Any) -> str | None:
+    clean = str(value or "").strip()
+    if not clean:
+        return None
+    return f"{label}: {clean}"
+
+
+def build_analysis_note_text(
+    *,
+    client_data: dict[str, Any],
+    lead_data: dict[str, Any],
+    conversation_summary: str | None,
+    recommended_next_step: str | None,
+    missing_questions: list[str] | None,
+    confirmed_facts: list[str] | None = None,
+    risks: list[str] | None = None,
+    whatsapp_message: str | None = None,
+) -> str:
+    """Build the structured analysis note that should land in Kommo."""
+    lines = ["📌 АНАЛИЗ РАЗГОВОРА ИЗ TELEGRAM", ""]
+    lines.append("КЛИЕНТ")
+    for label, key in (
+        ("Имя", "name"),
+        ("Компания", "company"),
+        ("Телефон", "phone"),
+        ("Email", "email"),
+        ("Язык", "language"),
+    ):
+        row = _format_optional_lines(label, client_data.get(key))
+        if row:
+            lines.append(row)
+    lines.append("")
+
+    lines.append("ЗАПРОС")
+    for label, key in (
+        ("Товар или оборудование", "product_requested"),
+        ("Количество", "quantity"),
+        ("Бюджет", "budget"),
+        ("Страна", "country"),
+        ("Город", "city"),
+        ("Условия поставки", "delivery_terms"),
+        ("Сертификация", "certification"),
+        ("Сроки", "timeline"),
+    ):
+        row = _format_optional_lines(label, lead_data.get(key))
+        if row:
+            lines.append(row)
+    specifications = lead_data.get("specifications") or []
+    if isinstance(specifications, list) and specifications:
+        lines.append("Характеристики:")
+        lines.extend(f"- {item}" for item in specifications[:20] if str(item).strip())
+    lines.append("")
+
+    if conversation_summary:
+        lines.extend(["КРАТКОЕ РЕЗЮМЕ", conversation_summary.strip(), ""])
+    if confirmed_facts:
+        lines.append("ЧТО ПОДТВЕРЖДЕНО")
+        lines.extend(f"- {item}" for item in confirmed_facts[:20] if str(item).strip())
+        lines.append("")
+    if missing_questions:
+        lines.append("ЧТО НУЖНО УТОЧНИТЬ")
+        lines.extend(f"- {item}" for item in missing_questions[:20] if str(item).strip())
+        lines.append("")
+    if risks:
+        lines.append("РИСКИ")
+        lines.extend(f"- {item}" for item in risks[:20] if str(item).strip())
+        lines.append("")
+    if recommended_next_step:
+        lines.extend(["СЛЕДУЮЩИЙ ШАГ", recommended_next_step.strip(), ""])
+    if whatsapp_message:
+        lines.extend(["СООБЩЕНИЕ КЛИЕНТУ", whatsapp_message.strip(), ""])
+
+    return "\n".join(lines).strip()
+
+
+async def save_analysis_to_kommo_notes(
+    lead_id: int,
+    *,
+    client_data: dict[str, Any],
+    lead_data: dict[str, Any],
+    conversation_summary: str | None,
+    recommended_next_step: str | None,
+    missing_questions: list[str] | None,
+    transcript: str | None,
+    confirmed_facts: list[str] | None = None,
+    risks: list[str] | None = None,
+    whatsapp_message: str | None = None,
+) -> int:
+    """Persist analysis and transcript chunks as Kommo notes."""
+    notes_added = 0
+    analysis_text = build_analysis_note_text(
+        client_data=client_data,
+        lead_data=lead_data,
+        conversation_summary=conversation_summary,
+        recommended_next_step=recommended_next_step,
+        missing_questions=missing_questions,
+        confirmed_facts=confirmed_facts,
+        risks=risks,
+        whatsapp_message=whatsapp_message,
+    )
+    if analysis_text:
+        await add_common_note(lead_id, analysis_text[:MAX_NOTE_CHARS])
+        notes_added += 1
+
+    transcript_chunks = _chunk_text(transcript or "", MAX_TRANSCRIPT_CHUNK)
+    for index, chunk in enumerate(transcript_chunks, start=1):
+        prefix = (
+            "ТРАНСКРИПТ РАЗГОВОРА"
+            if len(transcript_chunks) == 1
+            else f"ТРАНСКРИПТ РАЗГОВОРА ({index}/{len(transcript_chunks)})"
+        )
+        await add_common_note(lead_id, f"{prefix}\n\n{chunk}")
+        notes_added += 1
+    return notes_added
+
+
+async def find_recent_lead_by_name(
+    name: str,
+    *,
+    within_minutes: int = 60,
+) -> dict[str, Any] | None:
+    """Find a recently created Kommo lead with an exact title match."""
+    trimmed = name.strip()
+    if not trimmed:
+        return None
+
+    data = await _request(
+        "GET",
+        "/api/v4/leads",
+        params={
+            "query": trimmed,
+            "limit": 50,
+            "order[created_at]": "desc",
+        },
+    )
+    leads = _extract_embedded_items(data, "leads")
+    cutoff = datetime.now(tz=timezone.utc) - timedelta(minutes=within_minutes)
+
+    for lead in leads:
+        if (lead.get("name") or "").strip() != trimmed:
+            continue
+        created_at = lead.get("created_at")
+        if isinstance(created_at, int):
+            created_dt = datetime.fromtimestamp(created_at, tz=timezone.utc)
+            if created_dt < cutoff:
+                continue
+        return lead
+    return None
 
 
 async def get_leads(limit: int = 1) -> dict[str, Any]:
@@ -488,15 +675,17 @@ async def create_lead_from_analysis(
     missing_questions: list[str] | None,
     transcript: str | None,
     lead_name_override: str | None = None,
+    confirmed_facts: list[str] | None = None,
+    risks: list[str] | None = None,
+    whatsapp_message: str | None = None,
 ) -> dict[str, Any]:
     """Create one Kommo lead after explicit human approval in Telegram."""
-    lead_payload: dict[str, Any] = {
-        "name": _lead_title(
-            client_data,
-            lead_data,
-            lead_name_override=lead_name_override,
-        )
-    }
+    lead_title = _lead_title(
+        client_data,
+        lead_data,
+        lead_name_override=lead_name_override,
+    )
+    lead_payload: dict[str, Any] = {"name": lead_title}
     lead_payload.update(await _resolve_configured_lead_placement())
 
     phone = client_data.get("phone")
@@ -536,9 +725,18 @@ async def create_lead_from_analysis(
     else:
         data = await _submit_new_lead(lead_payload, "/api/v4/leads")
 
-    created_leads = ((data or {}).get("_embedded") or {}).get("leads") or []
+    created_leads = _extract_embedded_items(data, "leads")
     if not created_leads:
-        raise KommoAPIError("Kommo не вернул созданную сделку в ответе.")
+        recovered = await find_recent_lead_by_name(lead_title)
+        if recovered:
+            logger.warning(
+                "Kommo response had no embedded lead, but a recent lead with the same "
+                "title was found: %s",
+                recovered.get("id"),
+            )
+            created_leads = [recovered]
+        else:
+            raise KommoAPIError("Kommo не вернул созданную сделку в ответе.")
 
     created = created_leads[0]
     lead_id = created.get("id")
@@ -551,26 +749,18 @@ async def create_lead_from_analysis(
         if isinstance(maybe_contact_id, int):
             contact_id = maybe_contact_id
 
-    note_parts = [
-        "Создано из Telegram после подтверждения менеджером.",
-        f"Товар/запрос: {lead_data.get('product_requested') or 'не указан'}",
-        f"Бюджет: {lead_data.get('budget') or 'не указан'}",
-        f"Страна/город: {lead_data.get('country') or '—'} / {lead_data.get('city') or '—'}",
-    ]
-    if conversation_summary:
-        note_parts.append(f"Краткое резюме: {conversation_summary}")
-    if recommended_next_step:
-        note_parts.append(f"Следующий шаг: {recommended_next_step}")
-    if missing_questions:
-        note_parts.append("Что уточнить:\n- " + "\n- ".join(missing_questions[:20]))
-    if transcript:
-        note_parts.append(f"Транскрипт:\n{transcript[:8000]}")
-
-    note_saved = False
-    try:
-        note_saved = await add_common_note(lead_id, "\n\n".join(note_parts))
-    except Exception as exc:
-        logger.warning("Lead %s created, but note could not be added: %s", lead_id, exc)
+    notes_added = await save_analysis_to_kommo_notes(
+        lead_id,
+        client_data=client_data,
+        lead_data=lead_data,
+        conversation_summary=conversation_summary,
+        recommended_next_step=recommended_next_step,
+        missing_questions=missing_questions,
+        transcript=transcript,
+        confirmed_facts=confirmed_facts,
+        risks=risks,
+        whatsapp_message=whatsapp_message,
+    )
 
     pipeline_id = created.get("pipeline_id") or lead_payload.get("pipeline_id")
     status_id = created.get("status_id") or lead_payload.get("status_id")
@@ -592,7 +782,8 @@ async def create_lead_from_analysis(
             (pipeline_id, status_id),
             f"Этап {status_id}" if status_id else "Первый этап",
         ),
-        "note_saved": note_saved,
+        "note_saved": notes_added > 0,
+        "notes_added": notes_added,
         "url": f"{_base_url()}/leads/detail/{lead_id}",
     }
 
@@ -967,7 +1158,7 @@ async def create_lead_task(
         payload["responsible_user_id"] = assignee
 
     data = await _request("POST", "/api/v4/tasks", json_body=[payload])
-    tasks = ((data or {}).get("_embedded") or {}).get("tasks") or []
+    tasks = _extract_embedded_items(data, "tasks")
     created = tasks[0] if tasks else {}
     return {
         "task_id": created.get("id"),

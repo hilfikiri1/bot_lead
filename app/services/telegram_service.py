@@ -56,6 +56,25 @@ async def send_message(
         return response.json()
 
 
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=10))
+async def send_document(
+    chat_id: int,
+    *,
+    filename: str,
+    content: bytes,
+    caption: str | None = None,
+) -> dict:
+    data = {"chat_id": str(chat_id)}
+    if caption:
+        data["caption"] = caption
+        data["parse_mode"] = "HTML"
+    files = {"document": (filename, content, "text/calendar")}
+    async with httpx.AsyncClient(timeout=30) as client:
+        response = await client.post(f"{TELEGRAM_API}/sendDocument", data=data, files=files)
+        _ensure_success(response, "sendDocument")
+        return response.json()
+
+
 async def send_message_chunks(
     chat_id: int,
     chunks: list[str],

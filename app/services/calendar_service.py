@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta, timezone
+from typing import Any
 from urllib.parse import quote, urljoin
 from uuid import uuid4
 from xml.etree import ElementTree as ET
@@ -38,6 +39,67 @@ def provider_label() -> str:
     if provider == "icloud":
         return "iCloud Calendar"
     return provider or "Calendar"
+
+
+def _clean_env_value(value: str | None) -> str:
+    return str(value or "").strip().strip('"').strip("'")
+
+
+def _icloud_password_candidates() -> list[str]:
+    raw = _clean_env_value(settings.icloud_app_specific_password).replace(" ", "")
+    if not raw:
+        return []
+    candidates = [raw]
+    compact = raw.replace("-", "")
+    if compact and compact not in candidates:
+        candidates.append(compact)
+    if len(compact) == 16:
+        dashed = "-".join(compact[i : i + 4] for i in range(0, 16, 4))
+        if dashed not in candidates:
+            candidates.append(dashed)
+    return candidates
+
+
+def build_ics_content(
+    *,
+    title: str,
+    description: str,
+    start_dt: datetime,
+    end_dt: datetime,
+    uid: str | None = None,
+) -> tuple[str, str]:
+    """Build an RFC5545 calendar file and return ``(uid, ics_text)``."""
+    event_uid = uid or f"{uuid4().hex}@buybringsolutions"
+    now_utc = datetime.now(tz=timezone.utc)
+    start_utc = start_dt.astimezone(timezone.utc)
+    end_utc = end_dt.astimezone(timezone.utc)
+    ics = "\r\n".join(
+        [
+            "BEGIN:VCALENDAR",
+            "VERSION:2.0",
+            "PRODID:-//Buy & Bring Solutions//Telegram Assistant//RU",
+            "CALSCALE:GREGORIAN",
+            "METHOD:PUBLISH",
+            "BEGIN:VEVENT",
+            f"UID:{event_uid}",
+            f"DTSTAMP:{now_utc.strftime('%Y%m%dT%H%M%SZ')}",
+            f"DTSTART:{start_utc.strftime('%Y%m%dT%H%M%SZ')}",
+            f"DTEND:{end_utc.strftime('%Y%m%dT%H%M%SZ')}",
+            f"SUMMARY:{_ics_escape(title)}",
+            f"DESCRIPTION:{_ics_escape(description)}",
+            "STATUS:CONFIRMED",
+            "TRANSP:OPAQUE",
+            "BEGIN:VALARM",
+            "TRIGGER:-PT10M",
+            "ACTION:DISPLAY",
+            f"DESCRIPTION:{_ics_escape(title)}",
+            "END:VALARM",
+            "END:VEVENT",
+            "END:VCALENDAR",
+            "",
+        ]
+    )
+    return event_uid, ics
 
 
 def create_event(
@@ -154,16 +216,16 @@ def _create_google_event(
         raise CalendarIntegrationError("Google Calendar отклонил создание события.") from exc
 
 
-def _icloud_credentials() -> tuple[str, str]:
-    username = (settings.icloud_username or "").strip()
-    password = (settings.icloud_app_specific_password or "").strip().replace(" ", "")
+def _icloud_credentials() -> tuple[str, list[str]]:
+    username = _clean_env_value(settings.icloud_username)
+    passwords = _icloud_password_candidates()
     if not username:
         raise CalendarIntegrationError("ICLOUD_USERNAME не задан в Railway Variables.")
-    if not password:
+    if not passwords:
         raise CalendarIntegrationError(
             "ICLOUD_APP_SPECIFIC_PASSWORD не задан. Нужен специальный пароль приложения Apple."
         )
-    return username, password
+    return username, passwords
 
 
 def _request_icloud(
@@ -173,39 +235,56 @@ def _request_icloud(
     content: bytes | str | None = None,
     headers: dict[str, str] | None = None,
 ) -> tuple[httpx.Response, str]:
-    username, password = _icloud_credentials()
-    current_url = url
-    request_headers = {
-        "User-Agent": "BuyBringTelegramAssistant/1.0",
-        "Accept": "application/xml, text/xml, text/calendar, */*",
-        **(headers or {}),
-    }
+    username, passwords = _icloud_credentials()
+    last_auth_error: CalendarIntegrationError | None = None
 
-    with httpx.Client(timeout=HTTP_TIMEOUT, follow_redirects=False) as client:
-        for _ in range(6):
-            try:
-                response = client.request(
-                    method,
-                    current_url,
-                    auth=(username, password),
-                    content=content,
-                    headers=request_headers,
-                )
-            except httpx.TimeoutException as exc:
-                raise CalendarIntegrationError("iCloud Calendar не ответил вовремя.") from exc
-            except httpx.ConnectError as exc:
-                raise CalendarIntegrationError(
-                    "Не удалось соединиться с iCloud Calendar."
-                ) from exc
+    for password in passwords:
+        current_url = url
+        request_headers = {
+            "User-Agent": "BuyBringTelegramAssistant/1.0",
+            "Accept": "application/xml, text/xml, text/calendar, */*",
+            **(headers or {}),
+        }
 
-            if response.status_code in {301, 302, 303, 307, 308}:
-                location = response.headers.get("location")
-                if not location:
+        with httpx.Client(timeout=HTTP_TIMEOUT, follow_redirects=False) as client:
+            for _ in range(6):
+                try:
+                    response = client.request(
+                        method,
+                        current_url,
+                        auth=(username, password),
+                        content=content,
+                        headers=request_headers,
+                    )
+                except httpx.TimeoutException as exc:
+                    raise CalendarIntegrationError(
+                        "iCloud Calendar не ответил вовремя."
+                    ) from exc
+                except httpx.ConnectError as exc:
+                    raise CalendarIntegrationError(
+                        "Не удалось соединиться с iCloud Calendar."
+                    ) from exc
+
+                if response.status_code in {301, 302, 303, 307, 308}:
+                    location = response.headers.get("location")
+                    if not location:
+                        break
+                    current_url = urljoin(current_url, location)
+                    continue
+
+                if response.status_code in {401, 403}:
+                    last_auth_error = CalendarIntegrationError(
+                        "iCloud отклонил авторизацию. Проверьте ICLOUD_USERNAME и "
+                        "специальный пароль приложения."
+                    )
                     break
-                current_url = urljoin(current_url, location)
-                continue
-            return response, current_url
+                return response, current_url
 
+        if last_auth_error is not None:
+            continue
+
+    if last_auth_error is not None:
+        raise last_auth_error
     raise CalendarIntegrationError("Слишком много перенаправлений iCloud CalDAV.")
 
 
@@ -268,10 +347,9 @@ def _first_property_href(xml_bytes: bytes, property_tag: str) -> str | None:
 
 def _caldav_discovery_candidates() -> list[str]:
     configured = (
-        settings.icloud_caldav_url
+        _clean_env_value(settings.icloud_caldav_url)
         or "https://caldav.icloud.com/.well-known/caldav"
-    ).strip()
-    configured = configured.rstrip("/")
+    ).rstrip("/")
 
     candidates: list[str] = []
     for candidate in (
@@ -345,6 +423,11 @@ def _discover_calendar_home() -> str:
 
 
 def _discover_calendar_url(calendar_name: str | None) -> tuple[str, str]:
+    direct_url = _clean_env_value(settings.icloud_calendar_url)
+    if direct_url:
+        normalized = direct_url.rstrip("/") + "/"
+        return normalized, calendar_name or "Указанный календарь"
+
     home_url = _discover_calendar_home()
     calendars_xml = f"""<?xml version="1.0" encoding="utf-8" ?>
 <d:propfind xmlns:d="DAV:" xmlns:c="{CALDAV_NS}" xmlns:a="{APPLE_NS}">
@@ -419,36 +502,11 @@ def _create_icloud_event(
     calendar_name: str | None,
 ) -> str:
     calendar_url, resolved_calendar_name = _discover_calendar_url(calendar_name)
-    uid = f"{uuid4().hex}@buybringsolutions"
-    now_utc = datetime.now(tz=timezone.utc)
-    start_utc = start_dt.astimezone(timezone.utc)
-    end_utc = end_dt.astimezone(timezone.utc)
-
-    ics = "\r\n".join(
-        [
-            "BEGIN:VCALENDAR",
-            "VERSION:2.0",
-            "PRODID:-//Buy & Bring Solutions//Telegram Assistant//RU",
-            "CALSCALE:GREGORIAN",
-            "METHOD:PUBLISH",
-            "BEGIN:VEVENT",
-            f"UID:{uid}",
-            f"DTSTAMP:{now_utc.strftime('%Y%m%dT%H%M%SZ')}",
-            f"DTSTART:{start_utc.strftime('%Y%m%dT%H%M%SZ')}",
-            f"DTEND:{end_utc.strftime('%Y%m%dT%H%M%SZ')}",
-            f"SUMMARY:{_ics_escape(title)}",
-            f"DESCRIPTION:{_ics_escape(description)}",
-            "STATUS:CONFIRMED",
-            "TRANSP:OPAQUE",
-            "BEGIN:VALARM",
-            "TRIGGER:-PT10M",
-            "ACTION:DISPLAY",
-            f"DESCRIPTION:{_ics_escape(title)}",
-            "END:VALARM",
-            "END:VEVENT",
-            "END:VCALENDAR",
-            "",
-        ]
+    uid, ics = build_ics_content(
+        title=title,
+        description=description,
+        start_dt=start_dt,
+        end_dt=end_dt,
     )
 
     event_url = urljoin(calendar_url, f"{quote(uid, safe='@')}.ics")
@@ -468,6 +526,52 @@ def _create_icloud_event(
         resolved_calendar_name,
     )
     return uid
+
+
+def test_icloud_connection() -> str:
+    """Validate iCloud credentials and calendar discovery."""
+    calendar_url, calendar_name = _discover_calendar_url(settings.icloud_calendar_name)
+    return f"Календарь найден: {calendar_name} ({calendar_url})"
+
+
+def create_event_with_fallback(
+    title: str,
+    description: str,
+    start_time_iso: str | None,
+    duration_minutes: int = 15,
+    calendar_id: str | None = None,
+) -> dict[str, Any]:
+    """Create a calendar event or return an .ics fallback when CalDAV fails."""
+    start_dt, end_dt = _resolve_event_times(start_time_iso, duration_minutes)
+    uid, ics_content = build_ics_content(
+        title=title,
+        description=description,
+        start_dt=start_dt,
+        end_dt=end_dt,
+    )
+    try:
+        event_id = create_event(
+            title,
+            description,
+            start_time_iso,
+            duration_minutes=duration_minutes,
+            calendar_id=calendar_id,
+        )
+        return {
+            "success": True,
+            "event_id": event_id,
+            "provider": provider_label(),
+            "ics_content": None,
+            "error": None,
+        }
+    except CalendarIntegrationError as exc:
+        return {
+            "success": False,
+            "event_id": uid,
+            "provider": provider_label(),
+            "ics_content": ics_content,
+            "error": str(exc),
+        }
 
 
 def _default_start() -> datetime:

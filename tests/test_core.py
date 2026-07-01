@@ -133,6 +133,26 @@ class TestKommoHelpers:
             == "90 Мини-экскаваторы"
         )
 
+    def test_extract_embedded_items_supports_list_response(self):
+        from app.services.kommo_service import _extract_embedded_items
+
+        payload = [{"id": 7711893, "name": "90 Надувная горка"}]
+        assert _extract_embedded_items(payload, "leads") == payload
+
+    def test_build_analysis_note_contains_sections(self):
+        from app.services.kommo_service import build_analysis_note_text
+
+        text = build_analysis_note_text(
+            client_data={"name": "Jan", "company": "Test"},
+            lead_data={"product_requested": "Горка", "budget": "1000 EUR"},
+            conversation_summary="Клиент интересуется горкой.",
+            recommended_next_step="Отправить КП.",
+            missing_questions=["Какой размер?"],
+        )
+        assert "АНАЛИЗ РАЗГОВОРА" in text
+        assert "Горка" in text
+        assert "СЛЕДУЮЩИЙ ШАГ" in text
+
 
 class TestApprovalFlow:
     @pytest.mark.asyncio
@@ -145,7 +165,6 @@ class TestApprovalFlow:
             telegram_user_id=123,
             chat_id=456,
         )
-        # The report lookup happens first in the current backwards-compatible flow.
         assert isinstance(result, str)
 
 
@@ -190,3 +209,40 @@ class TestKommoCreationRetry:
                     {"name": "Тест"},
                     "/api/v4/leads",
                 )
+
+
+class TestCalendarHelpers:
+    def test_build_ics_contains_alarm(self):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        from app.services.calendar_service import build_ics_content
+
+        start = datetime(2026, 7, 2, 10, 0, tzinfo=ZoneInfo("Europe/Warsaw"))
+        end = datetime(2026, 7, 2, 10, 30, tzinfo=ZoneInfo("Europe/Warsaw"))
+        uid, ics = build_ics_content(
+            title="Созвон",
+            description="Проверка",
+            start_dt=start,
+            end_dt=end,
+        )
+        assert uid.endswith("@buybringsolutions")
+        assert "BEGIN:VALARM" in ics
+        assert "TRIGGER:-PT10M" in ics
+
+    def test_create_event_with_fallback_returns_ics_on_error(self):
+        from app.services import calendar_service
+
+        with patch(
+            "app.services.calendar_service.create_event",
+            side_effect=calendar_service.CalendarIntegrationError("auth failed"),
+        ):
+            result = calendar_service.create_event_with_fallback(
+                "Созвон",
+                "Описание",
+                None,
+                15,
+            )
+        assert result["success"] is False
+        assert result["ics_content"]
+        assert "BEGIN:VCALENDAR" in result["ics_content"]

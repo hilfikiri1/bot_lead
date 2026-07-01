@@ -95,7 +95,8 @@ class Settings(BaseSettings):
     icloud_username: str = ""
     icloud_app_specific_password: str = ""
     icloud_calendar_name: str = "BBS Работа"
-    icloud_caldav_url: str = "https://caldav.icloud.com/"
+    icloud_caldav_url: str = "https://caldav.icloud.com/.well-known/caldav"
+    icloud_calendar_url: str = ""
 
     # Google Calendar (optional legacy provider)
     google_client_id: str = ""

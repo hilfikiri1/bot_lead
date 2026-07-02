@@ -13,6 +13,7 @@ class Client(Base):
     kommo_contact_id: Mapped[int | None] = mapped_column(
         BigInteger, nullable=True, unique=True, index=True
     )
+    notion_page_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     name: Mapped[str | None] = mapped_column(String(255))
     phone: Mapped[str | None] = mapped_column(String(50))
     email: Mapped[str | None] = mapped_column(String(255))

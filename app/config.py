@@ -128,6 +128,17 @@ class Settings(BaseSettings):
     manager_timezone: str = "Europe/Warsaw"
     kommo_default_task_type_id: int = 1
 
+    # Notion workspace integration
+    notion_api_token: str = ""
+    notion_auto_sync: bool = True
+    notion_clients_database_id: str = ""
+    notion_leads_database_id: str = ""
+    notion_calls_database_id: str = ""
+    notion_tasks_database_id: str = ""
+    voice_command_mode: bool = True
+    morning_digest_enabled: bool = True
+    morning_digest_hour: int = 8
+
     # App
     app_env: str = "development"
     secret_key: str = "change-me"

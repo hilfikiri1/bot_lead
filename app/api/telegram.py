@@ -22,8 +22,10 @@ from app.database import get_db
 from app.services import (
     approval_service,
     calendar_service,
+    command_router_service,
     crm_service,
     kommo_service,
+    notion_service,
     telegram_service,
     telegram_state_service,
 )
@@ -347,6 +349,47 @@ async def _handle_kommo_test(chat_id: int, user_id: int, db: AsyncSession) -> No
             "• <code>KOMMO_ACCESS_TOKEN</code>"
         )
     await telegram_service.send_message(chat_id, message)
+
+
+async def _handle_text_command(
+    chat_id: int,
+    user_id: int,
+    text: str,
+    db: AsyncSession,
+) -> bool:
+    if not text or text.startswith("/"):
+        return False
+    context = await crm_service.get_user_command_context(db, telegram_user_id=user_id)
+    state = await telegram_state_service.get_state(user_id)
+    if state:
+        if state.get("kommo_lead_id"):
+            context["kommo_lead_id"] = state.get("kommo_lead_id")
+        if state.get("notion_lead_page_id"):
+            context["notion_lead_page_id"] = state.get("notion_lead_page_id")
+    plan = await command_router_service.classify_message(text, context=context)
+    if plan.intent == "analyze_conversation":
+        return False
+    reply = await command_router_service.execute_plan(
+        db,
+        plan=plan,
+        chat_id=chat_id,
+        telegram_user_id=user_id,
+        context=context,
+    )
+    if reply:
+        await telegram_service.send_message(chat_id, reply)
+        return True
+    return False
+
+
+async def _handle_morning_digest(chat_id: int) -> None:
+    if not notion_service.is_configured():
+        await telegram_service.send_message(
+            chat_id,
+            "Notion не настроен. Добавьте NOTION_API_TOKEN и database IDs в Railway.",
+        )
+        return
+    await telegram_service.send_message(chat_id, await notion_service.get_morning_digest())
 
 
 async def _handle_calendar_test(chat_id: int, user_id: int) -> None:
@@ -1447,6 +1490,10 @@ async def telegram_webhook(
             await _handle_calendar_test(chat_id, user_id)
             return {"ok": True}
 
+        if text.startswith(("/digest", "/morning")):
+            await _handle_morning_digest(chat_id)
+            return {"ok": True}
+
         if text.startswith("/jobs"):
             await _show_audio_jobs(chat_id, user_id, db)
             return {"ok": True}
@@ -1467,6 +1514,11 @@ async def telegram_webhook(
 
         if text and await _handle_text_state(
             chat_id=chat_id, user_id=user_id, text=text
+        ):
+            return {"ok": True}
+
+        if text and await _handle_text_command(
+            chat_id=chat_id, user_id=user_id, text=text, db=db
         ):
             return {"ok": True}
 

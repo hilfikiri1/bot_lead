@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.admin import router as admin_router
 from app.api.telegram import router as telegram_router
 from app.config import get_settings
+from app.db_migrations import upgrade_database
 from app.services.telegram_service import (
     delete_webhook,
     register_webhook,
@@ -40,6 +41,11 @@ if settings.is_production:
 async def lifespan(app: FastAPI):
     app_logger = logging.getLogger(__name__)
     app_logger.info("Starting Buy & Bring CRM Assistant")
+
+    try:
+        await upgrade_database()
+    except Exception as exc:
+        app_logger.error("Startup migration failed: %s", exc)
 
     if (
         settings.telegram_bot_token

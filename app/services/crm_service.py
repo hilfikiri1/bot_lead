@@ -350,17 +350,25 @@ async def get_user_command_context(
     *,
     telegram_user_id: int,
 ) -> dict[str, Any]:
-    result = await db.execute(
-        select(VoiceNote)
-        .options(
-            selectinload(VoiceNote.lead).selectinload(Lead.client),
-            selectinload(VoiceNote.ai_report),
+    try:
+        result = await db.execute(
+            select(VoiceNote)
+            .options(
+                selectinload(VoiceNote.lead).selectinload(Lead.client),
+                selectinload(VoiceNote.ai_report),
+            )
+            .where(VoiceNote.telegram_user_id == telegram_user_id)
+            .order_by(VoiceNote.created_at.desc())
+            .limit(1)
         )
-        .where(VoiceNote.telegram_user_id == telegram_user_id)
-        .order_by(VoiceNote.created_at.desc())
-        .limit(1)
-    )
-    voice_note = result.scalar_one_or_none()
+        voice_note = result.scalar_one_or_none()
+    except Exception as exc:
+        logger.warning(
+            "Could not load command context for user %s: %s",
+            telegram_user_id,
+            exc,
+        )
+        return {"telegram_user_id": telegram_user_id}
     if not voice_note:
         return {"telegram_user_id": telegram_user_id}
     lead = voice_note.lead

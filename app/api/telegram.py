@@ -377,10 +377,11 @@ async def _handle_text_command(
         telegram_user_id=user_id,
         context=context,
     )
-    if reply:
-        await telegram_service.send_message(chat_id, reply)
+    if reply is not None:
+        if reply:
+            await telegram_service.send_message(chat_id, reply)
         return True
-    return False
+    return plan.intent != "analyze_conversation"
 
 
 async def _handle_morning_digest(chat_id: int) -> None:
@@ -462,52 +463,15 @@ async def _deliver_calendar_result(
     lead_name: str | None = None,
     start_display: str | None = None,
 ) -> None:
-    result = await asyncio.to_thread(
-        calendar_service.create_event_with_fallback,
-        title,
-        description,
-        start_iso,
-        duration_minutes,
-    )
-    if result["success"]:
-        await telegram_service.send_message(
-            chat_id,
-            (
-                f"✅ <b>Событие создано в {html.escape(result['provider'])}</b>\n\n"
-                + (
-                    f"Сделка: {html.escape(lead_name)}\n"
-                    if lead_name
-                    else ""
-                )
-                + f"Название: {html.escape(title)}\n"
-                + (
-                    f"Начало: {html.escape(start_display)}\n"
-                    if start_display
-                    else ""
-                )
-                + f"Event ID: <code>{html.escape(str(result['event_id']))}</code>\n"
-                "Напоминание: за 10 минут до начала."
-            ),
-        )
-        return
-
-    await telegram_service.send_message(
+    await telegram_service.send_calendar_result(
         chat_id,
-        (
-            "⚠️ <b>Не удалось записать событие напрямую в календарь</b>\n\n"
-            f"{html.escape(str(result.get('error') or 'Неизвестная ошибка'))}\n\n"
-            "Отправляю файл <code>.ics</code>. Откройте его на iPhone или Mac и "
-            "нажмите «Добавить в календарь»."
-        ),
+        title=title,
+        start_iso=start_iso,
+        duration_minutes=duration_minutes,
+        description=description,
+        start_display=start_display,
+        lead_name=lead_name,
     )
-    ics_bytes = str(result.get("ics_content") or "").encode("utf-8")
-    if ics_bytes:
-        await telegram_service.send_document(
-            chat_id,
-            filename="reminder.ics",
-            content=ics_bytes,
-            caption=f"📅 {html.escape(title)}",
-        )
 
 
 async def _show_audio_jobs(
@@ -1874,7 +1838,7 @@ async def telegram_webhook(
                 else:
                     await telegram_service.send_message(
                         chat_id,
-                        "🎙 Аудио получено. Начинаю расшифровку и анализ нового лида.",
+                        "🎙 Аудио получено. Начинаю расшифровку…",
                     )
                 return {"ok": True}
 
@@ -1912,7 +1876,7 @@ async def telegram_webhook(
                     await telegram_service.send_message(
                         chat_id,
                         (
-                            "🎙 Аудио получено и поставлено в очередь на обработку нового лида.\n\n"
+                            "🎙 Аудио получено и поставлено в очередь на обработку.\n\n"
                             "Если Celery worker не заберёт задачу, бот автоматически запустит резервную обработку."
                         ),
                     )

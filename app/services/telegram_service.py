@@ -861,8 +861,11 @@ def format_audio_jobs(jobs: list[Any]) -> str:
     lines = ["🧭 <b>Последние аудиозаписи</b>", "━━━━━━━━━━━━━━━━━━"]
     for job in jobs:
         created = job.created_at.strftime("%d.%m %H:%M") if job.created_at else "—"
-        lines.append(
+        block = (
             f"{labels.get(job.processing_status, job.processing_status)} · {created}\n"
             f"ID сообщения: <code>{job.telegram_message_id or '—'}</code>"
         )
+        if job.processing_status == "failed" and getattr(job, "processing_error", None):
+            block += f"\nОшибка: <code>{_esc(job.processing_error[:300])}</code>"
+        lines.append(block)
     return "\n\n".join(lines)

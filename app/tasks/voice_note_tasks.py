@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 
 from redis.asyncio import Redis
@@ -23,6 +24,11 @@ from app.services import (
 logger = logging.getLogger(__name__)
 settings = get_settings()
 PROCESSING_LOCK_TTL_SECONDS = 24 * 60 * 60
+
+
+def _user_error_text(exc: Exception, *, limit: int = 420) -> str:
+    message = str(exc).strip() or exc.__class__.__name__
+    return html.escape(message[:limit])
 
 
 def _run(coro):
@@ -220,17 +226,46 @@ async def _process(
             )
             if target_kommo_lead_id:
                 command_context["kommo_lead_id"] = target_kommo_lead_id
-            plan = await command_router_service.classify_message(
-                transcript, context=command_context
-            )
-            if plan.intent != "analyze_conversation":
-                command_reply = await command_router_service.execute_plan(
-                    db,
-                    plan=plan,
-                    chat_id=chat_id,
-                    telegram_user_id=telegram_user_id,
-                    context=command_context,
+            try:
+                plan = await command_router_service.classify_message(
+                    transcript, context=command_context
                 )
+            except Exception as exc:
+                logger.warning(
+                    "Command classification failed, using conversation analysis: %s",
+                    exc,
+                )
+                plan = command_router_service.CommandPlan(
+                    "analyze_conversation", 1.0, {}
+                )
+            if plan.intent != "analyze_conversation":
+                try:
+                    command_reply = await command_router_service.execute_plan(
+                        db,
+                        plan=plan,
+                        chat_id=chat_id,
+                        telegram_user_id=telegram_user_id,
+                        context=command_context,
+                    )
+                except Exception as exc:
+                    logger.exception("Voice command execution failed")
+                    await crm_service.update_voice_note_status(
+                        db,
+                        voice_note,
+                        "failed",
+                        error=f"command:{_user_error_text(exc)}",
+                        finished=True,
+                    )
+                    await telegram_service.send_message(
+                        chat_id,
+                        (
+                            "❌ <b>Команда не выполнена</b>\n\n"
+                            f"<code>{_user_error_text(exc)}</code>\n\n"
+                            "Проверьте iCloud/Notion переменные или повторите с датой и временем."
+                        ),
+                    )
+                    await _mark_processing_done(telegram_user_id, telegram_message_id)
+                    return
                 if command_reply is not None:
                     voice_note.audio_url = audio_url
                     voice_note.transcript = transcript
@@ -345,8 +380,12 @@ async def _process(
             try:
                 await telegram_service.send_message(
                     chat_id,
-                    "❌ <b>Обработка аудио остановлена</b>\n\n"
-                    "Ошибка сохранена в статусе задания. Откройте /jobs и повторите отправку файла.",
+                    (
+                        "❌ <b>Обработка аудио остановлена</b>\n\n"
+                        f"<code>{_user_error_text(exc)}</code>\n\n"
+                        "Ошибка сохранена в /jobs. Проверьте OPENAI_API_KEY, DATABASE_URL "
+                        "и что сервис перезапущен после обновления."
+                    ),
                 )
             except Exception:
                 logger.exception("Could not notify user about failed audio processing")

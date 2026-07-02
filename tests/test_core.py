@@ -356,6 +356,22 @@ class TestCommandRouter:
         plan = await classify_message("word " * 400, context={})
         assert plan.intent == "analyze_conversation"
 
+    @pytest.mark.asyncio
+    async def test_long_transcript_command_only_stays_unknown(self):
+        from app.services.command_router_service import classify_message
+
+        plan = await classify_message("word " * 400, context={}, command_only=True)
+        assert plan.intent == "unknown"
+
+    def test_short_voice_without_button_hint_is_unknown_in_command_only(self):
+        from app.services.command_router_service import _looks_like_command
+
+        text = (
+            "Клиент звонил и спрашивал про надувную горку, бюджет пять тысяч евро, "
+            "нужна доставка в Варшаву до конца месяца."
+        )
+        assert not _looks_like_command(text, strict=True)
+
     def test_parse_relative_time_tomorrow(self):
         from app.services.command_router_service import _parse_relative_time
 

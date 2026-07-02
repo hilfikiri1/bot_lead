@@ -771,16 +771,25 @@ async def _handle_manager_callback(
         await _prompt_search(chat_id, user_id)
         return True
     if callback_data == "menu:new":
-        await telegram_state_service.clear_state(user_id)
+        await telegram_state_service.set_state(
+            user_id,
+            {"mode": "awaiting_audio_for_new_lead", "chat_id": chat_id},
+            ttl_seconds=settings.telegram_state_ttl_minutes * 60,
+        )
         await telegram_service.send_message(
             chat_id,
             (
-                "🎙 <b>Новый разговор</b>\n\n"
-                "Отправьте голосовое сообщение или аудиофайл. Бот покажет прогресс, "
-                "сформирует анализ на русском и подготовит карточку нового лида."
+                "🎙 <b>Новый разговор с клиентом</b>\n\n"
+                "Отправьте голосовое или аудиофайл с записью разговора. "
+                "Бот сделает анализ на русском и подготовит карточку нового лида.\n\n"
+                "<i>Обычные голосовые без этой кнопки — только ваши команды боту "
+                "(календарь, напоминания, поиск сделок).</i>"
             ),
             reply_markup={
-                "inline_keyboard": [[{"text": "🏠 Меню", "callback_data": "menu:home"}]]
+                "inline_keyboard": [
+                    [{"text": "❌ Отмена", "callback_data": "state:cancel"}],
+                    [{"text": "🏠 Меню", "callback_data": "menu:home"}],
+                ]
             },
         )
         return True
@@ -1615,6 +1624,16 @@ async def _handle_text_state(
         )
         return True
 
+    if mode == "awaiting_audio_for_new_lead":
+        await telegram_service.send_message(
+            chat_id,
+            (
+                "Сейчас ожидается запись <b>разговора с клиентом</b>.\n"
+                "Отправьте голосовое или нажмите «Отмена»."
+            ),
+        )
+        return True
+
     if mode == "pending_note_confirmation":
         await telegram_service.send_message(
             chat_id,
@@ -1781,9 +1800,13 @@ async def telegram_webhook(
 
             target_kommo_lead_id: int | None = None
             target_lead_name: str | None = None
+            audio_intent = "command"
             if state and state.get("mode") == "awaiting_audio_for_lead":
                 target_kommo_lead_id = int(state.get("kommo_lead_id") or 0) or None
                 target_lead_name = str(state.get("lead_name") or "") or None
+                audio_intent = "lead_followup"
+            elif state and state.get("mode") == "awaiting_audio_for_new_lead":
+                audio_intent = "new_lead"
 
             max_bytes = min(settings.max_audio_file_size_mb, 20) * 1024 * 1024
             file_size = attachment.get("file_size")
@@ -1812,6 +1835,7 @@ async def telegram_webhook(
                 "file_id": attachment["file_id"],
                 "file_extension": attachment["file_extension"],
                 "target_kommo_lead_id": target_kommo_lead_id,
+                "audio_intent": audio_intent,
             }
             processing_mode = (
                 (settings.audio_processing_mode or "direct").strip().lower()
@@ -1819,26 +1843,34 @@ async def telegram_webhook(
 
             if processing_mode != "celery":
                 logger.info(
-                    "Telegram audio started in direct mode: user_id=%s message_id=%s target_kommo_lead_id=%s",
+                    "Telegram audio started in direct mode: user_id=%s message_id=%s "
+                    "target_kommo_lead_id=%s audio_intent=%s",
                     user_id,
                     message_id,
                     target_kommo_lead_id,
+                    audio_intent,
                 )
                 _spawn_background(process_voice_note_async(**process_kwargs))
-                if target_kommo_lead_id:
+                if audio_intent == "lead_followup" and target_kommo_lead_id:
                     await telegram_state_service.clear_state(user_id)
                     await telegram_service.send_message(
                         chat_id,
                         (
-                            "🎙 Аудио получено. Начинаю обработку для существующей сделки.\n"
+                            "🎙 Аудио получено. Начинаю анализ разговора по сделке.\n"
                             f"Сделка: <b>{html.escape(target_lead_name or str(target_kommo_lead_id))}</b>\n"
                             f"ID: <code>{target_kommo_lead_id}</code>"
                         ),
                     )
+                elif audio_intent == "new_lead":
+                    await telegram_state_service.clear_state(user_id)
+                    await telegram_service.send_message(
+                        chat_id,
+                        "🎙 Записываю разговор с клиентом. Начинаю анализ…",
+                    )
                 else:
                     await telegram_service.send_message(
                         chat_id,
-                        "🎙 Аудио получено. Начинаю расшифровку…",
+                        "🎙 Слушаю вашу команду…",
                     )
                 return {"ok": True}
 
@@ -1861,14 +1893,23 @@ async def telegram_webhook(
                         chat_id=chat_id,
                     )
                 )
-                if target_kommo_lead_id:
+                if audio_intent == "lead_followup" and target_kommo_lead_id:
                     await telegram_state_service.clear_state(user_id)
                     await telegram_service.send_message(
                         chat_id,
                         (
-                            "🎙 Аудио поставлено в очередь для обновления существующей сделки.\n"
+                            "🎙 Аудио поставлено в очередь для анализа по сделке.\n"
                             f"Сделка: <b>{html.escape(target_lead_name or str(target_kommo_lead_id))}</b>\n"
                             f"ID: <code>{target_kommo_lead_id}</code>\n\n"
+                            "Если Celery worker не заберёт задачу, бот автоматически запустит резервную обработку."
+                        ),
+                    )
+                elif audio_intent == "new_lead":
+                    await telegram_state_service.clear_state(user_id)
+                    await telegram_service.send_message(
+                        chat_id,
+                        (
+                            "🎙 Разговор с клиентом поставлен в очередь на анализ.\n\n"
                             "Если Celery worker не заберёт задачу, бот автоматически запустит резервную обработку."
                         ),
                     )
@@ -1876,7 +1917,7 @@ async def telegram_webhook(
                     await telegram_service.send_message(
                         chat_id,
                         (
-                            "🎙 Аудио получено и поставлено в очередь на обработку.\n\n"
+                            "🎙 Команда поставлена в очередь.\n\n"
                             "Если Celery worker не заберёт задачу, бот автоматически запустит резервную обработку."
                         ),
                     )

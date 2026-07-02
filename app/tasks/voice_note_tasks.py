@@ -103,6 +103,7 @@ def process_voice_note(
     file_id: str,
     file_extension: str = "ogg",
     target_kommo_lead_id: int | None = None,
+    audio_intent: str = "command",
 ):
     try:
         _run(
@@ -113,6 +114,7 @@ def process_voice_note(
                 file_id=file_id,
                 file_extension=file_extension,
                 target_kommo_lead_id=target_kommo_lead_id,
+                audio_intent=audio_intent,
                 notify_failure=False,
             )
         )
@@ -138,6 +140,7 @@ async def process_voice_note_async(
     file_id: str,
     file_extension: str = "ogg",
     target_kommo_lead_id: int | None = None,
+    audio_intent: str = "command",
     notify_failure: bool = True,
 ) -> None:
     await _process(
@@ -147,6 +150,7 @@ async def process_voice_note_async(
         file_id=file_id,
         file_extension=file_extension,
         target_kommo_lead_id=target_kommo_lead_id,
+        audio_intent=audio_intent,
         notify_failure=notify_failure,
     )
 
@@ -159,6 +163,7 @@ async def _process(
     file_id: str,
     file_extension: str,
     target_kommo_lead_id: int | None = None,
+    audio_intent: str = "command",
     notify_failure: bool = True,
 ) -> None:
     if not await _acquire_processing_lock(telegram_user_id, telegram_message_id):
@@ -202,6 +207,7 @@ async def _process(
                 chat_id,
                 "download",
                 target_kommo_lead_id=target_kommo_lead_id,
+                command_mode=audio_intent == "command",
             )
             logger.info("Downloading Telegram audio")
             audio_bytes = await telegram_service.download_voice(file_id)
@@ -214,6 +220,7 @@ async def _process(
                 chat_id,
                 "transcribe",
                 target_kommo_lead_id=target_kommo_lead_id,
+                command_mode=audio_intent == "command",
             )
             transcript, language = await transcription_service.transcribe_audio(
                 audio_bytes,
@@ -221,24 +228,19 @@ async def _process(
             )
             logger.info("Transcription complete: %d chars", len(transcript))
 
-            command_context = await crm_service.get_user_command_context(
-                db, telegram_user_id=telegram_user_id
-            )
-            if target_kommo_lead_id:
-                command_context["kommo_lead_id"] = target_kommo_lead_id
-            try:
-                plan = await command_router_service.classify_message(
-                    transcript, context=command_context
+            if audio_intent == "command":
+                command_context = await crm_service.get_user_command_context(
+                    db, telegram_user_id=telegram_user_id
                 )
-            except Exception as exc:
-                logger.warning(
-                    "Command classification failed, using conversation analysis: %s",
-                    exc,
-                )
-                plan = command_router_service.CommandPlan(
-                    "analyze_conversation", 1.0, {}
-                )
-            if plan.intent != "analyze_conversation":
+                try:
+                    plan = await command_router_service.classify_message(
+                        transcript,
+                        context=command_context,
+                        command_only=True,
+                    )
+                except Exception as exc:
+                    logger.warning("Command classification failed: %s", exc)
+                    plan = command_router_service.CommandPlan("unknown", 0.0, {})
                 try:
                     command_reply = await command_router_service.execute_plan(
                         db,
@@ -266,20 +268,27 @@ async def _process(
                     )
                     await _mark_processing_done(telegram_user_id, telegram_message_id)
                     return
-                if command_reply is not None:
-                    voice_note.audio_url = audio_url
-                    voice_note.transcript = transcript
-                    voice_note.language = language
-                    await crm_service.update_voice_note_status(
-                        db,
-                        voice_note,
-                        "ready",
-                        finished=True,
+
+                voice_note.audio_url = audio_url
+                voice_note.transcript = transcript
+                voice_note.language = language
+                await crm_service.update_voice_note_status(
+                    db,
+                    voice_note,
+                    "ready",
+                    finished=True,
+                )
+                if command_reply:
+                    await telegram_service.send_message(chat_id, command_reply)
+                elif plan.intent in {"unknown", "analyze_conversation"}:
+                    await telegram_service.send_message(
+                        chat_id, command_router_service.COMMAND_NOT_RECOGNIZED
                     )
-                    if command_reply:
-                        await telegram_service.send_message(chat_id, command_reply)
-                    await _mark_processing_done(telegram_user_id, telegram_message_id)
-                    return
+                await _mark_processing_done(telegram_user_id, telegram_message_id)
+                return
+
+            if target_kommo_lead_id:
+                command_context["kommo_lead_id"] = target_kommo_lead_id
 
             await crm_service.update_voice_note_status(db, voice_note, "analyzing")
             await telegram_service.send_processing_step(

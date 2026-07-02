@@ -110,7 +110,7 @@ class CommandPlan:
     raw: dict[str, Any]
 
 
-def _looks_like_command(text: str) -> bool:
+def _looks_like_command(text: str, *, strict: bool = False) -> bool:
     clean = text.strip().casefold()
     if not clean:
         return False
@@ -118,18 +118,27 @@ def _looks_like_command(text: str) -> bool:
         return False
     if any(hint in clean for hint in COMMAND_HINTS):
         return True
+    if strict:
+        return False
     return len(clean) < 220
 
 
-async def classify_message(text: str, *, context: dict[str, Any]) -> CommandPlan:
+async def classify_message(
+    text: str,
+    *,
+    context: dict[str, Any],
+    command_only: bool = False,
+) -> CommandPlan:
     transcript = text.strip()
     if not transcript:
         return CommandPlan("unknown", 0.0, {})
 
-    if not settings.voice_command_mode:
+    if command_only:
+        if not _looks_like_command(transcript, strict=True):
+            return CommandPlan("unknown", 0.0, {})
+    elif not settings.voice_command_mode:
         return CommandPlan("analyze_conversation", 1.0, {})
-
-    if not _looks_like_command(transcript):
+    elif not _looks_like_command(transcript):
         return CommandPlan("analyze_conversation", 0.9, {})
 
     response = await _client.chat.completions.create(
@@ -150,7 +159,21 @@ async def classify_message(text: str, *, context: dict[str, Any]) -> CommandPlan
     raw = json.loads(response.choices[0].message.content or "{}")
     intent = str(raw.get("intent") or "unknown")
     confidence = float(raw.get("confidence") or 0.0)
+    if command_only and intent == "analyze_conversation":
+        intent = "unknown"
+        confidence = 0.0
     return CommandPlan(intent=intent, confidence=confidence, raw=raw)
+
+
+COMMAND_NOT_RECOGNIZED = (
+    "🤔 <b>Не распознал команду</b>\n\n"
+    "Примеры:\n"
+    "• <i>Напомни завтра в 10 позвонить клиенту</i>\n"
+    "• <i>Добавь в календарь созвон в пятницу в 15:00</i>\n"
+    "• <i>Найди сделку 90 надувная</i>\n\n"
+    "Чтобы записать <b>разговор с клиентом</b> и создать лид — "
+    "нажмите <b>🎙 Новый разговор</b> в меню и затем отправьте аудио."
+)
 
 
 def _manager_tz() -> ZoneInfo:

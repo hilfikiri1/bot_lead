@@ -341,6 +341,38 @@ class TestNotionHelpers:
             assert notion_service.is_configured() is True
 
     @pytest.mark.asyncio
+    async def test_create_reminder_skips_notion_tasks(self):
+        from app.services import command_router_service
+
+        with patch(
+            "app.services.command_router_service._create_calendar_event",
+            new=AsyncMock(return_value=None),
+        ), patch(
+            "app.services.notion_service.create_task_page",
+            new=AsyncMock(),
+        ) as task_mock, patch(
+            "app.services.command_router_service.settings"
+        ) as settings_mock:
+            settings_mock.notion_tasks_database_id = "bad-db-id"
+            plan = command_router_service.CommandPlan(
+                "create_reminder",
+                0.9,
+                {
+                    "task_title": "Позвонить",
+                    "calendar": {"start_time": "завтра в 10:00"},
+                },
+            )
+            reply = await command_router_service.execute_plan(
+                AsyncMock(),
+                plan=plan,
+                chat_id=1,
+                telegram_user_id=1,
+                context={},
+            )
+        task_mock.assert_not_called()
+        assert reply is None
+
+    @pytest.mark.asyncio
     async def test_create_task_page_swallows_notion_errors(self):
         from app.services import notion_service
 

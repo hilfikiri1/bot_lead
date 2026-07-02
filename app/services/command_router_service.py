@@ -294,6 +294,33 @@ async def execute_plan(
     telegram_user_id: int,
     context: dict[str, Any],
 ) -> str | None:
+    try:
+        return await _execute_plan_body(
+            db,
+            plan=plan,
+            chat_id=chat_id,
+            telegram_user_id=telegram_user_id,
+            context=context,
+        )
+    except notion_service.NotionAPIError as exc:
+        logger.warning("Notion API error during command: %s", exc)
+        return (
+            "⚠️ <b>Notion недоступен</b>\n\n"
+            f"<code>{html.escape(str(exc)[:350])}</code>\n\n"
+            "Для напоминаний в календарь Notion не нужен — проверьте iCloud.\n"
+            "Если tasks DB не используете, очистите "
+            "<code>NOTION_TASKS_DATABASE_ID</code> в Railway."
+        )
+
+
+async def _execute_plan_body(
+    db: AsyncSession,
+    *,
+    plan: CommandPlan,
+    chat_id: int,
+    telegram_user_id: int,
+    context: dict[str, Any],
+) -> str | None:
     if plan.intent == "analyze_conversation":
         return None
     if plan.confidence < 0.65 and plan.intent not in {"morning_digest"}:
@@ -360,25 +387,36 @@ async def execute_plan(
         calendar_handled = False
 
         if calendar_requested:
-            calendar_reply = await _create_calendar_event(
-                chat_id,
-                title=title,
-                start_iso=start_iso,
-                duration_minutes=duration,
-            )
+            try:
+                calendar_reply = await _create_calendar_event(
+                    chat_id,
+                    title=title,
+                    start_iso=start_iso,
+                    duration_minutes=duration,
+                )
+            except Exception as exc:
+                logger.exception("Calendar command failed")
+                return (
+                    "❌ <b>Не удалось добавить в календарь</b>\n\n"
+                    f"<code>{html.escape(str(exc)[:300])}</code>\n\n"
+                    "Проверьте <code>ICLOUD_USERNAME</code> и "
+                    "<code>ICLOUD_APP_SPECIFIC_PASSWORD</code> в Railway."
+                )
             if calendar_reply:
                 if intent == "create_calendar":
+                    return calendar_reply
+                if intent == "create_reminder":
                     return calendar_reply
                 if not settings.notion_tasks_database_id.strip():
                     return calendar_reply
             else:
                 calendar_handled = True
-                if intent == "create_calendar":
+                if intent in {"create_calendar", "create_reminder"}:
                     return None
 
         page_id = None
         notion_warning = ""
-        if settings.notion_tasks_database_id.strip() and intent != "create_calendar":
+        if intent == "create_task" and settings.notion_tasks_database_id.strip():
             page_id = await notion_service.create_task_page(
                 title=title[:200],
                 task_type="Goal" if "цел" in title.casefold() else "Task",

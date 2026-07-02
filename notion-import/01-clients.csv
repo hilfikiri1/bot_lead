@@ -1,2 +1,5 @@
-Name,Company,Phone,Email,Language,Status,Local ID,Manager thoughts,Strategy notes
-Пример: Centrum Kosmetologii,Centrum Kosmetologii,+48123456789,info@example.pl,pl,Active,,
+﻿Name,Company,Phone,Email,Language,Status,Local ID,Manager thoughts,Strategy notes
+Centrum Kosmetologii,Centrum Kosmetologii,+48123456789,info@example.pl,pl,Active,1,,
+Kowalski Sp z oo,Kowalski Sp z oo,+48987654321,jan@kowalski.pl,pl,Active,2,,
+Beauty Import Ltd,Beauty Import Ltd,+442071234567,hello@beautyimport.co.uk,en,Dormant,3,,
+Test Client,Test Client,+48111222333,test@test.pl,pl,Active,4,,

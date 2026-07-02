@@ -340,6 +340,22 @@ class TestNotionHelpers:
             mp.setattr(notion_service.settings, "notion_api_token", "secret")
             assert notion_service.is_configured() is True
 
+    @pytest.mark.asyncio
+    async def test_create_task_page_swallows_notion_errors(self):
+        from app.services import notion_service
+
+        with pytest.MonkeyPatch.context() as mp, patch(
+            "app.services.notion_service.create_page",
+            new=AsyncMock(
+                side_effect=notion_service.NotionAPIError("object_not_found", 404)
+            ),
+        ):
+            mp.setattr(
+                notion_service.settings, "notion_tasks_database_id", "tasks-db-id"
+            )
+            page_id = await notion_service.create_task_page(title="Позвонить")
+        assert page_id is None
+
 
 class TestCommandRouter:
     def test_short_command_hint_detected(self):

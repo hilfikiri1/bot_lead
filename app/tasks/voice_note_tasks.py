@@ -263,7 +263,7 @@ async def _process(
                         (
                             "❌ <b>Команда не выполнена</b>\n\n"
                             f"<code>{_user_error_text(exc)}</code>\n\n"
-                            "Проверьте iCloud/Notion переменные или повторите с датой и временем."
+                            "Для календаря проверьте iCloud. Для Notion — ID базы и доступ интеграции."
                         ),
                     )
                     await _mark_processing_done(telegram_user_id, telegram_message_id)

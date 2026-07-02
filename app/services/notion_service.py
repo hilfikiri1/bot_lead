@@ -456,8 +456,12 @@ async def create_task_page(
     if lead_page_id:
         properties["Lead"] = _prop_relation([lead_page_id])
 
-    created = await create_page(db_id, properties)
-    return created.get("id")
+    try:
+        created = await create_page(db_id, properties)
+        return created.get("id")
+    except NotionAPIError as exc:
+        logger.warning("Notion task page was not created: %s", exc)
+        return None
 
 
 async def sync_analyzed_call(

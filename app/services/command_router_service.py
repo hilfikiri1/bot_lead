@@ -377,6 +377,7 @@ async def execute_plan(
                     return None
 
         page_id = None
+        notion_warning = ""
         if settings.notion_tasks_database_id.strip() and intent != "create_calendar":
             page_id = await notion_service.create_task_page(
                 title=title[:200],
@@ -386,12 +387,20 @@ async def execute_plan(
                 client_page_id=context.get("notion_client_page_id"),
                 source="Voice",
             )
+            if page_id is None:
+                notion_warning = (
+                    "\n\n⚠️ В Notion задача не сохранена: проверьте "
+                    "<code>NOTION_TASKS_DATABASE_ID</code> и что база открыта "
+                    "для интеграции <i>Buy Bring Bot</i>."
+                )
 
         if page_id and calendar_handled:
             return "✅ Задача добавлена в Notion."
         if page_id:
             return "✅ Задача добавлена в Notion."
         if calendar_handled:
+            if notion_warning:
+                return f"✅ Напоминание добавлено в календарь.{notion_warning}"
             return None
         if calendar_requested:
             return (

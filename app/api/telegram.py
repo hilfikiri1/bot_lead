@@ -6,6 +6,7 @@ import asyncio
 import hmac
 import html
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -579,6 +580,50 @@ async def _show_lead_details(
     )
 
 
+def _lead_edit_snapshot(details: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "name": details.get("name"),
+        "price": details.get("price"),
+        "status_id": details.get("status_id"),
+        "status_name": details.get("status_name"),
+        "pipeline_id": details.get("pipeline_id"),
+    }
+
+
+async def _show_lead_edit_preview(
+    chat_id: int,
+    user_id: int,
+    lead_id: int,
+    *,
+    return_page: int = 1,
+    draft: dict[str, Any] | None = None,
+    original: dict[str, Any] | None = None,
+) -> None:
+    details = await kommo_service.get_lead_details(lead_id)
+    snapshot = _lead_edit_snapshot(details)
+    original = original or snapshot
+    draft = draft or dict(snapshot)
+    await telegram_state_service.set_state(
+        user_id,
+        {
+            "mode": "kommo_lead_edit_preview",
+            "chat_id": chat_id,
+            "kommo_lead_id": lead_id,
+            "return_page": return_page,
+            "original": original,
+            "draft": draft,
+        },
+        ttl_seconds=settings.telegram_state_ttl_minutes * 60,
+    )
+    await telegram_service.send_lead_edit_preview(
+        chat_id,
+        lead_id=lead_id,
+        draft=draft,
+        original=original,
+        return_page=return_page,
+    )
+
+
 async def _prompt_search(chat_id: int, user_id: int) -> None:
     await telegram_state_service.set_state(
         user_id,
@@ -805,6 +850,194 @@ async def _handle_manager_callback(
     if callback_data.startswith("lead:calendar:"):
         _, _, lead_id_raw, page_raw = callback_data.split(":", 3)
         await _prompt_calendar_event(chat_id, user_id, int(lead_id_raw), int(page_raw))
+        return True
+    if callback_data.startswith("lead:edit:"):
+        _, _, lead_id_raw, page_raw = callback_data.split(":", 3)
+        await _show_lead_edit_preview(
+            chat_id,
+            user_id,
+            int(lead_id_raw),
+            return_page=int(page_raw),
+        )
+        return True
+    if callback_data.startswith("leadedit:cancel:"):
+        _, _, lead_id_raw, page_raw = callback_data.split(":", 3)
+        await telegram_state_service.clear_state(user_id)
+        await telegram_service.send_message(chat_id, "❌ Редактирование отменено.")
+        await _show_lead_details(chat_id, int(lead_id_raw), return_page=int(page_raw))
+        return True
+    if callback_data.startswith("leadedit:back:"):
+        _, _, lead_id_raw, page_raw = callback_data.split(":", 3)
+        state = await telegram_state_service.get_state(user_id)
+        if not state or state.get("mode") not in {
+            "kommo_lead_edit_preview",
+            "kommo_lead_edit_field",
+        }:
+            await _show_lead_edit_preview(
+                chat_id,
+                user_id,
+                int(lead_id_raw),
+                return_page=int(page_raw),
+            )
+            return True
+        await _show_lead_edit_preview(
+            chat_id,
+            user_id,
+            int(lead_id_raw),
+            return_page=int(page_raw),
+            draft=dict(state.get("draft") or {}),
+            original=dict(state.get("original") or {}),
+        )
+        return True
+    if callback_data.startswith("leadedit:confirm:"):
+        _, _, lead_id_raw, page_raw = callback_data.split(":", 3)
+        lead_id = int(lead_id_raw)
+        return_page = int(page_raw)
+        state = await telegram_state_service.get_state(user_id)
+        if not state or state.get("mode") != "kommo_lead_edit_preview":
+            await telegram_service.send_message(
+                chat_id, "⚠️ Редактирование устарело. Откройте сделку заново."
+            )
+            return True
+        if int(state.get("kommo_lead_id") or 0) != lead_id:
+            await telegram_service.send_message(
+                chat_id, "❌ Сделка в подтверждении не совпадает."
+            )
+            return True
+        original = dict(state.get("original") or {})
+        draft = dict(state.get("draft") or {})
+        update_kwargs: dict[str, Any] = {}
+        if draft.get("name") != original.get("name"):
+            update_kwargs["name"] = str(draft.get("name") or "")
+        if draft.get("price") != original.get("price"):
+            update_kwargs["price"] = int(draft.get("price") or 0)
+        if draft.get("status_id") != original.get("status_id"):
+            update_kwargs["status_id"] = int(draft.get("status_id") or 0)
+        if not update_kwargs:
+            await telegram_service.send_message(chat_id, "Нет изменений для сохранения.")
+            return True
+        await telegram_service.send_message(chat_id, "⏳ Обновляю сделку в Kommo…")
+        try:
+            result = await kommo_service.update_kommo_lead(lead_id, **update_kwargs)
+        except Exception as exc:
+            await telegram_service.send_message(
+                chat_id,
+                f"❌ <b>Не удалось обновить сделку</b>\n\n{html.escape(str(exc)[:500])}",
+            )
+            return True
+        await telegram_state_service.clear_state(user_id)
+        await telegram_service.send_message(
+            chat_id,
+            (
+                "✅ <b>Сделка обновлена</b>\n\n"
+                f"Название: <b>{html.escape(str(result.get('lead_name') or '—'))}</b>\n"
+                f"Бюджет: {html.escape(str(result.get('price') or '—'))}\n"
+                f"Этап: {html.escape(str(result.get('status_name') or '—'))}"
+            ),
+            reply_markup={
+                "inline_keyboard": [
+                    [{"text": "🔗 Открыть Kommo", "url": result.get("url")}]
+                ]
+            },
+        )
+        await _show_lead_details(chat_id, lead_id, return_page=return_page)
+        return True
+    if callback_data.startswith("leadedit:edit:"):
+        _, _, field, lead_id_raw, page_raw = callback_data.split(":", 4)
+        lead_id = int(lead_id_raw)
+        return_page = int(page_raw)
+        state = await telegram_state_service.get_state(user_id)
+        if not state or state.get("mode") != "kommo_lead_edit_preview":
+            await telegram_service.send_message(
+                chat_id, "⚠️ Редактирование устарело. Откройте сделку заново."
+            )
+            return True
+        if int(state.get("kommo_lead_id") or 0) != lead_id:
+            await telegram_service.send_message(
+                chat_id, "❌ Сделка в сессии не совпадает."
+            )
+            return True
+        if field == "status":
+            pipeline_id = (state.get("draft") or {}).get("pipeline_id")
+            if not isinstance(pipeline_id, int):
+                details = await kommo_service.get_lead_details(lead_id)
+                pipeline_id = details.get("pipeline_id")
+            statuses = await kommo_service.get_pipeline_statuses(int(pipeline_id))
+            if not statuses:
+                await telegram_service.send_message(
+                    chat_id, "❌ Не удалось загрузить этапы воронки."
+                )
+                return True
+            await telegram_state_service.set_state(
+                user_id,
+                {**state, "mode": "kommo_lead_edit_field", "edit_field": "status"},
+                ttl_seconds=settings.telegram_state_ttl_minutes * 60,
+            )
+            await telegram_service.send_lead_status_picker(
+                chat_id,
+                lead_id=lead_id,
+                statuses=statuses,
+                return_page=return_page,
+            )
+            return True
+        prompts = {
+            "name": "Введите новое название сделки.",
+            "price": (
+                "Введите новый бюджет числом. Например: <code>15000</code>. "
+                "Отправьте <code>0</code>, чтобы сбросить бюджет."
+            ),
+        }
+        if field not in prompts:
+            await telegram_service.send_message(chat_id, "❌ Неизвестное поле.")
+            return True
+        await telegram_state_service.set_state(
+            user_id,
+            {**state, "mode": "kommo_lead_edit_field", "edit_field": field},
+            ttl_seconds=settings.telegram_state_ttl_minutes * 60,
+        )
+        await telegram_service.send_message(
+            chat_id,
+            f"✏️ <b>Редактирование</b>\n\n{prompts[field]}",
+            reply_markup={
+                "inline_keyboard": [
+                    [
+                        {
+                            "text": "↩️ Назад",
+                            "callback_data": f"leadedit:back:{lead_id}:{return_page}",
+                        }
+                    ]
+                ]
+            },
+        )
+        return True
+    if callback_data.startswith("leadedit:status:"):
+        _, _, status_id_raw, lead_id_raw, page_raw = callback_data.split(":", 4)
+        lead_id = int(lead_id_raw)
+        return_page = int(page_raw)
+        status_id = int(status_id_raw)
+        state = await telegram_state_service.get_state(user_id)
+        if not state or state.get("mode") != "kommo_lead_edit_field":
+            await telegram_service.send_message(
+                chat_id, "⚠️ Выбор этапа устарел. Откройте редактирование заново."
+            )
+            return True
+        draft = dict(state.get("draft") or {})
+        pipeline_id = draft.get("pipeline_id")
+        statuses = await kommo_service.get_pipeline_statuses(int(pipeline_id))
+        status_name = next(
+            (item.get("name") for item in statuses if item.get("id") == status_id),
+            f"Этап {status_id}",
+        )
+        draft["status_id"] = status_id
+        draft["status_name"] = status_name
+        await _show_lead_edit_preview(
+            chat_id,
+            user_id,
+            lead_id,
+            return_page=return_page,
+            draft=draft,
+            original=dict(state.get("original") or {}),
+        )
         return True
     if callback_data.startswith("leadcreate:preview:"):
         _, _, lead_id_raw, voice_note_id_raw = callback_data.split(":", 3)
@@ -1169,6 +1402,42 @@ async def _handle_text_state(
             result,
             page=1,
             search_mode=True,
+        )
+        return True
+
+    if mode == "kommo_lead_edit_field":
+        field = str(state.get("edit_field") or "")
+        lead_id = int(state.get("kommo_lead_id") or 0)
+        return_page = int(state.get("return_page") or 1)
+        draft = dict(state.get("draft") or {})
+        original = dict(state.get("original") or {})
+        value = text.strip()
+        if field == "name":
+            if not value:
+                await telegram_service.send_message(
+                    chat_id, "Название не может быть пустым."
+                )
+                return True
+            draft["name"] = value[:255]
+        elif field == "price":
+            digits = re.sub(r"\D", "", value)
+            if not digits:
+                await telegram_service.send_message(
+                    chat_id,
+                    "Введите бюджет числом. Например: <code>15000</code>.",
+                )
+                return True
+            draft["price"] = int(digits)
+        else:
+            await telegram_service.send_message(chat_id, "❌ Неизвестное поле.")
+            return True
+        await _show_lead_edit_preview(
+            chat_id,
+            user_id,
+            lead_id,
+            return_page=return_page,
+            draft=draft,
+            original=original,
         )
         return True
 

@@ -470,7 +470,81 @@ async def _submit_new_lead(lead_payload: dict[str, Any], endpoint: str) -> Any:
         return await _request("POST", endpoint, json_body=[safe_payload])
 
 
-async def get_all_open_leads(max_pages: int | None = None) -> dict[str, Any]:
+def configured_menu_pipeline_id() -> int | None:
+    """Pipeline used for open-deal list and search in Telegram."""
+    return settings.kommo_menu_pipeline_id or settings.kommo_default_pipeline_id
+
+
+def _lead_belongs_to_pipeline(lead: dict[str, Any], pipeline_id: int | None) -> bool:
+    if pipeline_id is None:
+        return True
+    return lead.get("pipeline_id") == pipeline_id
+
+
+async def get_pipeline_statuses(pipeline_id: int) -> list[dict[str, Any]]:
+    """Return stages for one Kommo pipeline."""
+    data = await _request("GET", "/api/v4/leads/pipelines")
+    pipelines = ((data or {}).get("_embedded") or {}).get("pipelines") or []
+    for pipeline in pipelines:
+        if pipeline.get("id") != pipeline_id:
+            continue
+        statuses = (pipeline.get("_embedded") or {}).get("statuses") or []
+        return [
+            {
+                "id": status.get("id"),
+                "name": status.get("name") or f"Этап {status.get('id')}",
+                "sort": status.get("sort", 0),
+            }
+            for status in statuses
+            if isinstance(status.get("id"), int)
+        ]
+    return []
+
+
+async def update_kommo_lead(
+    lead_id: int,
+    *,
+    name: str | None = None,
+    price: int | None = None,
+    status_id: int | None = None,
+) -> dict[str, Any]:
+    """Update an existing Kommo lead after manager confirmation."""
+    if lead_id <= 0:
+        raise ValueError("Некорректный ID сделки.")
+
+    payload: dict[str, Any] = {"id": lead_id}
+    if name is not None:
+        clean_name = name.strip()
+        if not clean_name:
+            raise ValueError("Название сделки не может быть пустым.")
+        payload["name"] = clean_name[:255]
+    if price is not None:
+        payload["price"] = max(0, int(price))
+    if status_id is not None:
+        payload["status_id"] = int(status_id)
+
+    if len(payload) == 1:
+        raise ValueError("Нет полей для обновления.")
+
+    data = await _request("PATCH", "/api/v4/leads", json_body=[payload])
+    updated_items = _extract_embedded_items(data, "leads")
+    updated = updated_items[0] if updated_items else {"id": lead_id, **payload}
+    details = await get_lead_details(lead_id)
+    return {
+        "lead_id": lead_id,
+        "lead_name": updated.get("name") or details.get("name"),
+        "price": updated.get("price", details.get("price")),
+        "status_name": details.get("status_name"),
+        "pipeline_name": details.get("pipeline_name"),
+        "url": details.get("url"),
+    }
+
+
+async def get_all_open_leads(
+    max_pages: int | None = None,
+    *,
+    pipeline_id: int | None = None,
+) -> dict[str, Any]:
     """
     Fetch all leads page by page and keep only leads without closed_at.
 
@@ -479,29 +553,35 @@ async def get_all_open_leads(max_pages: int | None = None) -> dict[str, Any]:
     """
     page_cap = max_pages or settings.kommo_open_leads_max_pages
     page_cap = max(1, min(page_cap, 100))
+    selected_pipeline = (
+        pipeline_id if pipeline_id is not None else configured_menu_pipeline_id()
+    )
 
     open_leads: list[dict[str, Any]] = []
     scanned = 0
     truncated = False
 
     for page in range(1, page_cap + 1):
-        data = await _request(
-            "GET",
-            "/api/v4/leads",
-            params={
-                "page": page,
-                "limit": PAGE_SIZE,
-                "order[updated_at]": "desc",
-            },
-        )
+        params: dict[str, Any] = {
+            "page": page,
+            "limit": PAGE_SIZE,
+            "order[updated_at]": "desc",
+        }
+        if selected_pipeline is not None:
+            params["filter[pipeline_id]"] = selected_pipeline
+
+        data = await _request("GET", "/api/v4/leads", params=params)
         if data is None:
             break
 
         page_leads = (data.get("_embedded") or {}).get("leads") or []
         scanned += len(page_leads)
         for lead in page_leads:
-            if not lead.get("closed_at"):
-                open_leads.append(lead)
+            if lead.get("closed_at"):
+                continue
+            if not _lead_belongs_to_pipeline(lead, selected_pipeline):
+                continue
+            open_leads.append(lead)
 
         if len(page_leads) < PAGE_SIZE:
             break
@@ -539,12 +619,19 @@ async def get_all_open_leads(max_pages: int | None = None) -> dict[str, Any]:
         )
 
     normalized.sort(key=lambda item: item.get("updated_at") or 0, reverse=True)
+    pipeline_label = None
+    if selected_pipeline is not None:
+        pipeline_label = pipeline_names.get(
+            selected_pipeline, f"Воронка {selected_pipeline}"
+        )
     return {
         "leads": normalized,
         "open_count": len(normalized),
         "scanned_count": scanned,
         "truncated": truncated,
         "page_cap": page_cap,
+        "pipeline_id": selected_pipeline,
+        "pipeline_name": pipeline_label,
     }
 
 
@@ -1018,6 +1105,7 @@ async def search_open_leads(query: str, limit: int = 20) -> dict[str, Any]:
 
     limit = max(1, min(limit, 50))
     matches: dict[int, tuple[int, dict[str, Any]]] = {}
+    selected_pipeline = configured_menu_pipeline_id()
 
     if query.isdigit():
         try:
@@ -1030,6 +1118,7 @@ async def search_open_leads(query: str, limit: int = 20) -> dict[str, Any]:
                 exact
                 and not exact.get("closed_at")
                 and isinstance(exact.get("id"), int)
+                and _lead_belongs_to_pipeline(exact, selected_pipeline)
             ):
                 matches[int(exact["id"])] = (-1, exact)
         except KommoAPIError as exc:
@@ -1058,11 +1147,16 @@ async def search_open_leads(query: str, limit: int = 20) -> dict[str, Any]:
         ),
     )
     leads = [item[1] for item in ordered[:limit]]
+    pipeline_label = all_open.get("pipeline_name")
+    if pipeline_label is None and selected_pipeline is not None:
+        pipeline_label = f"Воронка {selected_pipeline}"
     return {
         "leads": leads,
         "open_count": len(leads),
         "query": query,
         "search_kind": "partial_title",
+        "pipeline_id": selected_pipeline,
+        "pipeline_name": pipeline_label,
     }
 
 

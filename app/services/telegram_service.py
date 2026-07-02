@@ -398,10 +398,14 @@ async def send_lead_selection_menu(
         ]
     )
     title = "Результаты поиска" if search_mode else "Открытые сделки"
+    pipeline_name = result.get("pipeline_name")
+    pipeline_suffix = (
+        f" · воронка <b>{_esc(pipeline_name)}</b>" if pipeline_name else ""
+    )
     subtitle = (
-        f"Найдено: <b>{total}</b>"
+        f"Найдено: <b>{total}</b>{pipeline_suffix}"
         if search_mode
-        else f"Всего: <b>{total}</b> · страница {page}/{total_pages}"
+        else f"Всего: <b>{total}</b>{pipeline_suffix} · страница {page}/{total_pages}"
     )
     return await send_message(
         chat_id,
@@ -480,6 +484,12 @@ async def send_lead_details(
                 },
             ],
             [
+                {
+                    "text": "✏️ Редактировать",
+                    "callback_data": f"lead:edit:{lead_id}:{return_page}",
+                },
+            ],
+            [
                 {"text": "🔗 Открыть Kommo", "url": details.get("url")},
                 {"text": "↩️ К списку", "callback_data": f"menu:leads:{return_page}"},
             ],
@@ -488,6 +498,127 @@ async def send_lead_details(
     }
     return await send_message(
         chat_id, format_lead_details(details), reply_markup=keyboard
+    )
+
+
+async def send_lead_edit_preview(
+    chat_id: int,
+    *,
+    lead_id: int,
+    draft: dict[str, Any],
+    original: dict[str, Any],
+    return_page: int = 1,
+) -> dict:
+    changes: list[str] = []
+    if draft.get("name") != original.get("name"):
+        changes.append(
+            f"• Название: {_esc(original.get('name'))} → <b>{_esc(draft.get('name'))}</b>"
+        )
+    if draft.get("price") != original.get("price"):
+        changes.append(
+            f"• Бюджет: {_esc(original.get('price'))} → <b>{_esc(draft.get('price'))}</b>"
+        )
+    if draft.get("status_id") != original.get("status_id"):
+        changes.append(
+            "• Этап: "
+            f"{_esc(original.get('status_name'))} → "
+            f"<b>{_esc(draft.get('status_name'))}</b>"
+        )
+    changes_text = (
+        "\n".join(changes) if changes else "<i>Изменений пока нет</i>"
+    )
+
+    keyboard_rows: list[list[dict[str, Any]]] = [
+        [
+            {
+                "text": "✏️ Название",
+                "callback_data": f"leadedit:edit:name:{lead_id}:{return_page}",
+            },
+            {
+                "text": "💰 Бюджет",
+                "callback_data": f"leadedit:edit:price:{lead_id}:{return_page}",
+            },
+        ],
+        [
+            {
+                "text": "📍 Этап",
+                "callback_data": f"leadedit:edit:status:{lead_id}:{return_page}",
+            }
+        ],
+    ]
+    if changes:
+        keyboard_rows.append(
+            [
+                {
+                    "text": "✅ Сохранить в Kommo",
+                    "callback_data": f"leadedit:confirm:{lead_id}:{return_page}",
+                }
+            ]
+        )
+    keyboard_rows.extend(
+        [
+            [
+                {
+                    "text": "↩️ К карточке",
+                    "callback_data": f"lead:view:{lead_id}:{return_page}",
+                }
+            ],
+            [{"text": "❌ Отмена", "callback_data": f"leadedit:cancel:{lead_id}:{return_page}"}],
+        ]
+    )
+
+    return await send_message(
+        chat_id,
+        (
+            "✏️ <b>Редактирование сделки</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            f"<b>{_esc(draft.get('name'))}</b>\n"
+            f"ID: <code>{lead_id}</code>\n"
+            f"Этап: <b>{_esc(draft.get('status_name'))}</b>\n"
+            f"Бюджет: {_esc(draft.get('price'))}\n\n"
+            f"Изменения:\n{changes_text}\n\n"
+            "Выберите поле или сохраните изменения."
+        ),
+        reply_markup={"inline_keyboard": keyboard_rows},
+    )
+
+
+async def send_lead_status_picker(
+    chat_id: int,
+    *,
+    lead_id: int,
+    statuses: list[dict[str, Any]],
+    return_page: int = 1,
+) -> dict:
+    rows: list[list[dict[str, Any]]] = []
+    current_row: list[dict[str, Any]] = []
+    for status in statuses:
+        status_id = status.get("id")
+        if not isinstance(status_id, int):
+            continue
+        current_row.append(
+            {
+                "text": _short_button_title(status.get("name"), limit=24),
+                "callback_data": f"leadedit:status:{status_id}:{lead_id}:{return_page}",
+            }
+        )
+        if len(current_row) == 2:
+            rows.append(current_row)
+            current_row = []
+    if current_row:
+        rows.append(current_row)
+    rows.append(
+        [
+            {
+                "text": "↩️ Назад",
+                "callback_data": f"leadedit:back:{lead_id}:{return_page}",
+            }
+        ]
+    )
+    return await send_message(
+        chat_id,
+        "📍 <b>Выберите этап воронки</b>",
+        reply_markup={"inline_keyboard": rows},
     )
 
 

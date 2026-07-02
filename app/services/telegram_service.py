@@ -269,6 +269,7 @@ async def set_bot_commands() -> dict:
         {"command": "menu", "description": "Главное меню"},
         {"command": "jobs", "description": "Статус обработки аудио"},
         {"command": "kommo_test", "description": "Проверить Kommo"},
+        {"command": "calendar_test", "description": "Проверить iCloud календарь"},
     ]
     async with httpx.AsyncClient(timeout=15) as client:
         response = await client.post(
@@ -394,6 +395,9 @@ async def send_main_menu(chat_id: int) -> dict:
             [
                 {"text": "📝 Дополнить сделку", "callback_data": "menu:update"},
                 {"text": "🔌 Проверить Kommo", "callback_data": "menu:test"},
+            ],
+            [
+                {"text": "📅 Проверить календарь", "callback_data": "menu:calendar"},
             ],
         ]
     }

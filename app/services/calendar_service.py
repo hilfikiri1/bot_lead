@@ -424,20 +424,8 @@ def _discover_calendar_home() -> str:
     return urljoin(final_principal_url, home_href)
 
 
-def _discover_calendar_url(calendar_name: str | None) -> tuple[str, str]:
-    cache_key = (calendar_name or "__default__").casefold()
-    cached = _calendar_url_cache.get(cache_key)
-    now = datetime.now(tz=timezone.utc).timestamp()
-    if cached and now - cached[2] < _CACHE_TTL_SECONDS:
-        return cached[0], cached[1]
-
-    direct_url = _clean_env_value(settings.icloud_calendar_url)
-    if direct_url:
-        normalized = direct_url.rstrip("/") + "/"
-        result = (normalized, calendar_name or "Указанный календарь")
-        _calendar_url_cache[cache_key] = (result[0], result[1], now)
-        return result
-
+def list_icloud_calendars() -> list[tuple[str, str]]:
+    """Return display names and CalDAV URLs for all iCloud calendars."""
     home_url = _discover_calendar_home()
     calendars_xml = f"""<?xml version="1.0" encoding="utf-8" ?>
 <d:propfind xmlns:d="DAV:" xmlns:c="{CALDAV_NS}" xmlns:a="{APPLE_NS}">
@@ -475,6 +463,57 @@ def _discover_calendar_url(calendar_name: str | None) -> tuple[str, str]:
                 prop.findtext(f"{{{DAV_NS}}}displayname") or "Без названия"
             ).strip()
             calendars.append((display_name, urljoin(final_home_url, href)))
+    return calendars
+
+
+def diagnose_icloud_calendar() -> dict[str, Any]:
+    """Structured iCloud calendar diagnostics for Telegram."""
+    username = _clean_env_value(settings.icloud_username)
+    masked_user = ""
+    if username:
+        local, _, domain = username.partition("@")
+        masked_user = f"{local[:2]}***@{domain}" if domain else f"{local[:2]}***"
+
+    info: dict[str, Any] = {
+        "username_set": bool(username),
+        "username_masked": masked_user,
+        "password_set": bool(_icloud_password_candidates()),
+        "calendar_name": _clean_env_value(settings.icloud_calendar_name) or "—",
+        "provider": provider_label(),
+        "calendars": [],
+        "selected_calendar": None,
+        "error": None,
+    }
+    try:
+        calendars = list_icloud_calendars()
+        info["calendars"] = [name for name, _ in calendars]
+        calendar_url, calendar_name = _discover_calendar_url(
+            settings.icloud_calendar_name
+        )
+        info["selected_calendar"] = {
+            "name": calendar_name,
+            "url": calendar_url,
+        }
+    except CalendarIntegrationError as exc:
+        info["error"] = str(exc)
+    return info
+
+
+def _discover_calendar_url(calendar_name: str | None) -> tuple[str, str]:
+    cache_key = (calendar_name or "__default__").casefold()
+    cached = _calendar_url_cache.get(cache_key)
+    now = datetime.now(tz=timezone.utc).timestamp()
+    if cached and now - cached[2] < _CACHE_TTL_SECONDS:
+        return cached[0], cached[1]
+
+    direct_url = _clean_env_value(settings.icloud_calendar_url)
+    if direct_url:
+        normalized = direct_url.rstrip("/") + "/"
+        result = (normalized, calendar_name or "Указанный календарь")
+        _calendar_url_cache[cache_key] = (result[0], result[1], now)
+        return result
+
+    calendars = list_icloud_calendars()
 
     if not calendars:
         raise CalendarIntegrationError("В аккаунте iCloud не найдено доступных календарей.")
@@ -553,8 +592,21 @@ def _create_icloud_event(
 
 def test_icloud_connection() -> str:
     """Validate iCloud credentials and calendar discovery."""
-    calendar_url, calendar_name = _discover_calendar_url(settings.icloud_calendar_name)
-    return f"Календарь найден: {calendar_name} ({calendar_url})"
+    info = diagnose_icloud_calendar()
+    if info.get("error"):
+        raise CalendarIntegrationError(str(info["error"]))
+    selected = info.get("selected_calendar") or {}
+    calendars = info.get("calendars") or []
+    lines = [
+        f"Apple ID: {info.get('username_masked') or '—'}",
+        f"Пароль приложения: {'задан' if info.get('password_set') else 'НЕ задан'}",
+        f"Искомый календарь: {info.get('calendar_name')}",
+        f"Выбран: {selected.get('name') or '—'}",
+        f"Всего календарей в iCloud: {len(calendars)}",
+    ]
+    if calendars:
+        lines.append("Список: " + ", ".join(calendars[:12]))
+    return "\n".join(lines)
 
 
 def create_event_with_fallback(

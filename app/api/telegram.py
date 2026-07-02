@@ -401,20 +401,52 @@ async def _handle_calendar_test(chat_id: int, user_id: int) -> None:
 
     provider = calendar_service.provider_label()
     await telegram_service.send_message(
-        chat_id, f"🔄 Проверяю подключение к {html.escape(provider)}..."
+        chat_id, f"🔄 Проверяю {html.escape(provider)}…"
     )
     try:
         if (settings.calendar_provider or "icloud").strip().lower() == "icloud":
             details = await asyncio.to_thread(calendar_service.test_icloud_connection)
+            manager_tz = _manager_tz()
+            tomorrow = datetime.now(tz=manager_tz) + timedelta(days=1)
+            test_start = tomorrow.replace(hour=10, minute=0, second=0, microsecond=0)
+            test_result = await asyncio.to_thread(
+                calendar_service.create_event_with_fallback,
+                "Тест BBS Bot",
+                "Проверка напоминания из Telegram",
+                test_start.isoformat(),
+                15,
+            )
+            if test_result["success"]:
+                await telegram_service.send_message(
+                    chat_id,
+                    (
+                        f"✅ <b>{html.escape(provider)} работает</b>\n\n"
+                        f"{html.escape(details)}\n\n"
+                        f"Тестовое событие создано на <b>{test_start.strftime('%d.%m.%Y %H:%M')}</b>.\n"
+                        f"ID: <code>{html.escape(str(test_result['event_id']))}</code>\n\n"
+                        "Откройте приложение «Календарь» на iPhone/Mac и проверьте календарь "
+                        f"<b>{html.escape(settings.icloud_calendar_name)}</b>."
+                    ),
+                )
+                return
+
             await telegram_service.send_message(
                 chat_id,
                 (
-                    f"✅ <b>{html.escape(provider)} доступен</b>\n\n"
+                    f"⚠️ <b>Подключение есть, но событие не записалось</b>\n\n"
                     f"{html.escape(details)}\n\n"
-                    "Можно создавать напоминания из карточки сделки или кнопки "
-                    "«Следующий контакт»."
+                    f"Ошибка: {html.escape(str(test_result.get('error') or '—'))}\n\n"
+                    "Отправляю файл <code>.ics</code> — откройте на iPhone и добавьте вручную."
                 ),
             )
+            ics_bytes = str(test_result.get("ics_content") or "").encode("utf-8")
+            if ics_bytes:
+                await telegram_service.send_document(
+                    chat_id,
+                    filename="calendar-test.ics",
+                    content=ics_bytes,
+                    caption="📅 Тест BBS Bot",
+                )
             return
 
         test_result = await asyncio.to_thread(
@@ -763,6 +795,9 @@ async def _handle_manager_callback(
         return True
     if callback_data == "menu:test":
         await _handle_kommo_test(chat_id, user_id, db)
+        return True
+    if callback_data == "menu:calendar":
+        await _handle_calendar_test(chat_id, user_id)
         return True
     if callback_data == "menu:jobs":
         await _show_audio_jobs(chat_id, user_id, db)

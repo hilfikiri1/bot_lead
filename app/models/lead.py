@@ -25,6 +25,7 @@ class Lead(Base):
     kommo_pipeline_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     kommo_status_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     kommo_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    notion_page_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     product_requested: Mapped[str | None] = mapped_column(Text)
     budget: Mapped[str | None] = mapped_column(String(255))
     country: Mapped[str | None] = mapped_column(String(100))

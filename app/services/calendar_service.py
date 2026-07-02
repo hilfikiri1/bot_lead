@@ -26,6 +26,8 @@ DAV_NS = "DAV:"
 CALDAV_NS = "urn:ietf:params:xml:ns:caldav"
 APPLE_NS = "http://apple.com/ns/ical/"
 HTTP_TIMEOUT = 30.0
+_calendar_url_cache: dict[str, tuple[str, str, float]] = {}
+_CACHE_TTL_SECONDS = 3600
 
 
 class CalendarIntegrationError(RuntimeError):
@@ -217,7 +219,7 @@ def _create_google_event(
 
 
 def _icloud_credentials() -> tuple[str, list[str]]:
-    username = _clean_env_value(settings.icloud_username)
+    username = _clean_env_value(settings.icloud_username).casefold()
     passwords = _icloud_password_candidates()
     if not username:
         raise CalendarIntegrationError("ICLOUD_USERNAME не задан в Railway Variables.")
@@ -423,10 +425,18 @@ def _discover_calendar_home() -> str:
 
 
 def _discover_calendar_url(calendar_name: str | None) -> tuple[str, str]:
+    cache_key = (calendar_name or "__default__").casefold()
+    cached = _calendar_url_cache.get(cache_key)
+    now = datetime.now(tz=timezone.utc).timestamp()
+    if cached and now - cached[2] < _CACHE_TTL_SECONDS:
+        return cached[0], cached[1]
+
     direct_url = _clean_env_value(settings.icloud_calendar_url)
     if direct_url:
         normalized = direct_url.rstrip("/") + "/"
-        return normalized, calendar_name or "Указанный календарь"
+        result = (normalized, calendar_name or "Указанный календарь")
+        _calendar_url_cache[cache_key] = (result[0], result[1], now)
+        return result
 
     home_url = _discover_calendar_home()
     calendars_xml = f"""<?xml version="1.0" encoding="utf-8" ?>
@@ -472,14 +482,19 @@ def _discover_calendar_url(calendar_name: str | None) -> tuple[str, str]:
     requested = (calendar_name or "").strip().casefold()
     if requested:
         for name, calendar_url in calendars:
-            if name.casefold() == requested:
-                return calendar_url.rstrip("/") + "/", name
+            normalized_name = name.casefold()
+            if normalized_name == requested or requested in normalized_name:
+                result = (calendar_url.rstrip("/") + "/", name)
+                _calendar_url_cache[cache_key] = (result[0], result[1], now)
+                return result
         available = ", ".join(name for name, _ in calendars[:10])
         raise CalendarIntegrationError(
             f"Календарь «{calendar_name}» не найден в iCloud. Доступны: {available}"
         )
 
-    return calendars[0][1].rstrip("/") + "/", calendars[0][0]
+    result = (calendars[0][1].rstrip("/") + "/", calendars[0][0])
+    _calendar_url_cache[cache_key] = (result[0], result[1], now)
+    return result
 
 
 def _ics_escape(value: str) -> str:
@@ -510,15 +525,23 @@ def _create_icloud_event(
     )
 
     event_url = urljoin(calendar_url, f"{quote(uid, safe='@')}.ics")
+    put_headers = {
+        "Content-Type": "text/calendar; charset=utf-8",
+        "If-None-Match": "*",
+    }
     response, _ = _request_icloud(
         "PUT",
         event_url,
         content=ics.encode("utf-8"),
-        headers={
-            "Content-Type": "text/calendar; charset=utf-8",
-            "If-None-Match": "*",
-        },
+        headers=put_headers,
     )
+    if response.status_code in {409, 412, 423}:
+        response, _ = _request_icloud(
+            "PUT",
+            event_url,
+            content=ics.encode("utf-8"),
+            headers={"Content-Type": "text/calendar; charset=utf-8"},
+        )
     _ensure_caldav_success(response, "создание события")
     logger.info(
         "iCloud Calendar event created: uid=%s calendar=%s",

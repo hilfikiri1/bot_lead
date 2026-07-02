@@ -246,3 +246,30 @@ class TestCalendarHelpers:
         assert result["success"] is False
         assert result["ics_content"]
         assert "BEGIN:VCALENDAR" in result["ics_content"]
+
+
+class TestNotionHelpers:
+    def test_is_configured_requires_token_and_calls_db(self):
+        from app.services import notion_service
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(notion_service.settings, "notion_api_token", "")
+            mp.setattr(notion_service.settings, "notion_calls_database_id", "db")
+            assert notion_service.is_configured() is False
+            mp.setattr(notion_service.settings, "notion_api_token", "secret")
+            assert notion_service.is_configured() is True
+
+
+class TestCommandRouter:
+    def test_short_command_hint_detected(self):
+        from app.services.command_router_service import _looks_like_command
+
+        assert _looks_like_command("напомни завтра в 10 позвонить клиенту")
+        assert not _looks_like_command("x" * 300)
+
+    @pytest.mark.asyncio
+    async def test_long_transcript_defaults_to_analysis(self):
+        from app.services.command_router_service import classify_message
+
+        plan = await classify_message("word " * 400, context={})
+        assert plan.intent == "analyze_conversation"

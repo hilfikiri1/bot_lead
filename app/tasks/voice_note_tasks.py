@@ -12,7 +12,9 @@ from app.config import get_settings
 from app.database import AsyncSessionLocal
 from app.services import (
     ai_analysis_service,
+    command_router_service,
     crm_service,
+    notion_service,
     storage_service,
     telegram_service,
     transcription_service,
@@ -213,6 +215,36 @@ async def _process(
             )
             logger.info("Transcription complete: %d chars", len(transcript))
 
+            command_context = await crm_service.get_user_command_context(
+                db, telegram_user_id=telegram_user_id
+            )
+            if target_kommo_lead_id:
+                command_context["kommo_lead_id"] = target_kommo_lead_id
+            plan = await command_router_service.classify_message(
+                transcript, context=command_context
+            )
+            if plan.intent != "analyze_conversation":
+                command_reply = await command_router_service.execute_plan(
+                    db,
+                    plan=plan,
+                    chat_id=chat_id,
+                    telegram_user_id=telegram_user_id,
+                    context=command_context,
+                )
+                if command_reply:
+                    voice_note.audio_url = audio_url
+                    voice_note.transcript = transcript
+                    voice_note.language = language
+                    await crm_service.update_voice_note_status(
+                        db,
+                        voice_note,
+                        "ready",
+                        finished=True,
+                    )
+                    await telegram_service.send_message(chat_id, command_reply)
+                    await _mark_processing_done(telegram_user_id, telegram_message_id)
+                    return
+
             await crm_service.update_voice_note_status(db, voice_note, "analyzing")
             await telegram_service.send_processing_step(
                 chat_id,
@@ -234,7 +266,54 @@ async def _process(
             )
             await crm_service.save_ai_report(db, voice_note, analysis)
 
+            lead_title = str(
+                analysis.get("lead", {}).get("proposed_name")
+                or lead.product_requested
+                or "Новый запрос"
+            )
+            try:
+                notion_result = await notion_service.sync_analyzed_call(
+                    client_id=client.id,
+                    client_name=client.name,
+                    client_company=client.company,
+                    client_phone=client.phone,
+                    client_email=client.email,
+                    client_language=client.language,
+                    client_notion_page_id=client.notion_page_id,
+                    lead_id=lead.id,
+                    lead_title=lead_title,
+                    lead_product=lead.product_requested,
+                    lead_budget=lead.budget,
+                    lead_country=lead.country,
+                    lead_city=lead.city,
+                    lead_kommo_url=lead.kommo_url,
+                    lead_kommo_id=lead.kommo_lead_id,
+                    lead_notion_page_id=lead.notion_page_id,
+                    voice_note_id=voice_note.id,
+                    transcript=transcript,
+                    audio_url=audio_url,
+                    analysis=analysis,
+                )
+                await crm_service.save_notion_mapping(
+                    db,
+                    client_id=client.id,
+                    lead_id=lead.id,
+                    voice_note_id=voice_note.id,
+                    client_page_id=notion_result.client_page_id,
+                    lead_page_id=notion_result.lead_page_id,
+                    call_page_id=notion_result.call_page_id,
+                )
+                notion_line = (
+                    f"\n\n📓 {notion_result.message}"
+                    if notion_result.call_page_id
+                    else ""
+                )
+            except Exception as exc:
+                logger.warning("Notion sync failed for voice_note_id=%s: %s", voice_note.id, exc)
+                notion_line = "\n\n⚠️ Notion: не удалось сохранить автоматически."
+
             report_text = telegram_service.format_report(analysis, transcript)
+            report_text += notion_line
             await telegram_service.send_report(
                 chat_id=chat_id,
                 report_text=report_text,

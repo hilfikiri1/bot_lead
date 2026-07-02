@@ -320,6 +320,65 @@ async def save_kommo_mapping(
     await db.commit()
 
 
+async def save_notion_mapping(
+    db: AsyncSession,
+    *,
+    client_id: int | None = None,
+    lead_id: int | None = None,
+    voice_note_id: int | None = None,
+    client_page_id: str | None = None,
+    lead_page_id: str | None = None,
+    call_page_id: str | None = None,
+) -> None:
+    if client_id and client_page_id:
+        client = await db.get(Client, client_id)
+        if client:
+            client.notion_page_id = client_page_id
+    if lead_id and lead_page_id:
+        lead = await db.get(Lead, lead_id)
+        if lead:
+            lead.notion_page_id = lead_page_id
+    if voice_note_id and call_page_id:
+        voice_note = await db.get(VoiceNote, voice_note_id)
+        if voice_note:
+            voice_note.notion_page_id = call_page_id
+    await db.commit()
+
+
+async def get_user_command_context(
+    db: AsyncSession,
+    *,
+    telegram_user_id: int,
+) -> dict[str, Any]:
+    result = await db.execute(
+        select(VoiceNote)
+        .options(
+            selectinload(VoiceNote.lead).selectinload(Lead.client),
+            selectinload(VoiceNote.ai_report),
+        )
+        .where(VoiceNote.telegram_user_id == telegram_user_id)
+        .order_by(VoiceNote.created_at.desc())
+        .limit(1)
+    )
+    voice_note = result.scalar_one_or_none()
+    if not voice_note:
+        return {"telegram_user_id": telegram_user_id}
+    lead = voice_note.lead
+    client = lead.client if lead else None
+    return {
+        "telegram_user_id": telegram_user_id,
+        "local_lead_id": lead.id if lead else None,
+        "voice_note_id": voice_note.id,
+        "kommo_lead_id": lead.kommo_lead_id if lead else None,
+        "lead_name": (
+            lead.product_requested if lead and lead.product_requested else None
+        ),
+        "notion_client_page_id": client.notion_page_id if client else None,
+        "notion_lead_page_id": lead.notion_page_id if lead else None,
+        "notion_call_page_id": voice_note.notion_page_id,
+    }
+
+
 async def recent_audio_jobs(
     db: AsyncSession,
     *,

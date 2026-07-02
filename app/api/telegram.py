@@ -476,11 +476,16 @@ async def _handle_calendar_test(chat_id: int, user_id: int) -> None:
             (
                 "❌ <b>Календарь не настроен</b>\n\n"
                 f"{html.escape(str(exc))}\n\n"
-                "Проверьте Railway Variables:\n"
-                "• <code>ICLOUD_USERNAME</code>\n"
-                "• <code>ICLOUD_APP_SPECIFIC_PASSWORD</code>\n"
-                "• <code>ICLOUD_CALENDAR_NAME</code>\n"
-                "• <code>ICLOUD_CALDAV_URL</code>"
+                "<b>Частая причина:</b> в Railway указан обычный пароль Apple ID "
+                "вместо <b>пароля приложения</b>.\n\n"
+                "Создайте новый на "
+                "<a href=\"https://appleid.apple.com\">appleid.apple.com</a> → "
+                "Пароли приложений → Buy Bring Bot.\n\n"
+                "Переменные:\n"
+                "• <code>ICLOUD_USERNAME</code> — ваш Apple ID email\n"
+                "• <code>ICLOUD_APP_SPECIFIC_PASSWORD</code> — xxxx-xxxx-xxxx-xxxx\n"
+                "• <code>ICLOUD_CALENDAR_NAME</code> — имя календаря в iPhone\n"
+                "• <code>ICLOUD_CALDAV_URL</code> — оставьте пустым"
             ),
         )
 

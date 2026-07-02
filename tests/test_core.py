@@ -293,6 +293,34 @@ class TestKommoCreationRetry:
 
 
 class TestCalendarHelpers:
+    def test_extract_property_href_from_partition_home_set(self):
+        from app.services.calendar_service import _extract_property_href, CALDAV_NS
+
+        xml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<multistatus xmlns="DAV:" xmlns:cal="{CALDAV_NS}">
+  <response>
+    <propstat>
+      <prop>
+        <cal:calendar-home-set>
+          <href>https://p34-caldav.icloud.com:443/123456/calendars/</href>
+        </cal:calendar-home-set>
+      </prop>
+      <status>HTTP/1.1 200 OK</status>
+    </propstat>
+  </response>
+</multistatus>"""
+        href = _extract_property_href(xml.encode(), f"{{{CALDAV_NS}}}calendar-home-set")
+        assert href == "https://p34-caldav.icloud.com:443/123456/calendars/"
+
+    def test_normalize_caldav_url_supports_absolute_partition(self):
+        from app.services.calendar_service import _normalize_caldav_url
+
+        url = _normalize_caldav_url(
+            "https://p34-caldav.icloud.com:443/123456/calendars/",
+            "https://caldav.icloud.com/",
+        )
+        assert url.startswith("https://p34-caldav.icloud.com")
+
     def test_build_ics_contains_alarm(self):
         from datetime import datetime
         from zoneinfo import ZoneInfo

@@ -117,6 +117,8 @@ class Settings(BaseSettings):
     # Optional: omit both values to use the first stage of the main pipeline.
     kommo_default_pipeline_id: Optional[int] = None
     kommo_default_status_id: Optional[int] = None
+    # If set, open-deal list/search only shows this pipeline. Defaults to kommo_default_pipeline_id.
+    kommo_menu_pipeline_id: Optional[int] = None
     # 20 pages x 250 leads = safety cap of 5000 scanned leads.
     kommo_open_leads_max_pages: int = 20
     kommo_menu_page_size: int = 8

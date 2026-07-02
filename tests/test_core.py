@@ -108,6 +108,87 @@ class TestTelegramUI:
 
 
 class TestKommoHelpers:
+    def test_configured_menu_pipeline_prefers_menu_setting(self):
+        from app.services import kommo_service
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(kommo_service.settings, "kommo_menu_pipeline_id", 42)
+            mp.setattr(kommo_service.settings, "kommo_default_pipeline_id", 10)
+            assert kommo_service.configured_menu_pipeline_id() == 42
+
+    def test_configured_menu_pipeline_falls_back_to_default(self):
+        from app.services import kommo_service
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(kommo_service.settings, "kommo_menu_pipeline_id", None)
+            mp.setattr(kommo_service.settings, "kommo_default_pipeline_id", 10)
+            assert kommo_service.configured_menu_pipeline_id() == 10
+
+    def test_lead_belongs_to_pipeline(self):
+        from app.services.kommo_service import _lead_belongs_to_pipeline
+
+        assert _lead_belongs_to_pipeline({"pipeline_id": 5}, 5) is True
+        assert _lead_belongs_to_pipeline({"pipeline_id": 5}, 6) is False
+        assert _lead_belongs_to_pipeline({"pipeline_id": 5}, None) is True
+
+    @pytest.mark.asyncio
+    async def test_update_kommo_lead_patches_changed_fields(self):
+        from app.services import kommo_service
+
+        with patch(
+            "app.services.kommo_service._request",
+            new=AsyncMock(
+                return_value={"_embedded": {"leads": [{"id": 99, "name": "New name"}]}}
+            ),
+        ) as request_mock, patch(
+            "app.services.kommo_service.get_lead_details",
+            new=AsyncMock(
+                return_value={
+                    "name": "New name",
+                    "price": 1500,
+                    "status_name": "Переговоры",
+                    "pipeline_name": "Основная",
+                    "url": "https://example.kommo.com/leads/detail/99",
+                }
+            ),
+        ):
+            result = await kommo_service.update_kommo_lead(
+                99, name="New name", price=1500
+            )
+
+        payload = request_mock.await_args.kwargs["json_body"][0]
+        assert payload == {"id": 99, "name": "New name", "price": 1500}
+        assert result["lead_name"] == "New name"
+        assert result["price"] == 1500
+
+    @pytest.mark.asyncio
+    async def test_get_all_open_leads_filters_pipeline(self):
+        from app.services import kommo_service
+
+        page_one = {
+            "_embedded": {
+                "leads": [
+                    {"id": 1, "name": "A", "pipeline_id": 7, "status_id": 1},
+                    {"id": 2, "name": "B", "pipeline_id": 8, "status_id": 1},
+                ]
+            }
+        }
+        with patch(
+            "app.services.kommo_service._request",
+            new=AsyncMock(return_value=page_one),
+        ), patch(
+            "app.services.kommo_service.get_pipeline_index",
+            new=AsyncMock(return_value=({7: "Моя воронка"}, {(7, 1): "Новый"})),
+        ), patch(
+            "app.services.kommo_service.configured_menu_pipeline_id",
+            return_value=7,
+        ):
+            result = await kommo_service.get_all_open_leads()
+
+        assert result["open_count"] == 1
+        assert result["leads"][0]["id"] == 1
+        assert result["pipeline_name"] == "Моя воронка"
+
     def test_lead_title_uses_number_and_product(self):
         from app.services.kommo_service import _lead_title
 

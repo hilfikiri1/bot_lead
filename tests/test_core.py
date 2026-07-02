@@ -346,6 +346,7 @@ class TestCommandRouter:
         from app.services.command_router_service import _looks_like_command
 
         assert _looks_like_command("напомни завтра в 10 позвонить клиенту")
+        assert _looks_like_command("добавь в календарь созвон завтра в 15:00")
         assert not _looks_like_command("x" * 300)
 
     @pytest.mark.asyncio
@@ -354,3 +355,16 @@ class TestCommandRouter:
 
         plan = await classify_message("word " * 400, context={})
         assert plan.intent == "analyze_conversation"
+
+    def test_parse_relative_time_tomorrow(self):
+        from app.services.command_router_service import _parse_relative_time
+
+        parsed = _parse_relative_time("завтра в 10:00")
+        assert parsed is not None
+        assert "T10:00" in parsed or "T10:00:00" in parsed
+
+    def test_parse_relative_time_today(self):
+        from app.services.command_router_service import _parse_relative_time
+
+        parsed = _parse_relative_time("сегодня в 15:30")
+        assert parsed is not None

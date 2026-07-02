@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import html
 from datetime import datetime, timezone
 from typing import Any
@@ -73,6 +74,65 @@ async def send_document(
         response = await client.post(f"{TELEGRAM_API}/sendDocument", data=data, files=files)
         _ensure_success(response, "sendDocument")
         return response.json()
+
+
+async def send_calendar_result(
+    chat_id: int,
+    *,
+    title: str,
+    start_iso: str,
+    duration_minutes: int = 30,
+    description: str = "",
+    start_display: str | None = None,
+    lead_name: str | None = None,
+) -> str:
+    """Create a calendar event (or send .ics) and return a short status line."""
+    from app.services import calendar_service
+
+    result = await asyncio.to_thread(
+        calendar_service.create_event_with_fallback,
+        title,
+        description,
+        start_iso,
+        duration_minutes,
+    )
+    if result["success"]:
+        lines = [
+            f"✅ <b>Событие создано в {html.escape(result['provider'])}</b>",
+            "",
+        ]
+        if lead_name:
+            lines.append(f"Сделка: {html.escape(lead_name)}")
+        lines.extend(
+            [
+                f"Название: {html.escape(title)}",
+                f"Начало: {html.escape(start_display or start_iso)}",
+                f"Event ID: <code>{html.escape(str(result['event_id']))}</code>",
+                "Напоминание: за 10 минут до начала.",
+            ]
+        )
+        await send_message(chat_id, "\n".join(lines))
+        return "Событие добавлено в календарь."
+
+    await send_message(
+        chat_id,
+        (
+            "⚠️ <b>Не удалось записать событие напрямую в календарь</b>\n\n"
+            f"{html.escape(str(result.get('error') or 'Неизвестная ошибка'))}\n\n"
+            "Отправляю файл <code>.ics</code>. Откройте его на iPhone или Mac и "
+            "нажмите «Добавить в календарь»."
+        ),
+    )
+    ics_bytes = str(result.get("ics_content") or "").encode("utf-8")
+    if ics_bytes:
+        await send_document(
+            chat_id,
+            filename="reminder.ics",
+            content=ics_bytes,
+            caption=f"📅 {html.escape(title)}",
+        )
+        return "Отправлен файл .ics для добавления в календарь."
+    return "Не удалось создать событие в календаре."
 
 
 async def send_message_chunks(
@@ -298,13 +358,20 @@ async def send_processing_step(
     step: str,
     *,
     target_kommo_lead_id: int | None = None,
+    command_mode: bool = False,
 ) -> dict:
-    steps = {
-        "download": "📥 <b>Аудио получено</b>\nСкачиваю файл и проверяю формат…",
-        "transcribe": "🎧 <b>Шаг 1 из 3</b>\nРасшифровываю разговор…",
-        "analyze": "🧠 <b>Шаг 2 из 3</b>\nВыделяю факты, вопросы и следующий шаг…",
-        "save": "💾 <b>Шаг 3 из 3</b>\nСохраняю результат и готовлю карточку…",
-    }
+    if command_mode:
+        steps = {
+            "download": "📥 <b>Аудио получено</b>\nСкачиваю файл…",
+            "transcribe": "🎧 Расшифровываю команду…",
+        }
+    else:
+        steps = {
+            "download": "📥 <b>Аудио получено</b>\nСкачиваю файл и проверяю формат…",
+            "transcribe": "🎧 Расшифровываю сообщение…",
+            "analyze": "🧠 <b>Шаг 2 из 3</b>\nВыделяю факты, вопросы и следующий шаг…",
+            "save": "💾 <b>Шаг 3 из 3</b>\nСохраняю результат и готовлю карточку…",
+        }
     suffix = (
         f"\n\nСделка Kommo: <code>{target_kommo_lead_id}</code>"
         if target_kommo_lead_id

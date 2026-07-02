@@ -17,10 +17,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.services import (
     approval_service,
-    calendar_service,
     crm_service,
     kommo_service,
     notion_service,
+    telegram_service,
 )
 
 logger = logging.getLogger(__name__)
@@ -53,6 +53,9 @@ COMMAND_HINTS = (
     "create lead",
     "примечан",
     "note",
+    "календар",
+    "calendar",
+    "напоминан",
 )
 
 SYSTEM_PROMPT = """You route manager voice/text commands for Buy & Bring CRM bot.
@@ -69,6 +72,7 @@ Supported intents:
 - add_notion_note
 - create_task
 - create_reminder
+- create_calendar
 - update_lead
 - delete_lead
 - delete_task
@@ -164,20 +168,98 @@ def _parse_relative_time(value: str | None) -> str | None:
         return datetime.fromisoformat(raw).astimezone(_manager_tz()).isoformat()
     except ValueError:
         pass
-    lowered = raw.casefold()
+
+    lowered = raw.casefold().replace("ё", "е")
     now = datetime.now(tz=_manager_tz())
-    if "завтра" in lowered:
-        hour = 10
-        match = re.search(r"(\d{1,2})[:\.]?(\d{2})?", lowered)
-        if match:
+    day_offset = 0
+    if "послезавтра" in lowered:
+        day_offset = 2
+    elif "завтра" in lowered:
+        day_offset = 1
+    elif "сегодня" in lowered:
+        day_offset = 0
+    elif "через" in lowered and "час" in lowered:
+        match = re.search(r"через\s+(\d{1,2})\s*час", lowered)
+        hours = int(match.group(1)) if match else 1
+        return (now + timedelta(hours=hours)).replace(second=0, microsecond=0).isoformat()
+
+    hour = 10
+    minute = 0
+    match = re.search(
+        r"(?:в\s+)?(\d{1,2})[:\.](\d{2})|(?:в\s+)(\d{1,2})(?:\s*час|\s*ч\.?)?",
+        lowered,
+    )
+    if match:
+        if match.group(1) and match.group(2):
             hour = int(match.group(1))
-            minute = int(match.group(2) or 0)
-        else:
+            minute = int(match.group(2))
+        elif match.group(3):
+            hour = int(match.group(3))
             minute = 0
-        target = (now + timedelta(days=1)).replace(
+
+    if day_offset or any(
+        token in lowered
+        for token in ("завтра", "сегодня", "послезавтра", "в ", ":", ".")
+    ):
+        target = (now + timedelta(days=day_offset)).replace(
             hour=hour, minute=minute, second=0, microsecond=0
         )
+        if day_offset == 0 and target <= now and ("в " in lowered or ":" in lowered):
+            target += timedelta(days=1)
         return target.isoformat()
+    return None
+
+
+def _resolve_calendar_start(raw: dict[str, Any], *, fallback_text: str) -> str | None:
+    calendar = raw.get("calendar") or {}
+    start_iso = calendar.get("start_time")
+    if start_iso:
+        parsed = _parse_relative_time(str(start_iso))
+        if parsed:
+            return parsed
+    for candidate in (
+        calendar.get("title"),
+        raw.get("task_title"),
+        raw.get("note_text"),
+        fallback_text,
+    ):
+        parsed = _parse_relative_time(str(candidate or ""))
+        if parsed:
+            return parsed
+    return None
+
+
+def _format_start_display(start_iso: str) -> str:
+    try:
+        dt = datetime.fromisoformat(start_iso).astimezone(_manager_tz())
+        return dt.strftime("%d.%m.%Y %H:%M")
+    except ValueError:
+        return start_iso
+
+
+async def _create_calendar_event(
+    chat_id: int,
+    *,
+    title: str,
+    start_iso: str | None,
+    duration_minutes: int = 30,
+    description: str = "Создано голосовой командой из Telegram",
+) -> str | None:
+    """Create a calendar event. Returns extra reply text or None if fully handled."""
+    if not start_iso:
+        return (
+            "🕒 <b>Когда добавить в календарь?</b>\n\n"
+            "Напишите или скажите дату и время. Например: "
+            "<code>завтра в 10:00</code> или <code>2 июля в 15:30</code>."
+        )
+    await telegram_service.send_calendar_result(
+        chat_id,
+        title=title[:200],
+        start_iso=start_iso,
+        duration_minutes=duration_minutes,
+        description=description,
+        start_display=_format_start_display(start_iso),
+    )
     return None
 
 
@@ -239,33 +321,65 @@ async def execute_plan(
         await notion_service.add_note_to_page(page_id, note, human_field=True)
         return "✅ Мысль добавлена в Notion (поле Manager thoughts)."
 
-    if intent in {"create_task", "create_reminder"}:
-        title = str(raw.get("task_title") or raw.get("note_text") or "Напоминание").strip()
+    if intent in {"create_task", "create_reminder", "create_calendar"}:
         calendar = raw.get("calendar") or {}
-        start_iso = calendar.get("start_time") or _parse_relative_time(title)
-        page_id = await notion_service.create_task_page(
-            title=title[:200],
-            task_type="Goal" if "цел" in title.casefold() else "Task",
-            due_at=start_iso,
-            lead_page_id=context.get("notion_lead_page_id"),
-            client_page_id=context.get("notion_client_page_id"),
-            source="Voice",
+        title = str(
+            calendar.get("title")
+            or raw.get("task_title")
+            or raw.get("note_text")
+            or "Напоминание"
+        ).strip()
+        duration = int(calendar.get("duration_minutes") or 30)
+        start_iso = _resolve_calendar_start(raw, fallback_text=title)
+        calendar_requested = intent in {"create_calendar", "create_reminder"} or bool(
+            start_iso
         )
-        calendar_msg = ""
-        if start_iso:
-            result = calendar_service.create_event_with_fallback(
-                title,
-                "Создано голосовой командой из Telegram",
-                start_iso,
-                int(calendar.get("duration_minutes") or 30),
+        calendar_handled = False
+
+        if calendar_requested:
+            calendar_reply = await _create_calendar_event(
+                chat_id,
+                title=title,
+                start_iso=start_iso,
+                duration_minutes=duration,
             )
-            if result["success"]:
-                calendar_msg = f"\nКалендарь: событие создано (<code>{result['event_id']}</code>)."
-            elif result.get("ics_content"):
-                calendar_msg = "\nКалендарь: CalDAV недоступен, используйте .ics fallback через мастер сделки."
+            if calendar_reply:
+                if intent == "create_calendar":
+                    return calendar_reply
+                if not settings.notion_tasks_database_id.strip():
+                    return calendar_reply
+            else:
+                calendar_handled = True
+                if intent == "create_calendar":
+                    return None
+
+        page_id = None
+        if settings.notion_tasks_database_id.strip() and intent != "create_calendar":
+            page_id = await notion_service.create_task_page(
+                title=title[:200],
+                task_type="Goal" if "цел" in title.casefold() else "Task",
+                due_at=start_iso,
+                lead_page_id=context.get("notion_lead_page_id"),
+                client_page_id=context.get("notion_client_page_id"),
+                source="Voice",
+            )
+
+        if page_id and calendar_handled:
+            return "✅ Задача добавлена в Notion."
         if page_id:
-            return f"✅ Задача добавлена в Notion.{calendar_msg}"
-        return "⚠️ Notion tasks DB не настроена, но команда распознана."
+            return "✅ Задача добавлена в Notion."
+        if calendar_handled:
+            return None
+        if calendar_requested:
+            return (
+                "🕒 <b>Когда добавить в календарь?</b>\n\n"
+                "Укажите дату и время. Например: <code>завтра в 10:00</code>."
+            )
+        return (
+            "⚠️ Notion tasks DB не настроена.\n\n"
+            "Добавьте <code>NOTION_TASKS_DATABASE_ID</code> в Railway "
+            "или попросите напоминание с датой для календаря."
+        )
 
     if intent == "update_lead":
         lead_page_id = context.get("notion_lead_page_id")

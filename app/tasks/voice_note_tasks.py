@@ -231,7 +231,7 @@ async def _process(
                     telegram_user_id=telegram_user_id,
                     context=command_context,
                 )
-                if command_reply:
+                if command_reply is not None:
                     voice_note.audio_url = audio_url
                     voice_note.transcript = transcript
                     voice_note.language = language
@@ -241,7 +241,8 @@ async def _process(
                         "ready",
                         finished=True,
                     )
-                    await telegram_service.send_message(chat_id, command_reply)
+                    if command_reply:
+                        await telegram_service.send_message(chat_id, command_reply)
                     await _mark_processing_done(telegram_user_id, telegram_message_id)
                     return
 

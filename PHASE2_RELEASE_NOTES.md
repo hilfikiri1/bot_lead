@@ -164,7 +164,7 @@ GOOGLE_SHEETS_LEAD_NUMBER_COLUMN=Y
 
 ### Notion (опционально)
 
-Базы **не должны** находиться в разделе **Private**. Перенесите Clients, Leads, Calls и Tasks в teamspace команды и подключите каждую к интеграции **Buy Bring Bot** (`⋯ → Connections`).
+**Private workspace подходит** — teamspace не нужен. Для каждой базы (Clients, Leads, Calls, Tasks): откройте базу → **⋯ → Connections** → добавьте **Buy Bring Bot**. Если база вложена в страницу — подключите интеграцию и к родительской странице.
 
 ```env
 NOTION_API_TOKEN=

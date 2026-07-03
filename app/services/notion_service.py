@@ -42,18 +42,20 @@ class NotionAPIError(RuntimeError):
 
 
 def notion_access_instructions(*, compact: bool = False) -> str:
-    """Shared setup hint: Notion DBs must be workspace-visible, not Private."""
+    """Shared setup hint for granting the bot access to Notion databases."""
     if compact:
         return (
-            "База не должна быть в <b>Private</b>: перенесите в teamspace и подключите "
-            "к интеграции <b>Buy Bring Bot</b> (⋯ → Connections)."
+            "Откройте базу → <b>⋯ → Connections</b> → добавьте "
+            "<b>Buy Bring Bot</b>. Private workspace подходит."
         )
     return (
-        "1. Базы <b>не должны</b> лежать в разделе <b>Private</b> — только в teamspace "
-        "или на расшаренной странице команды.\n"
-        "2. Откройте каждую базу → <b>⋯ → Connections</b> → добавьте "
+        "Private workspace — <b>нормально</b>, teamspace не нужен.\n"
+        "1. Откройте базу (Tasks / Clients / Leads / Calls).\n"
+        "2. <b>⋯ → Connections → Add connections</b> → выберите "
         "<b>Buy Bring Bot</b>.\n"
-        "3. В Railway укажите <b>database ID</b> (из URL базы), не ID обычной страницы."
+        "3. Если база внутри страницы — подключите интеграцию и к родительской странице.\n"
+        "4. В Railway укажите <b>database ID</b> из URL базы (32 символа), "
+        "не ID обычной заметки."
     )
 
 
@@ -178,8 +180,8 @@ async def _request(
         preview = response.text.replace("\n", " ")[:400]
         if response.status_code == 404:
             raise NotionAPIError(
-                "База Notion не найдена. Перенесите её из Private в teamspace "
-                "и подключите к интеграции Buy Bring Bot.",
+                "База Notion не найдена. Подключите её к интеграции Buy Bring Bot "
+                "(⋯ → Connections), даже если база в Private.",
                 status_code=404,
             )
         raise NotionAPIError(

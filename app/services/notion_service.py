@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
@@ -35,6 +36,36 @@ BOT_CALL_FIELDS = {
 HUMAN_FIELDS = {"manager_thoughts", "strategy_notes"}
 
 
+def normalize_notion_id(value: str) -> str:
+    """Format a Notion UUID with hyphens."""
+    clean = re.sub(r"[^a-f0-9]", "", (value or "").lower())
+    if len(clean) != 32:
+        return (value or "").strip()
+    return f"{clean[:8]}-{clean[8:12]}-{clean[12:16]}-{clean[16:20]}-{clean[20:]}"
+
+
+def resolve_notion_database_id(value: str) -> str:
+    """Accept UUID, hyphenated UUID, or full Notion URL (prefers ?v= for inline DB)."""
+    raw = (value or "").strip()
+    if not raw:
+        return ""
+    if "notion.com" in raw or raw.startswith("http"):
+        view_match = re.search(r"[?&]v=([a-f0-9-]{32,36})", raw, re.I)
+        if view_match:
+            return normalize_notion_id(view_match.group(1))
+        page_match = re.search(r"/(?:p|database)/([a-f0-9-]{32,36})", raw, re.I)
+        if page_match:
+            return normalize_notion_id(page_match.group(1))
+        hex_match = re.search(r"([a-f0-9]{32})", raw, re.I)
+        if hex_match:
+            return normalize_notion_id(hex_match.group(1))
+    return normalize_notion_id(raw)
+
+
+def _database_id(value: str) -> str:
+    return resolve_notion_database_id(value)
+
+
 class NotionAPIError(RuntimeError):
     def __init__(self, message: str, status_code: int | None = None):
         super().__init__(message)
@@ -54,8 +85,8 @@ def notion_access_instructions(*, compact: bool = False) -> str:
         "2. <b>⋯ → Connections → Add connections</b> → выберите "
         "<b>Buy Bring Bot</b>.\n"
         "3. Если база внутри страницы — подключите интеграцию и к родительской странице.\n"
-        "4. В Railway укажите <b>database ID</b> из URL базы (32 символа), "
-        "не ID обычной заметки."
+        "4. В Railway можно вставить <b>полную ссылку</b> на базу — бот возьмёт ID "
+        "из <code>?v=</code> (для базы внутри страницы) или из URL."
     )
 
 
@@ -290,7 +321,7 @@ async def _find_client_page(
     email: str | None,
     name: str | None,
 ) -> str | None:
-    db_id = settings.notion_clients_database_id.strip()
+    db_id = _database_id(settings.notion_clients_database_id)
     if not db_id:
         return None
 
@@ -341,7 +372,7 @@ async def upsert_client_page(
     language: str | None,
     existing_page_id: str | None = None,
 ) -> str | None:
-    db_id = settings.notion_clients_database_id.strip()
+    db_id = _database_id(settings.notion_clients_database_id)
     if not db_id:
         return None
 
@@ -383,7 +414,7 @@ async def upsert_lead_page(
     kommo_lead_id: int | None,
     existing_page_id: str | None = None,
 ) -> str | None:
-    db_id = settings.notion_leads_database_id.strip()
+    db_id = _database_id(settings.notion_leads_database_id)
     if not db_id:
         return None
 
@@ -438,7 +469,7 @@ async def create_call_page(
     needs_review: bool,
     local_voice_note_id: int,
 ) -> str | None:
-    db_id = settings.notion_calls_database_id.strip()
+    db_id = _database_id(settings.notion_calls_database_id)
     if not db_id:
         return None
 
@@ -480,7 +511,7 @@ async def create_task_page(
     lead_page_id: str | None = None,
     source: str = "AI",
 ) -> str | None:
-    db_id = settings.notion_tasks_database_id.strip()
+    db_id = _database_id(settings.notion_tasks_database_id)
     if not db_id:
         return None
 
@@ -575,7 +606,7 @@ async def sync_analyzed_call(
 
     task_page_id = None
     next_step = str(analysis.get("recommended_next_step") or "").strip()
-    if next_step and settings.notion_tasks_database_id.strip():
+    if next_step and _database_id(settings.notion_tasks_database_id):
         task_page_id = await create_task_page(
             title=next_step[:200],
             task_type="Task",
@@ -601,7 +632,7 @@ async def add_note_to_page(page_id: str, note: str, *, human_field: bool = True)
 
 
 async def search_clients(query: str, *, limit: int = 5) -> list[dict[str, str]]:
-    db_id = settings.notion_clients_database_id.strip()
+    db_id = _database_id(settings.notion_clients_database_id)
     if not db_id or not query.strip():
         return []
     results = await query_database(
@@ -625,7 +656,7 @@ async def search_clients(query: str, *, limit: int = 5) -> list[dict[str, str]]:
 
 
 async def search_leads(query: str, *, limit: int = 5) -> list[dict[str, str]]:
-    db_id = settings.notion_leads_database_id.strip()
+    db_id = _database_id(settings.notion_leads_database_id)
     if not db_id or not query.strip():
         return []
     results = await query_database(
@@ -660,7 +691,7 @@ async def delete_page_soft(page_id: str) -> None:
 
 
 async def get_morning_digest() -> str:
-    db_id = settings.notion_tasks_database_id.strip()
+    db_id = _database_id(settings.notion_tasks_database_id)
     if not db_id:
         return "Notion tasks database не настроена."
 

@@ -368,6 +368,18 @@ class TestNotionHelpers:
             mp.setattr(notion_service.settings, "notion_api_token", "secret")
             assert notion_service.is_configured() is True
 
+    def test_resolve_notion_database_id_prefers_view_from_url(self):
+        from app.services import notion_service
+
+        url = (
+            "https://app.notion.com/p/3918a54a26de80da9582d466738c9abd"
+            "?v=3918a54a26de81a9a792000c31774295"
+        )
+        assert (
+            notion_service.resolve_notion_database_id(url)
+            == "3918a54a-26de-81a9-a792-000c31774295"
+        )
+
     def test_format_user_error_mentions_connections(self):
         from app.services import notion_service
 
@@ -470,3 +482,19 @@ class TestCommandRouter:
 
         parsed = _parse_relative_time("сегодня в 15:30")
         assert parsed is not None
+
+
+class TestTelegramStateSerialization:
+    def test_dumps_state_serializes_datetime(self):
+        from datetime import datetime, timezone
+
+        from app.services.telegram_state_service import dumps_state
+
+        payload = {
+            "mode": "calendar_completed",
+            "last_result": {
+                "start_at": datetime(2026, 7, 4, 8, 0, tzinfo=timezone.utc),
+            },
+        }
+        raw = dumps_state(payload)
+        assert "2026-07-04T08:00:00" in raw

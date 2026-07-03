@@ -154,6 +154,8 @@ class Settings(BaseSettings):
     kommo_default_task_type_id: int = 1
     kommo_unreviewed_pipeline_id: Optional[int] = None
     kommo_unreviewed_status_id: Optional[int] = None
+    # Used when status_id is not set explicitly. Default Kommo stage: Incoming leads.
+    kommo_unreviewed_status_name: str = "Incoming leads"
     kommo_unreviewed_page_size: int = 8
 
     # Google Sheets lead registry (read-only service account)

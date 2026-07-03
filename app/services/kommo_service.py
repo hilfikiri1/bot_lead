@@ -1267,6 +1267,18 @@ async def create_lead_task(
 
 _UNREVIEWED_NAME_RE = re.compile(r"^\d+\s*-\s*.+$")
 
+INCOMING_LEADS_STATUS_ALIASES = frozenset(
+    {
+        "incoming leads",
+        "incoming lead",
+        "incoming",
+        "входящие лиды",
+        "входящие",
+        "неразобранные",
+        "неразобранное",
+    }
+)
+
 
 def lead_has_internal_id(name: Any) -> bool:
     return bool(_UNREVIEWED_NAME_RE.match(str(name or "").strip()))
@@ -1280,18 +1292,76 @@ def configured_unreviewed_status_id() -> int | None:
     return settings.kommo_unreviewed_status_id
 
 
+def _normalize_status_name(value: str) -> str:
+    return " ".join((value or "").casefold().split())
+
+
+def _incoming_status_matches(status_name: str, configured_name: str) -> bool:
+    norm = _normalize_status_name(status_name)
+    configured = _normalize_status_name(configured_name)
+    if norm == configured:
+        return True
+    if configured == _normalize_status_name("Incoming leads"):
+        return norm in INCOMING_LEADS_STATUS_ALIASES
+    return False
+
+
+async def resolve_unreviewed_status_scope() -> dict[str, Any]:
+    """Resolve Kommo filters for the Incoming leads unreviewed list."""
+    pipeline_id = configured_unreviewed_pipeline_id()
+    explicit_status_id = configured_unreviewed_status_id()
+    configured_name = (settings.kommo_unreviewed_status_name or "Incoming leads").strip()
+
+    if explicit_status_id is not None:
+        return {
+            "pipeline_id": pipeline_id,
+            "status_ids": {explicit_status_id},
+            "status_label": configured_name or f"Этап {explicit_status_id}",
+        }
+
+    pipeline_names, status_names = await get_pipeline_index()
+    matched_status_ids: set[int] = set()
+    matched_labels: list[str] = []
+    for (pid, sid), status_name in status_names.items():
+        if pipeline_id is not None and pid != pipeline_id:
+            continue
+        if not _incoming_status_matches(status_name, configured_name):
+            continue
+        matched_status_ids.add(sid)
+        pipeline_label = pipeline_names.get(pid, f"Воронка {pid}")
+        matched_labels.append(f"{pipeline_label} → {status_name}")
+
+    if not matched_status_ids:
+        raise KommoAPIError(
+            f'Этап "{configured_name}" не найден в Kommo. '
+            "Проверьте название воронки или задайте KOMMO_UNREVIEWED_STATUS_ID."
+        )
+
+    status_label = (
+        matched_labels[0]
+        if len(matched_labels) == 1
+        else f"{configured_name} ({len(matched_labels)} этапов)"
+    )
+    return {
+        "pipeline_id": pipeline_id,
+        "status_ids": matched_status_ids,
+        "status_label": status_label,
+    }
+
+
 async def get_all_unreviewed_leads(
     max_pages: int | None = None,
 ) -> dict[str, Any]:
-    """Return open Kommo leads that do not yet have an internal numeric prefix."""
-    pipeline_id = configured_unreviewed_pipeline_id()
-    status_id = configured_unreviewed_status_id()
+    """Return open Kommo leads in Incoming leads without an internal numeric prefix."""
+    scope = await resolve_unreviewed_status_scope()
+    pipeline_id = scope["pipeline_id"]
+    status_ids = scope["status_ids"]
     result = await get_all_open_leads(max_pages=max_pages, pipeline_id=pipeline_id)
     filtered: list[dict[str, Any]] = []
     for lead in result.get("leads") or []:
         if lead_has_internal_id(lead.get("name")):
             continue
-        if status_id is not None and lead.get("status_id") != status_id:
+        if lead.get("status_id") not in status_ids:
             continue
         filtered.append(lead)
     return {
@@ -1299,7 +1369,9 @@ async def get_all_unreviewed_leads(
         "leads": filtered,
         "open_count": len(filtered),
         "pipeline_id": pipeline_id,
-        "status_id": status_id,
+        "status_id": next(iter(status_ids)) if len(status_ids) == 1 else None,
+        "status_ids": sorted(status_ids),
+        "status_label": scope["status_label"],
     }
 
 

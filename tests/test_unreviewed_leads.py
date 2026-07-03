@@ -360,6 +360,84 @@ class TestGoogleSheetsCache:
         )
 
 
+class TestIncomingLeadsFilter:
+    @pytest.mark.asyncio
+    async def test_filters_only_incoming_stage_without_internal_id(self):
+        from app.services.kommo_service import get_all_unreviewed_leads
+
+        with patch(
+            "app.services.kommo_service.get_pipeline_index",
+            new_callable=AsyncMock,
+            return_value=(
+                {1: "Sales"},
+                {(1, 10): "Incoming leads", (1, 20): "Negotiation"},
+            ),
+        ), patch(
+            "app.services.kommo_service.get_all_open_leads",
+            new_callable=AsyncMock,
+            return_value={
+                "leads": [
+                    {"id": 1, "name": "Facebook lead", "status_id": 10},
+                    {"id": 2, "name": "110 - Игрушки", "status_id": 10},
+                    {"id": 3, "name": "Other stage", "status_id": 20},
+                ],
+                "open_count": 3,
+            },
+        ), patch(
+            "app.services.kommo_service.settings.kommo_unreviewed_status_id",
+            None,
+        ), patch(
+            "app.services.kommo_service.settings.kommo_unreviewed_pipeline_id",
+            None,
+        ):
+            result = await get_all_unreviewed_leads()
+
+        assert [lead["id"] for lead in result["leads"]] == [1]
+        assert result["status_label"] == "Sales → Incoming leads"
+
+    @pytest.mark.asyncio
+    async def test_explicit_status_id_override(self):
+        from app.services.kommo_service import get_all_unreviewed_leads
+
+        with patch(
+            "app.services.kommo_service.get_all_open_leads",
+            new_callable=AsyncMock,
+            return_value={
+                "leads": [
+                    {"id": 1, "name": "Facebook lead", "status_id": 99},
+                    {"id": 2, "name": "Other", "status_id": 10},
+                ],
+                "open_count": 2,
+            },
+        ), patch(
+            "app.services.kommo_service.settings.kommo_unreviewed_status_id",
+            99,
+        ), patch(
+            "app.services.kommo_service.settings.kommo_unreviewed_pipeline_id",
+            None,
+        ):
+            result = await get_all_unreviewed_leads()
+
+        assert [lead["id"] for lead in result["leads"]] == [1]
+
+
+class TestGoogleSheetsCredentials:
+    def test_uses_calendar_service_account_when_sheets_json_missing(self):
+        from app.services import google_sheets_service as sheets
+
+        with patch.object(
+            sheets.settings, "google_sheets_service_account_json", ""
+        ), patch.object(
+            sheets.settings,
+            "google_service_account_json",
+            '{"client_email":"calendar@test","private_key":"x"}',
+        ), patch.object(
+            sheets.settings, "google_service_account_json_base64", ""
+        ):
+            info = sheets._load_service_account_info()
+        assert info["client_email"] == "calendar@test"
+
+
 class TestTelegramAuthorization:
     def test_unauthorized_user_blocked(self):
         from app.api import telegram as telegram_api

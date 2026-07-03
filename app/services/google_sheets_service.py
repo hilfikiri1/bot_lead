@@ -37,11 +37,19 @@ class SpreadsheetRow:
     lead_number: str | None
 
 
+def _has_service_account_credentials() -> bool:
+    return bool(
+        settings.google_sheets_service_account_json.strip()
+        or settings.google_service_account_json.strip()
+        or settings.google_service_account_json_base64.strip()
+    )
+
+
 def is_configured() -> bool:
     return bool(
         settings.google_sheets_spreadsheet_id.strip()
         and settings.google_sheets_worksheet_name.strip()
-        and settings.google_sheets_service_account_json.strip()
+        and _has_service_account_credentials()
     )
 
 
@@ -58,8 +66,20 @@ def column_letter_to_index(column: str) -> int:
 def _load_service_account_info() -> dict[str, Any]:
     raw = settings.google_sheets_service_account_json.strip()
     if not raw:
+        raw = settings.google_service_account_json.strip()
+    if not raw:
+        encoded = settings.google_service_account_json_base64.strip()
+        if encoded:
+            try:
+                raw = base64.b64decode(encoded).decode("utf-8")
+            except (ValueError, UnicodeDecodeError) as exc:
+                raise GoogleSheetsError(
+                    "Не удалось декодировать GOOGLE_SERVICE_ACCOUNT_JSON_BASE64."
+                ) from exc
+    if not raw:
         raise GoogleSheetsError(
-            "GOOGLE_SHEETS_SERVICE_ACCOUNT_JSON не задан в Railway Variables."
+            "Service account не задан. Добавьте GOOGLE_SHEETS_SERVICE_ACCOUNT_JSON "
+            "или GOOGLE_SERVICE_ACCOUNT_JSON / GOOGLE_SERVICE_ACCOUNT_JSON_BASE64."
         )
     try:
         if raw.startswith("{"):
@@ -68,8 +88,15 @@ def _load_service_account_info() -> dict[str, Any]:
         return json.loads(decoded)
     except (json.JSONDecodeError, ValueError) as exc:
         raise GoogleSheetsError(
-            "Не удалось прочитать GOOGLE_SHEETS_SERVICE_ACCOUNT_JSON."
+            "Не удалось прочитать JSON сервисного аккаунта Google."
         ) from exc
+
+
+def service_account_email() -> str | None:
+    try:
+        return str(_load_service_account_info().get("client_email") or "").strip() or None
+    except GoogleSheetsError:
+        return None
 
 
 def _sheets_service():
@@ -120,6 +147,60 @@ def _parse_rows(values: list[list[Any]]) -> list[SpreadsheetRow]:
     return parsed
 
 
+def _list_worksheet_titles(service: Any, spreadsheet_id: str) -> list[str]:
+    try:
+        metadata = service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
+    except Exception:
+        return []
+    titles: list[str] = []
+    for sheet in metadata.get("sheets") or []:
+        title = ((sheet or {}).get("properties") or {}).get("title")
+        if title:
+            titles.append(str(title))
+    return titles
+
+
+def _raise_sheets_access_error(
+    exc: Exception,
+    *,
+    spreadsheet_id: str,
+    worksheet: str,
+) -> None:
+    message = str(exc)
+    email = service_account_email()
+    share_hint = (
+        f"Расшарьте таблицу на <code>{email}</code> (Viewer)."
+        if email
+        else "Расшарьте таблицу на email service account (Viewer)."
+    )
+    if "403" in message or "permission" in message.lower():
+        raise GoogleSheetsError(
+            "Google Sheets отклонил доступ.\n"
+            f"Таблица: <code>{spreadsheet_id}</code>\n"
+            f"{share_hint}"
+        ) from exc
+    if "404" in message or "not found" in message.lower():
+        service = _sheets_service()
+        titles = _list_worksheet_titles(service, spreadsheet_id)
+        if titles and worksheet not in titles:
+            preview = ", ".join(titles[:8])
+            suffix = "…" if len(titles) > 8 else ""
+            raise GoogleSheetsError(
+                "Лист Google Sheets не найден.\n"
+                f"Задано: <code>{worksheet}</code>\n"
+                f"Доступные листы: {preview}{suffix}\n"
+                f"Таблица: <code>{spreadsheet_id}</code>\n"
+                f"{share_hint}"
+            ) from exc
+        raise GoogleSheetsError(
+            "Таблица Google Sheets не найдена или недоступна.\n"
+            f"ID: <code>{spreadsheet_id}</code>\n"
+            f"Лист: <code>{worksheet}</code>\n"
+            f"{share_hint}"
+        ) from exc
+    raise GoogleSheetsError("Не удалось прочитать Google Sheets.") from exc
+
+
 def _fetch_rows_from_api() -> list[SpreadsheetRow]:
     worksheet = settings.google_sheets_worksheet_name.strip()
     spreadsheet_id = settings.google_sheets_spreadsheet_id.strip()
@@ -135,21 +216,15 @@ def _fetch_rows_from_api() -> list[SpreadsheetRow]:
             .execute()
         )
     except Exception as exc:
-        message = str(exc)
-        if "404" in message or "not found" in message.lower():
-            raise GoogleSheetsError(
-                "Таблица или лист Google Sheets не найдены. "
-                "Проверьте ID таблицы, имя листа и доступ service account."
-            ) from exc
-        if "403" in message or "permission" in message.lower():
-            raise GoogleSheetsError(
-                "Google Sheets отклонил доступ. Откройте таблицу для service account email."
-            ) from exc
-        raise GoogleSheetsError("Не удалось прочитать Google Sheets.") from exc
+        _raise_sheets_access_error(
+            exc, spreadsheet_id=spreadsheet_id, worksheet=worksheet
+        )
 
     values = result.get("values") or []
     if not values:
-        raise GoogleSheetsError("Лист Google Sheets пуст.")
+        raise GoogleSheetsError(
+            f"Лист <code>{worksheet}</code> пуст. Проверьте имя листа и строку заголовка."
+        )
     rows = _parse_rows(values)
     if not rows:
         raise GoogleSheetsError(

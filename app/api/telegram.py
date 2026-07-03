@@ -405,7 +405,14 @@ async def _handle_morning_digest(chat_id: int) -> None:
             ),
         )
         return
-    await telegram_service.send_message(chat_id, await notion_service.get_morning_digest())
+    try:
+        await telegram_service.send_message(
+            chat_id, await notion_service.get_morning_digest()
+        )
+    except notion_service.NotionAPIError as exc:
+        await telegram_service.send_message(
+            chat_id, notion_service.format_user_error(exc)
+        )
 
 
 async def _handle_calendar_test(
@@ -764,8 +771,11 @@ async def _start_unreviewed_matching(
             chat_id,
             (
                 "❌ <b>Google Sheets не настроен</b>\n\n"
-                "Задайте GOOGLE_SHEETS_SPREADSHEET_ID, GOOGLE_SHEETS_WORKSHEET_NAME "
-                "и GOOGLE_SHEETS_SERVICE_ACCOUNT_JSON в Railway Variables."
+                "Задайте <code>GOOGLE_SHEETS_SPREADSHEET_ID</code> и "
+                "<code>GOOGLE_SHEETS_WORKSHEET_NAME</code>.\n"
+                "Service account можно не дублировать — используется тот же JSON, "
+                "что и для Google Calendar "
+                "(<code>GOOGLE_SERVICE_ACCOUNT_JSON_BASE64</code>)."
             ),
         )
         return
@@ -2406,6 +2416,10 @@ async def telegram_webhook(
                     chat_id=chat_id,
                 )
                 await telegram_service.send_message(chat_id, result_message)
+            except notion_service.NotionAPIError as exc:
+                await telegram_service.send_message(
+                    chat_id, notion_service.format_user_error(exc)
+                )
             except Exception as exc:
                 logger.exception("Callback handling failed")
                 await telegram_service.send_message(

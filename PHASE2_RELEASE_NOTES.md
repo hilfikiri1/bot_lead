@@ -16,12 +16,12 @@
 
 ### 2. Неразобранные сделки Kommo + Google Sheets
 
-- Кнопка `📥 Неразобранные сделки` — список сделок без внутреннего номера (`^\d+\s*-\s*.+$`).
+- Кнопка `📥 Неразобранные сделки` — только сделки в этапе **Incoming leads** (без внутреннего номера `^\d+\s*-\s*.+$`).
 - Сопоставление со строкой реестра Google Sheets по телефону, email, имени клиента или компании.
 - Сокращение польского названия товара (колонка P) до русского (детерминированные правила + OpenAI fallback).
 - Предпросмотр переименования: `{Y} - {краткий товар RU}` → подтверждение → запись в Kommo.
 - Аудит в таблице `spreadsheet_lead_mappings` (старый/новый name, match method, row number).
-- Опциональный фильтр воронки/этапа: `KOMMO_UNREVIEWED_PIPELINE_ID`, `KOMMO_UNREVIEWED_STATUS_ID` (пустые значения = без фильтра).
+- Опциональный фильтр воронки: `KOMMO_UNREVIEWED_PIPELINE_ID`. Этап по умолчанию ищется по имени `Incoming leads` (`KOMMO_UNREVIEWED_STATUS_NAME`) или задаётся явно через `KOMMO_UNREVIEWED_STATUS_ID`.
 
 ### 3. Редактирование сделок Kommo в Telegram
 
@@ -154,7 +154,7 @@ base64 -i service-account.json | tr -d '\n'
 ```env
 GOOGLE_SHEETS_SPREADSHEET_ID=<ID из URL таблицы>
 GOOGLE_SHEETS_WORKSHEET_NAME=<имя листа>
-GOOGLE_SHEETS_SERVICE_ACCOUNT_JSON=<тот же JSON или через base64-поле календаря>
+GOOGLE_SHEETS_SERVICE_ACCOUNT_JSON=<тот же JSON или оставьте пустым — возьмётся из GOOGLE_SERVICE_ACCOUNT_JSON_BASE64>
 GOOGLE_SHEETS_PHONE_COLUMN=O
 GOOGLE_SHEETS_PRODUCT_COLUMN=P
 GOOGLE_SHEETS_LEAD_NUMBER_COLUMN=Y
@@ -218,7 +218,7 @@ ICLOUD_CALENDAR_NAME=BBS Работа
 
 ### Notion и голос
 
-12. `/digest` — утренний дайджест (если Notion настроен).
+12. `☀️ Дайджест` или `/digest` — утренний дайджест (нужны `NOTION_API_TOKEN` и `NOTION_TASKS_DATABASE_ID`).
 13. Голосом: «найди сделку …» — маршрутизация команды, не анализ разговора.
 14. Голосом: длинный разговор с клиентом + кнопка анализа — полный AI-отчёт.
 

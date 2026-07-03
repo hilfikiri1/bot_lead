@@ -353,9 +353,15 @@ async def _process(
                     if notion_result.call_page_id
                     else ""
                 )
+            except notion_service.NotionAPIError as exc:
+                logger.warning("Notion sync failed for voice_note_id=%s: %s", voice_note.id, exc)
+                notion_line = f"\n\n{notion_service.format_user_error(exc)}"
             except Exception as exc:
                 logger.warning("Notion sync failed for voice_note_id=%s: %s", voice_note.id, exc)
-                notion_line = "\n\n⚠️ Notion: не удалось сохранить автоматически."
+                notion_line = (
+                    "\n\n⚠️ Notion: не удалось сохранить.\n"
+                    f"{notion_service.notion_access_instructions(compact=True)}"
+                )
 
             report_text = telegram_service.format_report(analysis, transcript)
             report_text += notion_line

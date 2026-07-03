@@ -164,6 +164,8 @@ GOOGLE_SHEETS_LEAD_NUMBER_COLUMN=Y
 
 ### Notion (опционально)
 
+Базы **не должны** находиться в разделе **Private**. Перенесите Clients, Leads, Calls и Tasks в teamspace команды и подключите каждую к интеграции **Buy Bring Bot** (`⋯ → Connections`).
+
 ```env
 NOTION_API_TOKEN=
 NOTION_AUTO_SYNC=true
@@ -175,6 +177,8 @@ VOICE_COMMAND_MODE=true
 MORNING_DIGEST_ENABLED=true
 MORNING_DIGEST_HOUR=8
 ```
+
+Как получить database ID: откройте базу в Notion → **Copy link** → ID из URL (32 символа с дефисами). Это ID **базы**, не обычной страницы.
 
 ### Kommo — опциональные фильтры
 

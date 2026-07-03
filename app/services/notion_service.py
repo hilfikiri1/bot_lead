@@ -41,22 +41,35 @@ class NotionAPIError(RuntimeError):
         self.status_code = status_code
 
 
+def notion_access_instructions(*, compact: bool = False) -> str:
+    """Shared setup hint: Notion DBs must be workspace-visible, not Private."""
+    if compact:
+        return (
+            "База не должна быть в <b>Private</b>: перенесите в teamspace и подключите "
+            "к интеграции <b>Buy Bring Bot</b> (⋯ → Connections)."
+        )
+    return (
+        "1. Базы <b>не должны</b> лежать в разделе <b>Private</b> — только в teamspace "
+        "или на расшаренной странице команды.\n"
+        "2. Откройте каждую базу → <b>⋯ → Connections</b> → добавьте "
+        "<b>Buy Bring Bot</b>.\n"
+        "3. В Railway укажите <b>database ID</b> (из URL базы), не ID обычной страницы."
+    )
+
+
 def format_user_error(exc: NotionAPIError) -> str:
     """Return a short Telegram-friendly explanation for common Notion failures."""
     if exc.status_code == 404 or "object_not_found" in str(exc).lower():
         return (
             "❌ <b>База Notion не найдена</b>\n\n"
-            "Проверьте ID базы в Railway и что она расшарена на интеграцию "
-            "<b>Buy Bring Bot</b> (Invite → Connections).\n\n"
-            "Нужен именно <b>database ID</b>, не ID страницы. "
-            "Откройте базу в Notion → ⋯ → Copy link → ID из URL."
+            f"{notion_access_instructions()}"
         )
     if exc.status_code == 401:
         return "❌ <b>Notion отклонил токен</b>\n\nПроверьте <code>NOTION_API_TOKEN</code>."
     if exc.status_code == 403:
         return (
             "❌ <b>Notion: нет доступа</b>\n\n"
-            "Подключите базу к интеграции Buy Bring Bot в Notion."
+            f"{notion_access_instructions()}"
         )
     return f"❌ <b>Ошибка Notion</b>\n\n{html_escape(str(exc)[:400])}"
 
@@ -165,7 +178,8 @@ async def _request(
         preview = response.text.replace("\n", " ")[:400]
         if response.status_code == 404:
             raise NotionAPIError(
-                "База Notion не найдена или не расшарена на интеграцию Buy Bring Bot.",
+                "База Notion не найдена. Перенесите её из Private в teamspace "
+                "и подключите к интеграции Buy Bring Bot.",
                 status_code=404,
             )
         raise NotionAPIError(

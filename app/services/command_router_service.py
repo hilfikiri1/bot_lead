@@ -306,10 +306,8 @@ async def execute_plan(
         logger.warning("Notion API error during command: %s", exc)
         return (
             "⚠️ <b>Notion недоступен</b>\n\n"
-            f"<code>{html.escape(str(exc)[:350])}</code>\n\n"
-            "Для напоминаний в календарь Notion не нужен — проверьте iCloud.\n"
-            "Если tasks DB не используете, очистите "
-            "<code>NOTION_TASKS_DATABASE_ID</code> в Railway."
+            f"{notion_service.format_user_error(exc)}\n\n"
+            "Для напоминаний в календарь Notion не обязателен."
         )
 
 

@@ -586,6 +586,7 @@ async def set_bot_commands() -> dict:
     commands = [
         {"command": "menu", "description": "Главное меню"},
         {"command": "jobs", "description": "Статус обработки аудио"},
+        {"command": "digest", "description": "Утренний дайджест Notion"},
         {"command": "kommo_test", "description": "Проверить Kommo"},
         {"command": "calendar_test", "description": "Проверить Google Calendar"},
         {"command": "calendar_test_write", "description": "Тест записи в Google Calendar"},
@@ -717,6 +718,7 @@ async def send_main_menu(chat_id: int) -> dict:
             ],
             [
                 {"text": "📅 Проверить календарь", "callback_data": "menu:calendar"},
+                {"text": "☀️ Дайджест", "callback_data": "menu:digest"},
             ],
             [
                 {

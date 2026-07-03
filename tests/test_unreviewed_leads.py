@@ -377,9 +377,9 @@ class TestIncomingLeadsFilter:
             new_callable=AsyncMock,
             return_value={
                 "leads": [
-                    {"id": 1, "name": "Facebook lead", "status_id": 10},
-                    {"id": 2, "name": "110 - Игрушки", "status_id": 10},
-                    {"id": 3, "name": "Other stage", "status_id": 20},
+                    {"id": 1, "name": "Facebook lead", "status_id": 10, "pipeline_id": 1},
+                    {"id": 2, "name": "110 - Игрушки", "status_id": 10, "pipeline_id": 1},
+                    {"id": 3, "name": "Other stage", "status_id": 20, "pipeline_id": 1},
                 ],
                 "open_count": 3,
             },
@@ -400,12 +400,16 @@ class TestIncomingLeadsFilter:
         from app.services.kommo_service import get_all_unreviewed_leads
 
         with patch(
+            "app.services.kommo_service.get_pipeline_index",
+            new_callable=AsyncMock,
+            return_value=({2: "Marketing"}, {(2, 99): "Незапланированные"}),
+        ), patch(
             "app.services.kommo_service.get_all_open_leads",
             new_callable=AsyncMock,
             return_value={
                 "leads": [
-                    {"id": 1, "name": "Facebook lead", "status_id": 99},
-                    {"id": 2, "name": "Other", "status_id": 10},
+                    {"id": 1, "name": "Facebook lead", "status_id": 99, "pipeline_id": 2},
+                    {"id": 2, "name": "Other", "status_id": 10, "pipeline_id": 2},
                 ],
                 "open_count": 2,
             },
@@ -419,6 +423,64 @@ class TestIncomingLeadsFilter:
             result = await get_all_unreviewed_leads()
 
         assert [lead["id"] for lead in result["leads"]] == [1]
+
+    @pytest.mark.asyncio
+    async def test_uses_incoming_pipeline_not_menu_pipeline(self):
+        from app.services.kommo_service import get_all_unreviewed_leads
+
+        open_leads_mock = AsyncMock(
+            return_value={
+                "leads": [
+                    {"id": 1, "name": "Facebook lead", "status_id": 10, "pipeline_id": 1},
+                ],
+                "open_count": 1,
+            }
+        )
+        with patch(
+            "app.services.kommo_service.get_pipeline_index",
+            new_callable=AsyncMock,
+            return_value=(
+                {1: "Sales", 2: "Other funnel"},
+                {(1, 10): "Incoming leads", (2, 10): "Incoming leads"},
+            ),
+        ), patch(
+            "app.services.kommo_service.get_all_open_leads",
+            open_leads_mock,
+        ), patch(
+            "app.services.kommo_service.settings.kommo_unreviewed_status_id",
+            None,
+        ), patch(
+            "app.services.kommo_service.settings.kommo_unreviewed_pipeline_id",
+            None,
+        ), patch(
+            "app.services.kommo_service.settings.kommo_menu_pipeline_id",
+            2,
+        ):
+            result = await get_all_unreviewed_leads()
+
+        assert [lead["id"] for lead in result["leads"]] == [1]
+        open_leads_mock.assert_awaited_once()
+        assert open_leads_mock.await_args.kwargs["allow_menu_fallback"] is False
+        assert open_leads_mock.await_args.kwargs["pipeline_id"] is None
+
+    @pytest.mark.asyncio
+    async def test_unplanned_stage_alias(self):
+        from app.services.kommo_service import resolve_unreviewed_status_scope
+
+        with patch(
+            "app.services.kommo_service.get_pipeline_index",
+            new_callable=AsyncMock,
+            return_value=({5: "B2B"}, {(5, 77): "Незапланированные"}),
+        ), patch(
+            "app.services.kommo_service.settings.kommo_unreviewed_status_name",
+            "Incoming leads",
+        ), patch(
+            "app.services.kommo_service.settings.kommo_unreviewed_pipeline_id",
+            5,
+        ):
+            scope = await resolve_unreviewed_status_scope()
+
+        assert scope["status_pairs"] == {(5, 77)}
 
 
 class TestGoogleSheetsCredentials:

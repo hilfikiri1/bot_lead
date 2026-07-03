@@ -544,6 +544,7 @@ async def get_all_open_leads(
     max_pages: int | None = None,
     *,
     pipeline_id: int | None = None,
+    allow_menu_fallback: bool = True,
 ) -> dict[str, Any]:
     """
     Fetch all leads page by page and keep only leads without closed_at.
@@ -553,9 +554,9 @@ async def get_all_open_leads(
     """
     page_cap = max_pages or settings.kommo_open_leads_max_pages
     page_cap = max(1, min(page_cap, 100))
-    selected_pipeline = (
-        pipeline_id if pipeline_id is not None else configured_menu_pipeline_id()
-    )
+    selected_pipeline = pipeline_id
+    if selected_pipeline is None and allow_menu_fallback:
+        selected_pipeline = configured_menu_pipeline_id()
 
     open_leads: list[dict[str, Any]] = []
     scanned = 0
@@ -1276,6 +1277,12 @@ INCOMING_LEADS_STATUS_ALIASES = frozenset(
         "входящие",
         "неразобранные",
         "неразобранное",
+        "незапланированные",
+        "незапланированное",
+        "не запланированные",
+        "не запланированное",
+        "unplanned",
+        "unsorted",
     }
 )
 
@@ -1311,30 +1318,57 @@ async def resolve_unreviewed_status_scope() -> dict[str, Any]:
     pipeline_id = configured_unreviewed_pipeline_id()
     explicit_status_id = configured_unreviewed_status_id()
     configured_name = (settings.kommo_unreviewed_status_name or "Incoming leads").strip()
+    pipeline_names, status_names = await get_pipeline_index()
 
     if explicit_status_id is not None:
+        status_pairs = {
+            (pid, sid)
+            for (pid, sid) in status_names
+            if sid == explicit_status_id and (pipeline_id is None or pid == pipeline_id)
+        }
+        if not status_pairs and pipeline_id is not None:
+            status_pairs = {(pipeline_id, explicit_status_id)}
+        if not status_pairs:
+            raise KommoAPIError(
+                f"Этап ID {explicit_status_id} не найден в Kommo. "
+                "Проверьте KOMMO_UNREVIEWED_STATUS_ID и KOMMO_UNREVIEWED_PIPELINE_ID."
+            )
+        labels = [
+            f"{pipeline_names.get(pid, f'Воронка {pid}')} → {status_names.get((pid, sid), configured_name)}"
+            for pid, sid in sorted(status_pairs)
+        ]
         return {
             "pipeline_id": pipeline_id,
-            "status_ids": {explicit_status_id},
-            "status_label": configured_name or f"Этап {explicit_status_id}",
+            "pipeline_ids": {pid for pid, _ in status_pairs},
+            "status_ids": {sid for _, sid in status_pairs},
+            "status_pairs": status_pairs,
+            "status_label": labels[0] if len(labels) == 1 else configured_name,
         }
 
-    pipeline_names, status_names = await get_pipeline_index()
-    matched_status_ids: set[int] = set()
+    status_pairs: set[tuple[int, int]] = set()
     matched_labels: list[str] = []
     for (pid, sid), status_name in status_names.items():
         if pipeline_id is not None and pid != pipeline_id:
             continue
         if not _incoming_status_matches(status_name, configured_name):
             continue
-        matched_status_ids.add(sid)
+        status_pairs.add((pid, sid))
         pipeline_label = pipeline_names.get(pid, f"Воронка {pid}")
         matched_labels.append(f"{pipeline_label} → {status_name}")
 
-    if not matched_status_ids:
+    if not status_pairs:
+        available = sorted(
+            {
+                f"{pipeline_names.get(pid, pid)} → {name}"
+                for (pid, _), name in status_names.items()
+                if pipeline_id is None or pid == pipeline_id
+            }
+        )
+        preview = "\n".join(f"• {item}" for item in available[:12])
         raise KommoAPIError(
             f'Этап "{configured_name}" не найден в Kommo. '
-            "Проверьте название воронки или задайте KOMMO_UNREVIEWED_STATUS_ID."
+            "Задайте KOMMO_UNREVIEWED_STATUS_ID или KOMMO_UNREVIEWED_PIPELINE_ID.\n\n"
+            f"Доступные этапы:\n{preview}"
         )
 
     status_label = (
@@ -1344,7 +1378,9 @@ async def resolve_unreviewed_status_scope() -> dict[str, Any]:
     )
     return {
         "pipeline_id": pipeline_id,
-        "status_ids": matched_status_ids,
+        "pipeline_ids": {pid for pid, _ in status_pairs},
+        "status_ids": {sid for _, sid in status_pairs},
+        "status_pairs": status_pairs,
         "status_label": status_label,
     }
 
@@ -1354,23 +1390,47 @@ async def get_all_unreviewed_leads(
 ) -> dict[str, Any]:
     """Return open Kommo leads in Incoming leads without an internal numeric prefix."""
     scope = await resolve_unreviewed_status_scope()
-    pipeline_id = scope["pipeline_id"]
-    status_ids = scope["status_ids"]
-    result = await get_all_open_leads(max_pages=max_pages, pipeline_id=pipeline_id)
+    configured_pipeline = scope["pipeline_id"]
+    status_pairs = scope["status_pairs"]
+    pipeline_ids = scope["pipeline_ids"]
+
+    if configured_pipeline is not None:
+        fetch_pipeline = configured_pipeline
+    elif len(pipeline_ids) == 1:
+        fetch_pipeline = next(iter(pipeline_ids))
+    else:
+        fetch_pipeline = None
+
+    result = await get_all_open_leads(
+        max_pages=max_pages,
+        pipeline_id=fetch_pipeline,
+        allow_menu_fallback=False,
+    )
     filtered: list[dict[str, Any]] = []
     for lead in result.get("leads") or []:
         if lead_has_internal_id(lead.get("name")):
             continue
-        if lead.get("status_id") not in status_ids:
+        pair = (lead.get("pipeline_id"), lead.get("status_id"))
+        if pair not in status_pairs:
             continue
         filtered.append(lead)
+
+    pipeline_name = None
+    if len(pipeline_ids) == 1:
+        sample = next(iter(filtered), None)
+        pipeline_name = (sample or {}).get("pipeline_name")
+        if not pipeline_name:
+            pipeline_names, _ = await get_pipeline_index()
+            pipeline_name = pipeline_names.get(next(iter(pipeline_ids)))
+
     return {
         **result,
         "leads": filtered,
         "open_count": len(filtered),
-        "pipeline_id": pipeline_id,
-        "status_id": next(iter(status_ids)) if len(status_ids) == 1 else None,
-        "status_ids": sorted(status_ids),
+        "pipeline_id": fetch_pipeline,
+        "pipeline_name": pipeline_name,
+        "status_id": next(iter(scope["status_ids"])) if len(scope["status_ids"]) == 1 else None,
+        "status_ids": sorted(scope["status_ids"]),
         "status_label": scope["status_label"],
     }
 

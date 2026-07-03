@@ -209,13 +209,11 @@ def diagnose_google_calendar(*, include_write_probe: bool = False) -> dict[str, 
         result["calendar_summary"] = meta.get("summary")
         result["access_role"] = meta.get("access_role")
         role = str(meta.get("access_role") or "").lower()
-        if role in {"owner", "writer"}:
-            result["write_ok"] = True
-        elif role == "reader":
+        if role == "reader":
             result["error"] = (
-                "У сервисного аккаунта только чтение. "
-                "В Google Calendar → Настройки календаря → Доступ для конкретных пользователей "
-                "выберите «Вносить изменения в мероприятия»."
+                "Google API видит роль «только чтение». "
+                "Проверьте, что в JSON Railway тот же email, что в доступе календаря, "
+                "и выбрано «Вносить изменения в мероприятия»."
             )
     except GoogleCalendarError as exc:
         result["error"] = str(exc)
@@ -242,6 +240,9 @@ def diagnose_google_calendar(*, include_write_probe: bool = False) -> dict[str, 
         except GoogleCalendarError as exc:
             result["write_ok"] = False
             result["error"] = str(exc)
+    elif str(result.get("access_role") or "").lower() in {"owner", "writer"}:
+        result["write_ok"] = True
+        result["error"] = None
     return result
 
 
@@ -264,14 +265,18 @@ def format_diagnostic_report(info: dict[str, Any]) -> str:
         f"Calendar ID: {'настроен' if info.get('calendar_id_set') else 'не задан'}",
         f"Чтение: {'✅' if info.get('read_ok') else '❌'}",
         f"Создание событий: {'✅' if info.get('write_ok') else '❌'}",
-        f"Роль в календаре: {_access_role_label(info.get('access_role'))}",
+        f"Роль в календаре: {_access_role_label(info.get('access_role'))} "
+        f"(<code>{info.get('access_role') or '—'}</code>)",
         f"Часовой пояс: {info.get('timezone') or '—'}",
     ]
     email = info.get("service_account_email")
     if email:
         lines.append(f"Service account: <code>{email}</code>")
-    if info.get("error"):
-        lines.extend(["", f"⚠️ {info['error']}"])
+    if info.get("error") or not info.get("write_ok"):
+        if info.get("error"):
+            lines.extend(["", f"⚠️ {info['error']}"])
+        elif not info.get("write_ok"):
+            lines.extend(["", "⚠️ Запись не проверена. Запустите /calendar_test_write"])
         if not info.get("write_ok") and email:
             lines.append(
                 "Расшарьте календарь «B&BS Work» на этот email с правом "

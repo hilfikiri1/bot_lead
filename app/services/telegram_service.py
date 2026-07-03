@@ -1227,13 +1227,17 @@ async def send_unreviewed_lead_selection_menu(
     total_pages = result.get("total_pages", 1)
     page = result.get("page", page)
     if not leads:
-        status_label = result.get("status_label") or "Incoming leads"
+        status_label = result.get("status_label") or "Неразобранное"
+        pipeline_name = result.get("pipeline_name")
+        pipeline_hint = (
+            f" воронки <b>{_esc(pipeline_name)}</b>" if pipeline_name else ""
+        )
         return await send_message(
             chat_id,
             (
                 "📥 <b>Неразобранные сделки</b>\n\n"
-                f"В этапе <b>{_esc(status_label)}</b> нет открытых сделок "
-                "без внутреннего номера."
+                f"В разделе <b>{_esc(status_label)}</b>{pipeline_hint} "
+                "сейчас нет открытых заявок."
             ),
             reply_markup={
                 "inline_keyboard": [
@@ -1266,7 +1270,7 @@ async def send_unreviewed_lead_selection_menu(
     rows.append([{"text": "🏠 Главное меню", "callback_data": "menu:home"}])
 
     pipeline_name = result.get("pipeline_name")
-    status_label = result.get("status_label") or "Incoming leads"
+    status_label = result.get("status_label") or "Неразобранное"
     pipeline_suffix = (
         f" · воронка <b>{_esc(pipeline_name)}</b>" if pipeline_name else ""
     )

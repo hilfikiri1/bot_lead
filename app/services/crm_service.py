@@ -11,7 +11,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.models import Action, AIReport, Client, Lead, SpreadsheetLeadMapping, VoiceNote
+from app.models import Action, AIReport, CalendarEvent, Client, Lead, SpreadsheetLeadMapping, VoiceNote
 
 logger = logging.getLogger(__name__)
 
@@ -372,6 +372,93 @@ async def save_spreadsheet_lead_mapping(
         created_by_telegram_user_id=created_by_telegram_user_id,
     )
     db.add(record)
+    await db.commit()
+    await db.refresh(record)
+    return record
+
+
+async def get_calendar_event_by_key(
+    db: AsyncSession, idempotency_key: str
+) -> CalendarEvent | None:
+    if not idempotency_key:
+        return None
+    result = await db.execute(
+        select(CalendarEvent).where(CalendarEvent.idempotency_key == idempotency_key)
+    )
+    return result.scalar_one_or_none()
+
+
+async def create_calendar_event_record(
+    db: AsyncSession,
+    *,
+    provider: str,
+    kommo_lead_id: int | None,
+    title: str | None,
+    description: str | None,
+    start_at: datetime | None,
+    end_at: datetime | None,
+    timezone: str | None,
+    reminder_minutes: int | None,
+    telegram_user_id: int | None,
+    idempotency_key: str,
+) -> CalendarEvent:
+    record = CalendarEvent(
+        provider=provider[:32],
+        kommo_lead_id=kommo_lead_id,
+        title=(title or "")[:500] or None,
+        description=description,
+        start_at=start_at,
+        end_at=end_at,
+        timezone=(timezone or "")[:64] or None,
+        reminder_minutes=reminder_minutes,
+        telegram_user_id=telegram_user_id,
+        idempotency_key=idempotency_key[:255],
+        status="pending",
+    )
+    db.add(record)
+    await db.commit()
+    await db.refresh(record)
+    return record
+
+
+async def mark_calendar_event_success(
+    db: AsyncSession,
+    record: CalendarEvent,
+    *,
+    external_event_id: str,
+    external_event_url: str | None,
+) -> CalendarEvent:
+    record.external_event_id = external_event_id[:255]
+    record.external_event_url = external_event_url
+    record.status = "success"
+    record.error = None
+    await db.commit()
+    await db.refresh(record)
+    return record
+
+
+async def mark_calendar_event_failed(
+    db: AsyncSession,
+    record: CalendarEvent,
+    *,
+    error: str,
+) -> CalendarEvent:
+    record.status = "failed"
+    record.error = error[:2000]
+    await db.commit()
+    await db.refresh(record)
+    return record
+
+
+async def attach_kommo_task_to_calendar_event(
+    db: AsyncSession,
+    record: CalendarEvent,
+    kommo_task_id: int | None,
+) -> CalendarEvent:
+    if kommo_task_id:
+        record.kommo_task_id = kommo_task_id
+        if record.status == "pending":
+            record.status = "success"
     await db.commit()
     await db.refresh(record)
     return record

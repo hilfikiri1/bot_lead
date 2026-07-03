@@ -1,0 +1,333 @@
+"""Google Calendar API integration with service-account and OAuth refresh modes."""
+
+from __future__ import annotations
+
+import base64
+import json
+import logging
+from typing import Any
+
+from app.config import get_settings
+
+logger = logging.getLogger(__name__)
+settings = get_settings()
+
+CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar"
+CALENDAR_EVENTS_SCOPE = "https://www.googleapis.com/auth/calendar.events"
+
+
+class GoogleCalendarError(RuntimeError):
+    def __init__(self, message: str, *, status_code: int | None = None):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+def auth_mode() -> str:
+    return (settings.google_calendar_auth_mode or "service_account").strip().lower()
+
+
+def configured_calendar_id() -> str:
+    return (settings.google_calendar_id or "").strip()
+
+
+def calendar_timezone() -> str:
+    return (settings.google_calendar_timezone or settings.manager_timezone or "Europe/Warsaw").strip()
+
+
+def is_configured() -> bool:
+    if not configured_calendar_id():
+        return False
+    mode = auth_mode()
+    if mode == "service_account":
+        return bool(
+            settings.google_service_account_json.strip()
+            or settings.google_service_account_json_base64.strip()
+        )
+    if mode == "oauth_refresh_token":
+        return bool(
+            settings.google_client_id.strip()
+            and settings.google_client_secret.strip()
+            and settings.google_refresh_token.strip()
+        )
+    return False
+
+
+def _load_service_account_info() -> dict[str, Any]:
+    raw = settings.google_service_account_json.strip()
+    if not raw:
+        encoded = settings.google_service_account_json_base64.strip()
+        if encoded:
+            try:
+                raw = base64.b64decode(encoded).decode("utf-8")
+            except (ValueError, UnicodeDecodeError) as exc:
+                raise GoogleCalendarError(
+                    "Не удалось декодировать GOOGLE_SERVICE_ACCOUNT_JSON_BASE64."
+                ) from exc
+    if not raw:
+        raise GoogleCalendarError(
+            "Google service account не задан. "
+            "Добавьте GOOGLE_SERVICE_ACCOUNT_JSON или GOOGLE_SERVICE_ACCOUNT_JSON_BASE64."
+        )
+    try:
+        if raw.startswith("{"):
+            return json.loads(raw)
+        decoded = base64.b64decode(raw).decode("utf-8")
+        return json.loads(decoded)
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise GoogleCalendarError(
+            "Не удалось прочитать JSON сервисного аккаунта Google."
+        ) from exc
+
+
+def _build_credentials():
+    mode = auth_mode()
+    if mode == "service_account":
+        from google.oauth2 import service_account
+
+        info = _load_service_account_info()
+        if not info.get("private_key"):
+            raise GoogleCalendarError("В JSON сервисного аккаунта отсутствует private_key.")
+        return service_account.Credentials.from_service_account_info(
+            info,
+            scopes=[CALENDAR_SCOPE],
+        )
+    if mode == "oauth_refresh_token":
+        from google.oauth2.credentials import Credentials
+
+        return Credentials(
+            token=None,
+            refresh_token=settings.google_refresh_token.strip(),
+            token_uri="https://oauth2.googleapis.com/token",
+            client_id=settings.google_client_id.strip(),
+            client_secret=settings.google_client_secret.strip(),
+            scopes=[CALENDAR_SCOPE],
+        )
+    raise GoogleCalendarError(
+        f"Неизвестный GOOGLE_CALENDAR_AUTH_MODE: {settings.google_calendar_auth_mode}"
+    )
+
+
+def _calendar_service():
+    try:
+        from googleapiclient.discovery import build
+    except ImportError as exc:
+        raise GoogleCalendarError(
+            "Пакет google-api-python-client не установлен."
+        ) from exc
+    return build("calendar", "v3", credentials=_build_credentials(), cache_discovery=False)
+
+
+def _http_error_message(exc: Exception) -> tuple[str, int | None]:
+    status_code = getattr(exc, "resp", None)
+    code = getattr(status_code, "status", None) if status_code else None
+    text = str(exc).lower()
+    if code == 401 or "401" in text:
+        return "Google Calendar отклонил авторизацию. Проверьте credentials.", 401
+    if code == 403 or "403" in text or "forbidden" in text:
+        return (
+            "Недостаточно прав. Предоставьте сервисному аккаунту разрешение "
+            f"изменять события в календаре «{settings.google_calendar_name}»."
+        ), 403
+    if code == 404 or "404" in text or "not found" in text:
+        return (
+            "Календарь не найден. Проверьте GOOGLE_CALENDAR_ID. "
+            "Для сервисного аккаунта значение `primary` обычно не подходит."
+        ), 404
+    if code == 429 or "429" in text:
+        return "Превышен лимит запросов Google Calendar. Повторите позже.", 429
+    if code and 500 <= int(code) <= 599:
+        return f"Внутренняя ошибка Google Calendar (HTTP {code}).", int(code)
+    return "Google Calendar отклонил запрос.", code
+
+
+def get_calendar_metadata() -> dict[str, Any]:
+    calendar_id = configured_calendar_id()
+    if not calendar_id:
+        raise GoogleCalendarError(
+            "GOOGLE_CALENDAR_ID не задан. Скопируйте ID календаря из настроек Google Calendar."
+        )
+    try:
+        service = _calendar_service()
+        meta = service.calendars().get(calendarId=calendar_id).execute()
+    except Exception as exc:
+        message, status = _http_error_message(exc)
+        raise GoogleCalendarError(message, status_code=status) from exc
+    return {
+        "id": meta.get("id"),
+        "summary": meta.get("summary") or settings.google_calendar_name,
+        "time_zone": meta.get("timeZone") or calendar_timezone(),
+        "access_role": meta.get("accessRole"),
+    }
+
+
+def diagnose_google_calendar(*, include_write_probe: bool = False) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "provider": "Google Calendar",
+        "auth_mode": auth_mode(),
+        "configured": is_configured(),
+        "calendar_id_set": bool(configured_calendar_id()),
+        "calendar_name": settings.google_calendar_name,
+        "timezone": calendar_timezone(),
+        "api_auth": False,
+        "read_ok": False,
+        "write_ok": False,
+        "calendar_summary": None,
+        "access_role": None,
+        "error": None,
+    }
+    if not is_configured():
+        result["error"] = (
+            "Google Calendar не настроен. "
+            "Добавьте GOOGLE_CALENDAR_ID и данные сервисного аккаунта в Railway."
+        )
+        return result
+    try:
+        meta = get_calendar_metadata()
+        result["api_auth"] = True
+        result["read_ok"] = True
+        result["calendar_summary"] = meta.get("summary")
+        result["access_role"] = meta.get("access_role")
+        role = str(meta.get("access_role") or "").lower()
+        if role in {"owner", "writer"}:
+            result["write_ok"] = True
+        elif role == "reader":
+            result["error"] = (
+                "У сервисного аккаунта только чтение. "
+                "Предоставьте право «Вносить изменения в мероприятия»."
+            )
+    except GoogleCalendarError as exc:
+        result["error"] = str(exc)
+        return result
+
+    if include_write_probe and result["write_ok"]:
+        from datetime import datetime, timedelta
+        from zoneinfo import ZoneInfo
+
+        tz = ZoneInfo(calendar_timezone())
+        start = datetime.now(tz=tz) + timedelta(hours=2)
+        end = start + timedelta(minutes=5)
+        try:
+            probe = create_event(
+                title="BBS Bot write test",
+                description="Временная проверка записи. Будет удалена.",
+                start_iso=start.isoformat(),
+                end_iso=end.isoformat(),
+                reminder_minutes=0,
+            )
+            delete_event(probe["event_id"])
+            result["write_ok"] = True
+        except GoogleCalendarError as exc:
+            result["write_ok"] = False
+            result["error"] = str(exc)
+    return result
+
+
+def format_diagnostic_report(info: dict[str, Any]) -> str:
+    if info.get("error") and not info.get("read_ok"):
+        return f"❌ {info['error']}"
+
+    auth_label = (
+        "сервисный аккаунт"
+        if info.get("auth_mode") == "service_account"
+        else "OAuth refresh token"
+    )
+    lines = [
+        "🧪 <b>ПРОВЕРКА GOOGLE CALENDAR</b>",
+        "",
+        f"Провайдер: Google Calendar",
+        f"Авторизация: {auth_label}",
+        f"Подключение к API: {'✅' if info.get('api_auth') else '❌'}",
+        f"Календарь: {info.get('calendar_summary') or info.get('calendar_name') or '—'}",
+        f"Calendar ID: {'настроен' if info.get('calendar_id_set') else 'не задан'}",
+        f"Чтение: {'✅' if info.get('read_ok') else '❌'}",
+        f"Создание событий: {'✅' if info.get('write_ok') else '❌'}",
+        f"Часовой пояс: {info.get('timezone') or '—'}",
+    ]
+    if info.get("error"):
+        lines.extend(["", f"⚠️ {info['error']}"])
+    return "\n".join(lines)
+
+
+def create_event(
+    *,
+    title: str,
+    description: str,
+    start_iso: str,
+    end_iso: str,
+    reminder_minutes: int | None = None,
+) -> dict[str, Any]:
+    calendar_id = configured_calendar_id()
+    if not calendar_id:
+        raise GoogleCalendarError("GOOGLE_CALENDAR_ID не задан.")
+
+    reminder = (
+        reminder_minutes
+        if reminder_minutes is not None
+        else int(settings.google_calendar_default_reminder_minutes or 30)
+    )
+    tz = calendar_timezone()
+    event_body: dict[str, Any] = {
+        "summary": title[:1024],
+        "description": description[:8000],
+        "start": {"dateTime": start_iso, "timeZone": tz},
+        "end": {"dateTime": end_iso, "timeZone": tz},
+    }
+    if reminder > 0:
+        event_body["reminders"] = {
+            "useDefault": False,
+            "overrides": [{"method": "popup", "minutes": int(reminder)}],
+        }
+    else:
+        event_body["reminders"] = {"useDefault": False, "overrides": []}
+
+    send_updates = (settings.google_calendar_send_updates or "none").strip().lower()
+    if send_updates not in {"all", "externalOnly", "none"}:
+        send_updates = "none"
+
+    try:
+        service = _calendar_service()
+        created = (
+            service.events()
+            .insert(
+                calendarId=calendar_id,
+                body=event_body,
+                sendUpdates=send_updates,
+            )
+            .execute()
+        )
+    except Exception as exc:
+        message, status = _http_error_message(exc)
+        raise GoogleCalendarError(message, status_code=status) from exc
+
+    event_id = created.get("id") or ""
+    logger.info("Google Calendar event created: %s", event_id)
+    return {
+        "event_id": event_id,
+        "event_url": created.get("htmlLink"),
+        "provider": "google",
+    }
+
+
+def delete_event(event_id: str) -> None:
+    calendar_id = configured_calendar_id()
+    if not calendar_id or not event_id:
+        return
+    try:
+        service = _calendar_service()
+        service.events().delete(calendarId=calendar_id, eventId=event_id).execute()
+        logger.info("Google Calendar event deleted: %s", event_id)
+    except Exception as exc:
+        message, status = _http_error_message(exc)
+        raise GoogleCalendarError(message, status_code=status) from exc
+
+
+def get_event(event_id: str) -> dict[str, Any]:
+    calendar_id = configured_calendar_id()
+    if not calendar_id:
+        raise GoogleCalendarError("GOOGLE_CALENDAR_ID не задан.")
+    try:
+        service = _calendar_service()
+        return service.events().get(calendarId=calendar_id, eventId=event_id).execute()
+    except Exception as exc:
+        message, status = _http_error_message(exc)
+        raise GoogleCalendarError(message, status_code=status) from exc

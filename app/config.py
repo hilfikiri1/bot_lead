@@ -88,23 +88,32 @@ class Settings(BaseSettings):
     s3_bucket_name: str = "buybring-audio"
 
     # Calendar
-    # Use "icloud" for Apple Calendar on Mac/iPhone, or "google".
-    calendar_provider: str = "icloud"
+    # Use "google" for Google Calendar (recommended on Railway) or "icloud" (legacy).
+    calendar_provider: str = "google"
 
-    # iCloud Calendar (CalDAV)
+    # iCloud Calendar (legacy CalDAV)
     icloud_username: str = ""
     icloud_app_specific_password: str = ""
     icloud_calendar_name: str = "BBS Работа"
     icloud_caldav_url: str = "https://caldav.icloud.com/.well-known/caldav"
     icloud_calendar_url: str = ""
 
-    # Google Calendar (optional legacy provider)
+    # Google Calendar (recommended)
+    google_calendar_auth_mode: str = "service_account"
+    google_calendar_id: str = ""
+    google_calendar_name: str = "BBS Работа"
+    google_calendar_timezone: str = "Europe/Warsaw"
+    google_calendar_default_duration_minutes: int = 30
+    google_calendar_default_reminder_minutes: int = 30
+    google_calendar_send_updates: str = "none"
+    google_service_account_json: str = ""
+    google_service_account_json_base64: str = ""
     google_client_id: str = ""
     google_client_secret: str = ""
+    google_refresh_token: str = ""
     google_redirect_uri: str = "http://localhost:8000/auth/google/callback"
     google_credentials_file: str = "credentials/google_oauth.json"
     google_token_file: str = "credentials/google_token.json"
-    google_calendar_id: str = "primary"
 
     # WhatsApp
     whatsapp_phone_number_id: str = ""

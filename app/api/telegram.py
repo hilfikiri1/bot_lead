@@ -22,6 +22,8 @@ from app.config import get_settings
 from app.database import get_db
 from app.services import (
     approval_service,
+    calendar_event_builder,
+    calendar_scheduling_service,
     calendar_service,
     command_router_service,
     crm_service,
@@ -396,17 +398,19 @@ async def _handle_morning_digest(chat_id: int) -> None:
     await telegram_service.send_message(chat_id, await notion_service.get_morning_digest())
 
 
-async def _handle_calendar_test(chat_id: int, user_id: int) -> None:
+async def _handle_calendar_test(
+    chat_id: int, user_id: int, *, include_write_probe: bool = False
+) -> None:
     if not _is_allowed_user(user_id):
         await telegram_service.send_message(chat_id, "Доступ запрещён.")
         return
 
-    provider = calendar_service.provider_label()
+    provider = (settings.calendar_provider or "google").strip().lower()
     await telegram_service.send_message(
-        chat_id, f"🔄 Проверяю {html.escape(provider)}…"
+        chat_id, f"🔄 Проверяю {html.escape(calendar_service.provider_label())}…"
     )
     try:
-        if (settings.calendar_provider or "icloud").strip().lower() == "icloud":
+        if provider == "icloud":
             details = await asyncio.to_thread(calendar_service.test_icloud_connection)
             manager_tz = _manager_tz()
             tomorrow = datetime.now(tz=manager_tz) + timedelta(days=1)
@@ -422,74 +426,91 @@ async def _handle_calendar_test(chat_id: int, user_id: int) -> None:
                 await telegram_service.send_message(
                     chat_id,
                     (
-                        f"✅ <b>{html.escape(provider)} работает</b>\n\n"
+                        f"✅ <b>{html.escape(calendar_service.provider_label())} работает</b>\n\n"
                         f"{html.escape(details)}\n\n"
-                        f"Тестовое событие создано на <b>{test_start.strftime('%d.%m.%Y %H:%M')}</b>.\n"
-                        f"ID: <code>{html.escape(str(test_result['event_id']))}</code>\n\n"
-                        "Откройте приложение «Календарь» на iPhone/Mac и проверьте календарь "
-                        f"<b>{html.escape(settings.icloud_calendar_name)}</b>."
+                        f"Тестовое событие создано на <b>{test_start.strftime('%d.%m.%Y %H:%M')}</b>."
                     ),
                 )
                 return
-
             await telegram_service.send_message(
                 chat_id,
                 (
-                    f"⚠️ <b>Подключение есть, но событие не записалось</b>\n\n"
+                    "⚠️ <b>Подключение есть, но событие не записалось</b>\n\n"
                     f"{html.escape(details)}\n\n"
-                    f"Ошибка: {html.escape(str(test_result.get('error') or '—'))}\n\n"
-                    "Отправляю файл <code>.ics</code> — откройте на iPhone и добавьте вручную."
+                    f"Ошибка: {html.escape(str(test_result.get('error') or '—'))}"
                 ),
             )
-            ics_bytes = str(test_result.get("ics_content") or "").encode("utf-8")
-            if ics_bytes:
-                await telegram_service.send_document(
-                    chat_id,
-                    filename="calendar-test.ics",
-                    content=ics_bytes,
-                    caption="📅 Тест BBS Bot",
-                )
             return
 
-        test_result = await asyncio.to_thread(
-            calendar_service.create_event_with_fallback,
-            "Тест Telegram Assistant",
-            "Проверка интеграции календаря",
-            None,
-            15,
+        report = await asyncio.to_thread(
+            calendar_service.test_google_connection,
+            include_write_probe=include_write_probe,
         )
-        if test_result["success"]:
-            await telegram_service.send_message(
-                chat_id,
-                (
-                    f"✅ <b>{html.escape(provider)} работает</b>\n\n"
-                    f"Тестовое событие создано. ID: "
-                    f"<code>{html.escape(str(test_result['event_id']))}</code>"
-                ),
-            )
-        else:
-            await telegram_service.send_message(
-                chat_id,
-                f"❌ {html.escape(str(test_result.get('error') or 'Ошибка календаря'))}",
-            )
+        await telegram_service.send_message(chat_id, report)
     except calendar_service.CalendarIntegrationError as exc:
         await telegram_service.send_message(
             chat_id,
-            (
-                "❌ <b>Календарь не настроен</b>\n\n"
-                f"{html.escape(str(exc))}\n\n"
-                "<b>Частая причина:</b> в Railway указан обычный пароль Apple ID "
-                "вместо <b>пароля приложения</b>.\n\n"
-                "Создайте новый на "
-                "<a href=\"https://appleid.apple.com\">appleid.apple.com</a> → "
-                "Пароли приложений → Buy Bring Bot.\n\n"
-                "Переменные:\n"
-                "• <code>ICLOUD_USERNAME</code> — ваш Apple ID email\n"
-                "• <code>ICLOUD_APP_SPECIFIC_PASSWORD</code> — xxxx-xxxx-xxxx-xxxx\n"
-                "• <code>ICLOUD_CALENDAR_NAME</code> — имя календаря в iPhone\n"
-                "• <code>ICLOUD_CALDAV_URL</code> — оставьте пустым"
-            ),
+            f"❌ <b>Календарь не настроен</b>\n\n{html.escape(str(exc))}",
         )
+
+
+def _calendar_preview_payload(state: dict[str, Any]) -> dict[str, Any]:
+    event_type = str(state.get("event_type") or "call")
+    return {
+        "lead_name": state.get("lead_name"),
+        "event_label": calendar_event_builder.EVENT_TYPE_LABELS.get(
+            event_type, state.get("calendar_title")
+        ),
+        "date_display": calendar_event_builder.format_date_ru(
+            datetime.fromisoformat(str(state.get("start_iso")))
+        )
+        if state.get("start_iso")
+        else "—",
+        "time_display": str(state.get("start_display") or "—"),
+        "timezone": settings.google_calendar_timezone or settings.manager_timezone,
+        "duration_label": f"{int(state.get('duration_minutes') or 30)} минут",
+        "reminder_label": calendar_event_builder.format_reminder_label(
+            int(state.get("reminder_minutes") or 0)
+        ),
+        "needs_calendar": event_type in calendar_event_builder.CALENDAR_EVENT_TYPES,
+        "needs_kommo_task": event_type
+        in calendar_event_builder.CALENDAR_EVENT_TYPES
+        or event_type in calendar_event_builder.TASK_ONLY_EVENT_TYPES,
+    }
+
+
+async def _show_calendar_preview_from_state(
+    chat_id: int, user_id: int, state: dict[str, Any]
+) -> None:
+    lead_id = int(state.get("kommo_lead_id") or 0)
+    return_page = int(state.get("return_page") or 1)
+    await telegram_state_service.set_state(
+        user_id,
+        {**state, "mode": "pending_calendar_confirmation"},
+        ttl_seconds=settings.telegram_state_ttl_minutes * 60,
+    )
+    await telegram_service.send_calendar_preview(
+        chat_id,
+        lead_id=lead_id,
+        return_page=return_page,
+        preview=_calendar_preview_payload(state),
+    )
+
+
+async def _build_calendar_draft_from_state(
+    state: dict[str, Any],
+) -> calendar_event_builder.ScheduledEventDraft:
+    lead_id = int(state.get("kommo_lead_id") or 0)
+    details = await kommo_service.get_lead_details(lead_id)
+    start_at = datetime.fromisoformat(str(state.get("start_iso")))
+    return calendar_event_builder.draft_from_lead_details(
+        event_type=str(state.get("event_type") or "call"),
+        lead_details=details,
+        start_at=start_at,
+        duration_minutes=int(state.get("duration_minutes") or 30),
+        reminder_minutes=int(state.get("reminder_minutes") or 30),
+        custom_title=str(state.get("calendar_title") or "") or None,
+    )
 
 
 async def _deliver_calendar_result(
@@ -1013,7 +1034,7 @@ async def _prompt_calendar_event(
     await telegram_state_service.set_state(
         user_id,
         {
-            "mode": "awaiting_calendar_title",
+            "mode": "awaiting_calendar_event_type",
             "chat_id": chat_id,
             "kommo_lead_id": lead_id,
             "lead_name": details.get("name"),
@@ -1022,18 +1043,11 @@ async def _prompt_calendar_event(
         },
         ttl_seconds=settings.telegram_state_ttl_minutes * 60,
     )
-    await telegram_service.send_message(
+    await telegram_service.send_calendar_event_type_picker(
         chat_id,
-        (
-            "📅 <b>Шаг 1 из 3 · Событие</b>\n\n"
-            f"Сделка: <b>{html.escape(str(details.get('name') or '—'))}</b>\n\n"
-            "Напишите название события. Например: <i>Созвон с клиентом</i>."
-        ),
-        reply_markup={
-            "inline_keyboard": [
-                [{"text": "❌ Отмена", "callback_data": "state:cancel"}]
-            ]
-        },
+        lead_id=lead_id,
+        lead_name=str(details.get("name") or "—"),
+        return_page=return_page,
     )
 
 
@@ -1598,10 +1612,63 @@ async def _handle_manager_callback(
         )
         return True
 
-    if callback_data.startswith("caldate:"):
-        choice = callback_data.split(":", 1)[1]
+    if callback_data.startswith("calevt:"):
+        _, event_type, lead_id_raw, page_raw = callback_data.split(":", 3)
+        lead_id = int(lead_id_raw)
+        return_page = int(page_raw)
+        state = await telegram_state_service.get_state(user_id) or {}
+        title = calendar_event_builder.build_event_title(
+            event_type, str(state.get("lead_name") or "")
+        )
+        updated = {
+            **state,
+            "mode": "awaiting_calendar_date",
+            "chat_id": chat_id,
+            "kommo_lead_id": lead_id,
+            "return_page": return_page,
+            "event_type": event_type,
+            "calendar_title": title,
+        }
+        await telegram_state_service.set_state(
+            user_id,
+            updated,
+            ttl_seconds=settings.telegram_state_ttl_minutes * 60,
+        )
+        if event_type in calendar_event_builder.TASK_ONLY_EVENT_TYPES:
+            await telegram_state_service.set_state(
+                user_id,
+                {
+                    **updated,
+                    "mode": "awaiting_calendar_custom_date",
+                    "event_type": event_type,
+                },
+                ttl_seconds=settings.telegram_state_ttl_minutes * 60,
+            )
+            await telegram_service.send_message(
+                chat_id,
+                (
+                    "🕒 <b>Когда выполнить?</b>\n\n"
+                    "Напишите дату и время. Например: <code>завтра 10:00</code> "
+                    "или <code>пятницу в 15:30</code>."
+                ),
+            )
+            return True
+        await telegram_service.send_calendar_date_picker(
+            chat_id,
+            lead_id=lead_id,
+            event_type_label=calendar_event_builder.EVENT_TYPE_LABELS.get(
+                event_type, title
+            ),
+            return_page=return_page,
+        )
+        return True
+
+    if callback_data.startswith("calday:"):
+        _, choice, lead_id_raw, page_raw = callback_data.split(":", 3)
+        lead_id = int(lead_id_raw)
+        return_page = int(page_raw)
         state = await telegram_state_service.get_state(user_id)
-        if not state or state.get("mode") != "awaiting_calendar_date":
+        if not state:
             await telegram_service.send_message(chat_id, "⚠️ Мастер календаря устарел.")
             return True
         if choice == "custom":
@@ -1612,63 +1679,146 @@ async def _handle_manager_callback(
             )
             await telegram_service.send_message(
                 chat_id,
-                "🕒 Введите дату и время. Например: <code>завтра 10:00</code> или <code>30.06.2026 15:30</code>.",
+                "🕒 Введите дату и время. Например: <code>4.07.2026 10:00</code> или <code>завтра 10:00</code>.",
             )
             return True
-        start_dt = _quick_manager_datetime(choice)
         await telegram_state_service.set_state(
             user_id,
-            {
-                **state,
-                "mode": "awaiting_calendar_duration",
-                "start_iso": start_dt.isoformat(),
-                "start_display": _format_manager_datetime(start_dt),
-            },
+            {**state, "mode": "awaiting_calendar_time", "selected_day": choice},
             ttl_seconds=settings.telegram_state_ttl_minutes * 60,
         )
-        await telegram_service.send_message(
-            chat_id,
-            "⏱ <b>Шаг 3 из 3 · Длительность</b>\n\nВыберите продолжительность:",
-            reply_markup={
-                "inline_keyboard": [
-                    [
-                        {"text": "15 мин", "callback_data": "caldur:15"},
-                        {"text": "30 мин", "callback_data": "caldur:30"},
-                    ],
-                    [
-                        {"text": "45 мин", "callback_data": "caldur:45"},
-                        {"text": "60 мин", "callback_data": "caldur:60"},
-                    ],
-                    [{"text": "❌ Отмена", "callback_data": "state:cancel"}],
-                ]
-            },
+        await telegram_service.send_calendar_time_picker(
+            chat_id, lead_id=lead_id, return_page=return_page
         )
         return True
 
-    if callback_data.startswith("caldur:"):
-        duration = int(callback_data.split(":", 1)[1])
+    if callback_data.startswith("caltime:"):
+        _, choice, lead_id_raw, page_raw = callback_data.split(":", 3)
+        lead_id = int(lead_id_raw)
+        return_page = int(page_raw)
         state = await telegram_state_service.get_state(user_id)
-        if not state or state.get("mode") != "awaiting_calendar_duration":
+        if not state:
             await telegram_service.send_message(chat_id, "⚠️ Мастер календаря устарел.")
             return True
+        if choice == "custom":
+            await telegram_state_service.set_state(
+                user_id,
+                {**state, "mode": "awaiting_calendar_custom_time"},
+                ttl_seconds=settings.telegram_state_ttl_minutes * 60,
+            )
+            await telegram_service.send_message(
+                chat_id, "🕒 Введите время. Например: <code>10:30</code>."
+            )
+            return True
+        selected_day = str(state.get("selected_day") or "today")
+        if selected_day in {"today", "tomorrow", "dayafter"}:
+            base = calendar_event_builder.quick_datetime(selected_day)
+            hour = int(choice.replace("time", ""))
+            start_dt = base.replace(hour=hour, minute=0, second=0, microsecond=0)
+            if start_dt <= datetime.now(tz=start_dt.tzinfo):
+                start_dt += timedelta(days=1)
+        else:
+            start_dt = calendar_event_builder.quick_datetime(choice)
+        updated = {
+            **state,
+            "mode": "awaiting_calendar_duration",
+            "start_iso": start_dt.isoformat(),
+            "start_display": _format_manager_datetime(start_dt),
+        }
         await telegram_state_service.set_state(
             user_id,
-            {
-                **state,
-                "mode": "pending_calendar_confirmation",
-                "duration_minutes": duration,
-            },
+            updated,
             ttl_seconds=settings.telegram_state_ttl_minutes * 60,
         )
-        await telegram_service.send_calendar_confirmation(
-            chat_id,
-            lead_id=int(state["kommo_lead_id"]),
-            lead_name=str(state.get("lead_name") or "—"),
-            title=str(state.get("calendar_title") or "Созвон с клиентом"),
-            start_display=str(state.get("start_display") or "—"),
-            duration_minutes=duration,
-            return_page=int(state.get("return_page") or 1),
+        await telegram_service.send_calendar_duration_picker(
+            chat_id, lead_id=lead_id, return_page=return_page
         )
+        return True
+
+    if callback_data.startswith("calrem:"):
+        _, reminder_raw, lead_id_raw, page_raw = callback_data.split(":", 3)
+        lead_id = int(lead_id_raw)
+        return_page = int(page_raw)
+        state = await telegram_state_service.get_state(user_id)
+        if not state:
+            await telegram_service.send_message(chat_id, "⚠️ Мастер календаря устарел.")
+            return True
+        updated = {
+            **state,
+            "reminder_minutes": int(reminder_raw),
+        }
+        await _show_calendar_preview_from_state(chat_id, user_id, updated)
+        return True
+
+    if callback_data.startswith("caldur:"):
+        parts = callback_data.split(":", 3)
+        if len(parts) == 4:
+            _, duration_raw, lead_id_raw, page_raw = parts
+            lead_id = int(lead_id_raw)
+            return_page = int(page_raw)
+            state = await telegram_state_service.get_state(user_id)
+            if not state:
+                await telegram_service.send_message(chat_id, "⚠️ Мастер календаря устарел.")
+                return True
+            if duration_raw == "custom":
+                await telegram_state_service.set_state(
+                    user_id,
+                    {**state, "mode": "awaiting_calendar_custom_duration"},
+                    ttl_seconds=settings.telegram_state_ttl_minutes * 60,
+                )
+                await telegram_service.send_message(
+                    chat_id,
+                    "⏱ Введите длительность в минутах. Например: <code>45</code>.",
+                )
+                return True
+            updated = {
+                **state,
+                "mode": "awaiting_calendar_reminder",
+                "duration_minutes": int(duration_raw),
+            }
+            await telegram_state_service.set_state(
+                user_id,
+                updated,
+                ttl_seconds=settings.telegram_state_ttl_minutes * 60,
+            )
+            await telegram_service.send_calendar_reminder_picker(
+                chat_id, lead_id=lead_id, return_page=return_page
+            )
+            return True
+
+    if callback_data.startswith("calendar:edit:"):
+        _, _, lead_id_raw, page_raw = callback_data.split(":", 3)
+        await _prompt_calendar_event(
+            chat_id, user_id, int(lead_id_raw), int(page_raw)
+        )
+        return True
+
+    if callback_data.startswith("calendar:retry_kommo:"):
+        _, _, lead_id_raw, page_raw = callback_data.split(":", 3)
+        lead_id = int(lead_id_raw)
+        state = await telegram_state_service.get_state(user_id)
+        if not state or not state.get("start_iso"):
+            await telegram_service.send_message(chat_id, "⚠️ Сессия устарела.")
+            return True
+        try:
+            draft = await _build_calendar_draft_from_state(state)
+            task = await kommo_service.create_lead_task(
+                lead_id=lead_id,
+                text=draft.title[:1000],
+                complete_till=int(draft.start_at.timestamp()),
+            )
+            await telegram_service.send_message(
+                chat_id,
+                (
+                    "✅ <b>Задача Kommo создана</b>\n\n"
+                    f"Task ID: <code>{task.get('task_id')}</code>"
+                ),
+            )
+        except Exception as exc:
+            await telegram_service.send_message(
+                chat_id,
+                f"❌ <b>Не удалось создать задачу</b>\n\n{html.escape(str(exc)[:500])}",
+            )
         return True
 
     if callback_data == "state:cancel":
@@ -1775,6 +1925,7 @@ async def _handle_manager_callback(
     if callback_data.startswith("calendar:confirm:"):
         _, _, lead_id_raw, page_raw = callback_data.split(":", 3)
         lead_id = int(lead_id_raw)
+        return_page = int(page_raw)
         state = await telegram_state_service.get_state(user_id)
         if not state or state.get("mode") != "pending_calendar_confirmation":
             await telegram_service.send_message(
@@ -1786,32 +1937,42 @@ async def _handle_manager_callback(
                 chat_id, "❌ Сделка в подтверждении не совпадает."
             )
             return True
-        description = (
-            f"Kommo: {state.get('lead_name') or lead_id}\n"
-            f"Lead ID: {lead_id}\n"
-            f"{state.get('lead_url') or ''}"
-        )
+        await telegram_service.send_message(chat_id, "⏳ Создаю событие…")
         try:
-            await _deliver_calendar_result(
-                chat_id,
-                title=str(state.get("calendar_title") or "Созвон с клиентом"),
-                description=description,
-                start_iso=str(state.get("start_iso") or ""),
-                duration_minutes=int(state.get("duration_minutes") or 30),
-                lead_name=str(state.get("lead_name") or "—"),
-                start_display=str(state.get("start_display") or "—"),
+            draft = await _build_calendar_draft_from_state(state)
+            idempotency_key = calendar_event_builder.build_idempotency_key(
+                telegram_user_id=user_id,
+                source_id=str(state.get("confirm_source_id") or f"lead:{lead_id}"),
+                kommo_lead_id=lead_id,
+                event_type=draft.event_type,
+                start_iso=draft.start_iso(),
+            )
+            result = await calendar_scheduling_service.schedule_confirmed_event(
+                db,
+                draft=draft,
+                telegram_user_id=user_id,
+                idempotency_key=idempotency_key,
             )
         except Exception as exc:
             await telegram_service.send_message(
                 chat_id,
                 (
-                    "❌ <b>Не удалось создать напоминание</b>\n\n"
+                    "❌ <b>Не удалось создать событие</b>\n\n"
                     f"{html.escape(str(exc)[:500])}"
                 ),
             )
             return True
-        await telegram_state_service.clear_state(user_id)
-        await _show_lead_details(chat_id, lead_id, return_page=int(page_raw))
+        await telegram_state_service.set_state(
+            user_id,
+            {**state, "mode": "calendar_completed", "last_result": result},
+            ttl_seconds=settings.telegram_state_ttl_minutes * 60,
+        )
+        await telegram_service.send_calendar_success(
+            chat_id,
+            lead_id=lead_id,
+            return_page=return_page,
+            result=result,
+        )
         return True
 
     return not callback_data.startswith("action:")
@@ -2040,67 +2201,76 @@ async def _handle_text_state(
         )
         return True
 
-    if mode == "awaiting_calendar_title":
-        title = text.strip()
-        if not title:
-            await telegram_service.send_message(chat_id, "Название события пустое.")
-            return True
-        await telegram_state_service.set_state(
-            user_id,
-            {**state, "mode": "awaiting_calendar_date", "calendar_title": title},
-            ttl_seconds=settings.telegram_state_ttl_minutes * 60,
-        )
-        await telegram_service.send_message(
-            chat_id,
-            "🕒 <b>Шаг 2 из 3 · Дата и время</b>\n\nВыберите вариант или введите свою дату:",
-            reply_markup={
-                "inline_keyboard": [
-                    [
-                        {"text": "Сегодня 17:00", "callback_data": "caldate:today17"},
-                        {"text": "Завтра 10:00", "callback_data": "caldate:tomorrow10"},
-                    ],
-                    [
-                        {"text": "Завтра 15:00", "callback_data": "caldate:tomorrow15"},
-                        {"text": "Другая дата", "callback_data": "caldate:custom"},
-                    ],
-                    [{"text": "❌ Отмена", "callback_data": "state:cancel"}],
-                ]
-            },
-        )
-        return True
-
-    if mode in {"awaiting_calendar_date", "awaiting_calendar_custom_date"}:
+    if mode in {
+        "awaiting_calendar_custom_date",
+        "awaiting_calendar_custom_time",
+        "awaiting_calendar_date",
+    }:
+        state = state or {}
         try:
-            start_dt = _parse_manager_datetime(text)
+            if mode == "awaiting_calendar_custom_time":
+                selected_day = str(state.get("selected_day") or "today")
+                base = calendar_event_builder.quick_datetime(selected_day)
+                time_part = text.strip().replace("в ", "")
+                parsed_time = calendar_event_builder._parse_time_fragment(time_part)
+                start_dt = datetime.combine(base.date(), parsed_time, tzinfo=base.tzinfo)
+            else:
+                start_dt, parsed_duration = calendar_event_builder.parse_natural_datetime(
+                    text,
+                    duration_minutes=int(state.get("duration_minutes") or 30),
+                )
+                if mode == "awaiting_calendar_custom_date":
+                    state = {**state, "duration_minutes": parsed_duration}
         except ValueError as exc:
             await telegram_service.send_message(chat_id, f"❌ {html.escape(str(exc))}")
             return True
+        lead_id = int(state.get("kommo_lead_id") or 0)
+        return_page = int(state.get("return_page") or 1)
+        event_type = str(state.get("event_type") or "call")
+        updated = {
+            **state,
+            "start_iso": start_dt.isoformat(),
+            "start_display": _format_manager_datetime(start_dt),
+        }
+        if event_type in calendar_event_builder.TASK_ONLY_EVENT_TYPES:
+            updated["mode"] = "awaiting_calendar_reminder"
+            updated.setdefault("duration_minutes", 30)
+            updated.setdefault("reminder_minutes", 30)
+            await telegram_state_service.set_state(
+                user_id,
+                updated,
+                ttl_seconds=settings.telegram_state_ttl_minutes * 60,
+            )
+            await telegram_service.send_calendar_reminder_picker(
+                chat_id, lead_id=lead_id, return_page=return_page
+            )
+            return True
+        updated["mode"] = "awaiting_calendar_duration"
         await telegram_state_service.set_state(
             user_id,
-            {
-                **state,
-                "mode": "awaiting_calendar_duration",
-                "start_iso": start_dt.isoformat(),
-                "start_display": _format_manager_datetime(start_dt),
-            },
+            updated,
             ttl_seconds=settings.telegram_state_ttl_minutes * 60,
         )
-        await telegram_service.send_message(
-            chat_id,
-            "⏱ <b>Шаг 3 из 3 · Длительность</b>\n\nВыберите продолжительность:",
-            reply_markup={
-                "inline_keyboard": [
-                    [
-                        {"text": "15 мин", "callback_data": "caldur:15"},
-                        {"text": "30 мин", "callback_data": "caldur:30"},
-                    ],
-                    [
-                        {"text": "45 мин", "callback_data": "caldur:45"},
-                        {"text": "60 мин", "callback_data": "caldur:60"},
-                    ],
-                    [{"text": "❌ Отмена", "callback_data": "state:cancel"}],
-                ]
-            },
+        await telegram_service.send_calendar_duration_picker(
+            chat_id, lead_id=lead_id, return_page=return_page
+        )
+        return True
+
+    if mode == "awaiting_calendar_custom_duration":
+        digits = re.sub(r"\D", "", text)
+        if not digits:
+            await telegram_service.send_message(chat_id, "Введите длительность числом.")
+            return True
+        lead_id = int(state.get("kommo_lead_id") or 0)
+        return_page = int(state.get("return_page") or 1)
+        updated = {**state, "duration_minutes": int(digits), "mode": "awaiting_calendar_reminder"}
+        await telegram_state_service.set_state(
+            user_id,
+            updated,
+            ttl_seconds=settings.telegram_state_ttl_minutes * 60,
+        )
+        await telegram_service.send_calendar_reminder_picker(
+            chat_id, lead_id=lead_id, return_page=return_page
         )
         return True
 
@@ -2253,6 +2423,9 @@ async def telegram_webhook(
             await _handle_kommo_test(chat_id, user_id, db)
             return {"ok": True}
 
+        if text.startswith("/calendar_test_write"):
+            await _handle_calendar_test(chat_id, user_id, include_write_probe=True)
+            return
         if text.startswith("/calendar_test"):
             await _handle_calendar_test(chat_id, user_id)
             return {"ok": True}
@@ -2299,10 +2472,14 @@ async def telegram_webhook(
                 "awaiting_task_date",
                 "awaiting_task_custom_date",
                 "pending_task_confirmation",
-                "awaiting_calendar_title",
+                "awaiting_calendar_event_type",
                 "awaiting_calendar_date",
+                "awaiting_calendar_time",
                 "awaiting_calendar_custom_date",
+                "awaiting_calendar_custom_time",
                 "awaiting_calendar_duration",
+                "awaiting_calendar_custom_duration",
+                "awaiting_calendar_reminder",
                 "pending_calendar_confirmation",
                 "kommo_create_edit",
                 "kommo_create_preview",

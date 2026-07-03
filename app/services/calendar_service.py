@@ -17,7 +17,6 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from app.config import get_settings
-from app.services.gmail_service import _get_credentials
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -76,39 +75,42 @@ def build_ics_content(
     start_dt: datetime,
     end_dt: datetime,
     uid: str | None = None,
+    reminder_minutes: int | None = None,
 ) -> tuple[str, str]:
     """Build an RFC5545 calendar file and return ``(uid, ics_text)``."""
     event_uid = uid or f"{uuid4().hex}@buybringsolutions"
     now_utc = datetime.now(tz=timezone.utc)
     start_utc = start_dt.astimezone(timezone.utc)
     end_utc = end_dt.astimezone(timezone.utc)
-    ics = "\r\n".join(
-        [
-            "BEGIN:VCALENDAR",
-            "VERSION:2.0",
-            "PRODID:-//Buy & Bring Solutions//Telegram Assistant//RU",
-            "CALSCALE:GREGORIAN",
-            "METHOD:PUBLISH",
-            "BEGIN:VEVENT",
-            f"UID:{event_uid}",
-            f"DTSTAMP:{now_utc.strftime('%Y%m%dT%H%M%SZ')}",
-            f"DTSTART:{start_utc.strftime('%Y%m%dT%H%M%SZ')}",
-            f"DTEND:{end_utc.strftime('%Y%m%dT%H%M%SZ')}",
-            f"SUMMARY:{_ics_escape(title)}",
-            f"DESCRIPTION:{_ics_escape(description)}",
-            "STATUS:CONFIRMED",
-            "TRANSP:OPAQUE",
-            "BEGIN:VALARM",
-            "TRIGGER:-PT10M",
-            "ACTION:DISPLAY",
-            f"DESCRIPTION:{_ics_escape(title)}",
-            "END:VALARM",
-            "END:VEVENT",
-            "END:VCALENDAR",
-            "",
-        ]
-    )
-    return event_uid, ics
+    reminder = max(0, int(reminder_minutes if reminder_minutes is not None else 10))
+    lines = [
+        "BEGIN:VCALENDAR",
+        "VERSION:2.0",
+        "PRODID:-//Buy & Bring Solutions//Telegram Assistant//RU",
+        "CALSCALE:GREGORIAN",
+        "METHOD:PUBLISH",
+        "BEGIN:VEVENT",
+        f"UID:{event_uid}",
+        f"DTSTAMP:{now_utc.strftime('%Y%m%dT%H%M%SZ')}",
+        f"DTSTART:{start_utc.strftime('%Y%m%dT%H%M%SZ')}",
+        f"DTEND:{end_utc.strftime('%Y%m%dT%H%M%SZ')}",
+        f"SUMMARY:{_ics_escape(title)}",
+        f"DESCRIPTION:{_ics_escape(description)}",
+        "STATUS:CONFIRMED",
+        "TRANSP:OPAQUE",
+    ]
+    if reminder > 0:
+        lines.extend(
+            [
+                "BEGIN:VALARM",
+                f"TRIGGER:-PT{reminder}M",
+                "ACTION:DISPLAY",
+                f"DESCRIPTION:{_ics_escape(title)}",
+                "END:VALARM",
+            ]
+        )
+    lines.extend(["END:VEVENT", "END:VCALENDAR", ""])
+    return event_uid, "\r\n".join(lines)
 
 
 def create_event(
@@ -131,13 +133,14 @@ def create_event(
             calendar_name=calendar_id or settings.icloud_calendar_name,
         )
     if provider == "google":
-        return _create_google_event(
+        created = _create_google_event(
             title=title,
             description=description,
             start_dt=start_dt,
             end_dt=end_dt,
             calendar_id=calendar_id or settings.google_calendar_id,
         )
+        return str(created.get("event_id") or "")
 
     raise CalendarIntegrationError(
         "Неизвестный CALENDAR_PROVIDER. Используйте icloud или google."
@@ -178,51 +181,25 @@ def _create_google_event(
     start_dt: datetime,
     end_dt: datetime,
     calendar_id: str,
-) -> str:
-    # Import lazily so an iCloud-only deployment does not require Google
-    # credentials at module import time.
-    try:
-        from googleapiclient.discovery import build
-        from googleapiclient.errors import HttpError
-    except ImportError as exc:
-        raise CalendarIntegrationError(
-            "Google Calendar provider недоступен: пакет google-api-python-client не установлен."
-        ) from exc
+    reminder_minutes: int | None = None,
+) -> dict[str, Any]:
+    from app.services import google_calendar_service
 
-    event_body = {
-        "summary": title,
-        "description": description,
-        "start": {
-            "dateTime": start_dt.isoformat(),
-            "timeZone": settings.manager_timezone,
-        },
-        "end": {
-            "dateTime": end_dt.isoformat(),
-            "timeZone": settings.manager_timezone,
-        },
-        "reminders": {
-            "useDefault": False,
-            "overrides": [
-                {"method": "popup", "minutes": 10},
-                {"method": "email", "minutes": 30},
-            ],
-        },
-    }
-
-    try:
-        service = build("calendar", "v3", credentials=_get_credentials())
-        event = service.events().insert(calendarId=calendar_id, body=event_body).execute()
-        event_id = event["id"]
-        logger.info("Google Calendar event created: %s", event_id)
-        return event_id
-    except FileNotFoundError as exc:
+    if not google_calendar_service.is_configured():
         raise CalendarIntegrationError(
-            "Google Calendar не настроен: отсутствует credentials/google_oauth.json. "
-            "Переключите CALENDAR_PROVIDER на icloud или добавьте Google OAuth."
-        ) from exc
-    except HttpError as exc:
-        logger.error("Google Calendar API error: %s", exc)
-        raise CalendarIntegrationError("Google Calendar отклонил создание события.") from exc
+            "Google Calendar не настроен. "
+            "Добавьте GOOGLE_CALENDAR_ID и данные сервисного аккаунта в Railway."
+        )
+    try:
+        return google_calendar_service.create_event(
+            title=title,
+            description=description,
+            start_iso=start_dt.isoformat(),
+            end_iso=end_dt.isoformat(),
+            reminder_minutes=reminder_minutes,
+        )
+    except google_calendar_service.GoogleCalendarError as exc:
+        raise CalendarIntegrationError(str(exc)) from exc
 
 
 def _icloud_credentials() -> tuple[str, list[str]]:
@@ -647,16 +624,37 @@ def create_event_with_fallback(
     start_time_iso: str | None,
     duration_minutes: int = 15,
     calendar_id: str | None = None,
+    reminder_minutes: int | None = None,
 ) -> dict[str, Any]:
-    """Create a calendar event or return an .ics fallback when CalDAV fails."""
+    """Create a calendar event or return an .ics fallback when provider fails."""
     start_dt, end_dt = _resolve_event_times(start_time_iso, duration_minutes)
     uid, ics_content = build_ics_content(
         title=title,
         description=description,
         start_dt=start_dt,
         end_dt=end_dt,
+        uid=None,
+        reminder_minutes=reminder_minutes,
     )
     try:
+        provider = (settings.calendar_provider or "google").strip().lower()
+        if provider == "google":
+            created = _create_google_event(
+                title=title,
+                description=description,
+                start_dt=start_dt,
+                end_dt=end_dt,
+                calendar_id=calendar_id or settings.google_calendar_id,
+                reminder_minutes=reminder_minutes,
+            )
+            return {
+                "success": True,
+                "event_id": created.get("event_id"),
+                "event_url": created.get("event_url"),
+                "provider": provider_label(),
+                "ics_content": None,
+                "error": None,
+            }
         event_id = create_event(
             title,
             description,
@@ -667,6 +665,7 @@ def create_event_with_fallback(
         return {
             "success": True,
             "event_id": event_id,
+            "event_url": None,
             "provider": provider_label(),
             "ics_content": None,
             "error": None,
@@ -675,10 +674,37 @@ def create_event_with_fallback(
         return {
             "success": False,
             "event_id": uid,
+            "event_url": None,
             "provider": provider_label(),
             "ics_content": ics_content,
             "error": str(exc),
         }
+
+
+async def create_scheduled_event_async(draft: Any) -> dict[str, Any]:
+    """Async wrapper for scheduled event creation with .ics fallback."""
+    import asyncio
+
+    return await asyncio.to_thread(
+        create_event_with_fallback,
+        draft.title,
+        draft.description,
+        draft.start_iso(),
+        draft.duration_minutes,
+        None,
+        draft.reminder_minutes,
+    )
+
+
+def test_google_connection(*, include_write_probe: bool = False) -> str:
+    from app.services import google_calendar_service
+
+    info = google_calendar_service.diagnose_google_calendar(
+        include_write_probe=include_write_probe
+    )
+    if info.get("error") and not info.get("read_ok"):
+        raise CalendarIntegrationError(str(info["error"]))
+    return google_calendar_service.format_diagnostic_report(info)
 
 
 def _default_start() -> datetime:

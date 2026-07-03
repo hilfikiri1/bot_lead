@@ -85,6 +85,7 @@ async def send_calendar_result(
     description: str = "",
     start_display: str | None = None,
     lead_name: str | None = None,
+    reminder_minutes: int | None = None,
 ) -> str:
     """Create a calendar event (or send .ics) and return a short status line."""
     from app.services import calendar_service
@@ -95,6 +96,8 @@ async def send_calendar_result(
         description,
         start_iso,
         duration_minutes,
+        None,
+        reminder_minutes,
     )
     if result["success"]:
         lines = [
@@ -107,20 +110,24 @@ async def send_calendar_result(
             [
                 f"Название: {html.escape(title)}",
                 f"Начало: {html.escape(start_display or start_iso)}",
-                f"Event ID: <code>{html.escape(str(result['event_id']))}</code>",
-                "Напоминание: за 10 минут до начала.",
             ]
         )
+        if result.get("event_url"):
+            lines.append(
+                f"<a href=\"{html.escape(str(result['event_url']), quote=True)}\">Открыть Google Calendar</a>"
+            )
+        elif result.get("event_id"):
+            lines.append(f"Event ID: <code>{html.escape(str(result['event_id']))}</code>")
         await send_message(chat_id, "\n".join(lines))
         return "Событие добавлено в календарь."
 
     await send_message(
         chat_id,
         (
-            "⚠️ <b>Не удалось записать событие напрямую в календарь</b>\n\n"
+            "⚠️ <b>Автоматически добавить событие не удалось.</b>\n\n"
             f"{html.escape(str(result.get('error') or 'Неизвестная ошибка'))}\n\n"
-            "Отправляю файл <code>.ics</code>. Откройте его на iPhone или Mac и "
-            "нажмите «Добавить в календарь»."
+            "Я подготовил файл календаря. Откройте его и подтвердите добавление "
+            "события вручную в Google Calendar или Apple Calendar."
         ),
     )
     ics_bytes = str(result.get("ics_content") or "").encode("utf-8")
@@ -131,8 +138,319 @@ async def send_calendar_result(
             content=ics_bytes,
             caption=f"📅 {html.escape(title)}",
         )
-        return "Отправлен файл .ics для добавления в календарь."
+        return "Отправлен файл .ics для ручного добавления."
     return "Не удалось создать событие в календаре."
+
+
+async def send_calendar_event_type_picker(
+    chat_id: int,
+    *,
+    lead_id: int,
+    lead_name: str,
+    return_page: int = 1,
+) -> dict:
+    return await send_message(
+        chat_id,
+        (
+            "📅 <b>Запланировать</b>\n\n"
+            f"Сделка: <b>{_esc(lead_name)}</b>\n\n"
+            "Выберите тип действия:"
+        ),
+        reply_markup={
+            "inline_keyboard": [
+                [{"text": "📞 Созвон", "callback_data": f"calevt:call:{lead_id}:{return_page}"}],
+                [{"text": "🤝 Встреча", "callback_data": f"calevt:meeting:{lead_id}:{return_page}"}],
+                [
+                    {
+                        "text": "💬 Написать клиенту",
+                        "callback_data": f"calevt:message:{lead_id}:{return_page}",
+                    }
+                ],
+                [
+                    {
+                        "text": "📦 Отправить предложение",
+                        "callback_data": f"calevt:proposal:{lead_id}:{return_page}",
+                    }
+                ],
+                [{"text": "📝 Другое", "callback_data": f"calevt:other:{lead_id}:{return_page}"}],
+                [
+                    {
+                        "text": "⬅️ Назад",
+                        "callback_data": f"lead:view:{lead_id}:{return_page}",
+                    }
+                ],
+            ]
+        },
+    )
+
+
+async def send_calendar_date_picker(
+    chat_id: int,
+    *,
+    lead_id: int,
+    event_type_label: str,
+    return_page: int = 1,
+) -> dict:
+    return await send_message(
+        chat_id,
+        (
+            "📅 <b>Дата</b>\n\n"
+            f"Событие: {_esc(event_type_label)}\n\n"
+            "Выберите дату:"
+        ),
+        reply_markup={
+            "inline_keyboard": [
+                [
+                    {"text": "Сегодня", "callback_data": f"calday:today:{lead_id}:{return_page}"},
+                    {"text": "Завтра", "callback_data": f"calday:tomorrow:{lead_id}:{return_page}"},
+                ],
+                [
+                    {
+                        "text": "Послезавтра",
+                        "callback_data": f"calday:dayafter:{lead_id}:{return_page}",
+                    }
+                ],
+                [
+                    {
+                        "text": "Выбрать дату",
+                        "callback_data": f"calday:custom:{lead_id}:{return_page}",
+                    }
+                ],
+                [
+                    {
+                        "text": "⬅️ Назад",
+                        "callback_data": f"lead:calendar:{lead_id}:{return_page}",
+                    }
+                ],
+            ]
+        },
+    )
+
+
+async def send_calendar_time_picker(
+    chat_id: int,
+    *,
+    lead_id: int,
+    return_page: int = 1,
+) -> dict:
+    return await send_message(
+        chat_id,
+        "🕒 <b>Время</b>\n\nВыберите время:",
+        reply_markup={
+            "inline_keyboard": [
+                [
+                    {"text": "09:00", "callback_data": f"caltime:time09:{lead_id}:{return_page}"},
+                    {"text": "10:00", "callback_data": f"caltime:time10:{lead_id}:{return_page}"},
+                    {"text": "11:00", "callback_data": f"caltime:time11:{lead_id}:{return_page}"},
+                ],
+                [
+                    {"text": "12:00", "callback_data": f"caltime:time12:{lead_id}:{return_page}"},
+                    {"text": "14:00", "callback_data": f"caltime:time14:{lead_id}:{return_page}"},
+                    {"text": "15:00", "callback_data": f"caltime:time15:{lead_id}:{return_page}"},
+                ],
+                [{"text": "16:00", "callback_data": f"caltime:time16:{lead_id}:{return_page}"}],
+                [
+                    {
+                        "text": "Другое время",
+                        "callback_data": f"caltime:custom:{lead_id}:{return_page}",
+                    }
+                ],
+                [
+                    {
+                        "text": "⬅️ Назад",
+                        "callback_data": f"lead:calendar:{lead_id}:{return_page}",
+                    }
+                ],
+            ]
+        },
+    )
+
+
+async def send_calendar_duration_picker(
+    chat_id: int,
+    *,
+    lead_id: int,
+    return_page: int = 1,
+) -> dict:
+    return await send_message(
+        chat_id,
+        "⏱ <b>Продолжительность</b>\n\nВыберите длительность:",
+        reply_markup={
+            "inline_keyboard": [
+                [
+                    {"text": "15 минут", "callback_data": f"caldur:15:{lead_id}:{return_page}"},
+                    {"text": "30 минут", "callback_data": f"caldur:30:{lead_id}:{return_page}"},
+                ],
+                [
+                    {"text": "45 минут", "callback_data": f"caldur:45:{lead_id}:{return_page}"},
+                    {"text": "60 минут", "callback_data": f"caldur:60:{lead_id}:{return_page}"},
+                ],
+                [
+                    {
+                        "text": "Другая",
+                        "callback_data": f"caldur:custom:{lead_id}:{return_page}",
+                    }
+                ],
+                [
+                    {
+                        "text": "⬅️ Назад",
+                        "callback_data": f"lead:calendar:{lead_id}:{return_page}",
+                    }
+                ],
+            ]
+        },
+    )
+
+
+async def send_calendar_reminder_picker(
+    chat_id: int,
+    *,
+    lead_id: int,
+    return_page: int = 1,
+) -> dict:
+    return await send_message(
+        chat_id,
+        "🔔 <b>Напоминание</b>\n\nЗа сколько напомнить?",
+        reply_markup={
+            "inline_keyboard": [
+                [
+                    {"text": "За 10 минут", "callback_data": f"calrem:10:{lead_id}:{return_page}"},
+                    {"text": "За 30 минут", "callback_data": f"calrem:30:{lead_id}:{return_page}"},
+                ],
+                [
+                    {"text": "За 1 час", "callback_data": f"calrem:60:{lead_id}:{return_page}"},
+                    {"text": "За 1 день", "callback_data": f"calrem:1440:{lead_id}:{return_page}"},
+                ],
+                [{"text": "Без напоминания", "callback_data": f"calrem:0:{lead_id}:{return_page}"}],
+                [
+                    {
+                        "text": "⬅️ Назад",
+                        "callback_data": f"lead:calendar:{lead_id}:{return_page}",
+                    }
+                ],
+            ]
+        },
+    )
+
+
+async def send_calendar_preview(
+    chat_id: int,
+    *,
+    lead_id: int,
+    return_page: int,
+    preview: dict[str, Any],
+) -> dict:
+    will_calendar = "✅ событие в Google Calendar" if preview.get("needs_calendar") else "— без события в календаре"
+    will_task = "✅ задача в Kommo" if preview.get("needs_kommo_task") else "— без задачи Kommo"
+    text = (
+        "📅 <b>ПРОВЕРКА СОБЫТИЯ</b>\n\n"
+        f"Сделка: {_esc(preview.get('lead_name'))}\n"
+        f"Событие: {_esc(preview.get('event_label'))}\n"
+        f"Дата: {_esc(preview.get('date_display'))}\n"
+        f"Время: {_esc(preview.get('time_display'))}\n"
+        f"Часовой пояс: {_esc(preview.get('timezone'))}\n"
+        f"Продолжительность: {_esc(preview.get('duration_label'))}\n"
+        f"Напоминание: {_esc(preview.get('reminder_label'))}\n\n"
+        f"Будет создано:\n{will_calendar}\n{will_task}"
+    )
+    return await send_message(
+        chat_id,
+        text,
+        reply_markup={
+            "inline_keyboard": [
+                [
+                    {
+                        "text": "✅ Создать",
+                        "callback_data": f"calendar:confirm:{lead_id}:{return_page}",
+                    }
+                ],
+                [
+                    {
+                        "text": "✏️ Изменить",
+                        "callback_data": f"calendar:edit:{lead_id}:{return_page}",
+                    },
+                    {
+                        "text": "❌ Отмена",
+                        "callback_data": f"calendar:cancel:{lead_id}:{return_page}",
+                    },
+                ],
+            ]
+        },
+    )
+
+
+async def send_calendar_success(
+    chat_id: int,
+    *,
+    lead_id: int,
+    return_page: int,
+    result: dict[str, Any],
+) -> dict:
+    from app.services import calendar_event_builder
+
+    start = result.get("start_at")
+    end = result.get("end_at")
+    if start and end:
+        when = calendar_event_builder.format_time_range(start, end)
+    else:
+        when = "—"
+    lines = [
+        "✅ <b>СОБЫТИЕ СОЗДАНО</b>",
+        "",
+        f"<b>{_esc(result.get('title'))}</b>",
+        when,
+        _esc(result.get("timezone")),
+        "",
+    ]
+    if result.get("calendar_success"):
+        lines.append("✅ Google Calendar")
+    elif result.get("ics_fallback"):
+        lines.append("⚠️ Google Calendar — отправлен файл .ics")
+    else:
+        lines.append(f"❌ Google Calendar — {_esc(result.get('calendar_error') or 'ошибка')}")
+    if result.get("kommo_task_success"):
+        lines.append("✅ Задача Kommo")
+    elif result.get("kommo_task_error"):
+        lines.append(f"❌ Задача Kommo — {_esc(result.get('kommo_task_error'))}")
+    keyboard: list[list[dict[str, Any]]] = []
+    if result.get("calendar_event_url"):
+        keyboard.append(
+            [{"text": "📅 Открыть календарь", "url": result["calendar_event_url"]}]
+        )
+    if result.get("lead_url"):
+        keyboard.append([{"text": "🔗 Открыть Kommo", "url": result["lead_url"]}])
+    keyboard.extend(
+        [
+            [
+                {
+                    "text": "📋 Карточка сделки",
+                    "callback_data": f"lead:view:{lead_id}:{return_page}",
+                }
+            ],
+            [{"text": "🏠 Главное меню", "callback_data": "menu:home"}],
+        ]
+    )
+    if result.get("calendar_success") and result.get("kommo_task_error"):
+        keyboard.insert(
+            0,
+            [
+                {
+                    "text": "🔄 Повторить задачу Kommo",
+                    "callback_data": f"calendar:retry_kommo:{lead_id}:{return_page}",
+                }
+            ],
+        )
+    message = await send_message(
+        chat_id, "\n".join(lines), reply_markup={"inline_keyboard": keyboard}
+    )
+    if result.get("ics_fallback") and result.get("ics_content"):
+        await send_document(
+            chat_id,
+            filename="event.ics",
+            content=str(result["ics_content"]).encode("utf-8"),
+            caption=f"📅 {_esc(result.get('title'))}",
+        )
+    return message
 
 
 async def send_message_chunks(
@@ -269,7 +587,8 @@ async def set_bot_commands() -> dict:
         {"command": "menu", "description": "Главное меню"},
         {"command": "jobs", "description": "Статус обработки аудио"},
         {"command": "kommo_test", "description": "Проверить Kommo"},
-        {"command": "calendar_test", "description": "Проверить iCloud календарь"},
+        {"command": "calendar_test", "description": "Проверить Google Calendar"},
+        {"command": "calendar_test_write", "description": "Тест записи в Google Calendar"},
     ]
     async with httpx.AsyncClient(timeout=15) as client:
         response = await client.post(
@@ -557,7 +876,7 @@ async def send_lead_details(
                     "callback_data": f"lead:task:{lead_id}:{return_page}",
                 },
                 {
-                    "text": "📅 Календарь",
+                    "text": "📅 Запланировать",
                     "callback_data": f"lead:calendar:{lead_id}:{return_page}",
                 },
             ],
@@ -829,30 +1148,30 @@ async def send_calendar_confirmation(
     start_display: str,
     duration_minutes: int,
     return_page: int = 1,
+    reminder_minutes: int = 30,
+    event_type_label: str = "Созвон с клиентом",
+    timezone_label: str = "Europe/Warsaw",
+    needs_calendar: bool = True,
+    needs_kommo_task: bool = True,
 ) -> dict:
-    return await send_message(
+    return await send_calendar_preview(
         chat_id,
-        (
-            "📅 <b>Проверка события</b>\n"
-            "━━━━━━━━━━━━━━━━━━\n"
-            f"Сделка: <b>{_esc(lead_name)}</b>\n"
-            f"Событие: {_esc(title)}\n"
-            f"Начало: <b>{_esc(start_display)}</b>\n"
-            f"Длительность: {duration_minutes} мин."
-        ),
-        reply_markup={
-            "inline_keyboard": [
-                [
-                    {
-                        "text": "✅ Создать",
-                        "callback_data": f"calendar:confirm:{lead_id}:{return_page}",
-                    },
-                    {
-                        "text": "❌ Отмена",
-                        "callback_data": f"calendar:cancel:{lead_id}:{return_page}",
-                    },
-                ]
-            ]
+        lead_id=lead_id,
+        return_page=return_page,
+        preview={
+            "lead_name": lead_name,
+            "event_label": event_type_label or title,
+            "date_display": start_display.split(",")[0] if "," in start_display else start_display,
+            "time_display": start_display,
+            "timezone": timezone_label,
+            "duration_label": f"{duration_minutes} минут",
+            "reminder_label": (
+                "без напоминания"
+                if reminder_minutes <= 0
+                else f"за {reminder_minutes} минут"
+            ),
+            "needs_calendar": needs_calendar,
+            "needs_kommo_task": needs_kommo_task,
         },
     )
 

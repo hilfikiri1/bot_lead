@@ -4,6 +4,7 @@ from app.models.voice_note import VoiceNote
 from app.models.ai_report import AIReport
 from app.models.action import Action
 from app.models.integration_check import IntegrationCheck
+from app.models.calendar_event import CalendarEvent
 from app.models.spreadsheet_lead_mapping import SpreadsheetLeadMapping
 
 __all__ = [
@@ -14,4 +15,5 @@ __all__ = [
     "Action",
     "IntegrationCheck",
     "SpreadsheetLeadMapping",
+    "CalendarEvent",
 ]

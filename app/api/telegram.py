@@ -1099,7 +1099,7 @@ async def _handle_manager_callback(
         await _handle_kommo_test(chat_id, user_id, db)
         return True
     if callback_data == "menu:calendar":
-        await _handle_calendar_test(chat_id, user_id)
+        await _handle_calendar_test(chat_id, user_id, include_write_probe=True)
         return True
     if callback_data == "menu:digest":
         await _handle_morning_digest(chat_id)
@@ -2464,9 +2464,9 @@ async def telegram_webhook(
 
         if text.startswith("/calendar_test_write"):
             await _handle_calendar_test(chat_id, user_id, include_write_probe=True)
-            return
+            return {"ok": True}
         if text.startswith("/calendar_test"):
-            await _handle_calendar_test(chat_id, user_id)
+            await _handle_calendar_test(chat_id, user_id, include_write_probe=True)
             return {"ok": True}
 
         if text.startswith(("/digest", "/morning")):

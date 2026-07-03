@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import date, datetime
 from typing import Any
 
 from redis.asyncio import Redis
@@ -19,6 +20,18 @@ def _key(user_id: int) -> str:
     return f"telegram:state:{user_id}"
 
 
+def _json_default(value: Any) -> Any:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+
+def dumps_state(state: dict[str, Any]) -> str:
+    return json.dumps(state, ensure_ascii=False, default=_json_default)
+
+
 async def set_state(
     user_id: int,
     state: dict[str, Any],
@@ -29,7 +42,7 @@ async def set_state(
     try:
         await redis.set(
             _key(user_id),
-            json.dumps(state, ensure_ascii=False),
+            dumps_state(state),
             ex=max(60, ttl_seconds),
         )
     finally:

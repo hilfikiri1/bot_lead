@@ -41,6 +41,26 @@ class NotionAPIError(RuntimeError):
         self.status_code = status_code
 
 
+def format_user_error(exc: NotionAPIError) -> str:
+    """Return a short Telegram-friendly explanation for common Notion failures."""
+    if exc.status_code == 404 or "object_not_found" in str(exc).lower():
+        return (
+            "❌ <b>База Notion не найдена</b>\n\n"
+            "Проверьте ID базы в Railway и что она расшарена на интеграцию "
+            "<b>Buy Bring Bot</b> (Invite → Connections).\n\n"
+            "Нужен именно <b>database ID</b>, не ID страницы. "
+            "Откройте базу в Notion → ⋯ → Copy link → ID из URL."
+        )
+    if exc.status_code == 401:
+        return "❌ <b>Notion отклонил токен</b>\n\nПроверьте <code>NOTION_API_TOKEN</code>."
+    if exc.status_code == 403:
+        return (
+            "❌ <b>Notion: нет доступа</b>\n\n"
+            "Подключите базу к интеграции Buy Bring Bot в Notion."
+        )
+    return f"❌ <b>Ошибка Notion</b>\n\n{html_escape(str(exc)[:400])}"
+
+
 @dataclass
 class NotionSyncResult:
     client_page_id: str | None
@@ -143,6 +163,11 @@ async def _request(
         return {}
     if not 200 <= response.status_code < 300:
         preview = response.text.replace("\n", " ")[:400]
+        if response.status_code == 404:
+            raise NotionAPIError(
+                "База Notion не найдена или не расшарена на интеграцию Buy Bring Bot.",
+                status_code=404,
+            )
         raise NotionAPIError(
             f"Notion HTTP {response.status_code}: {preview}",
             status_code=response.status_code,

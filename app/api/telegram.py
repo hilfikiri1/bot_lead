@@ -389,10 +389,20 @@ async def _handle_text_command(
 
 
 async def _handle_morning_digest(chat_id: int) -> None:
-    if not notion_service.is_configured():
+    if not settings.notion_api_token.strip():
         await telegram_service.send_message(
             chat_id,
-            "Notion не настроен. Добавьте NOTION_API_TOKEN и database IDs в Railway.",
+            "Notion не настроен. Добавьте <code>NOTION_API_TOKEN</code> в Railway.",
+        )
+        return
+    if not settings.notion_tasks_database_id.strip():
+        await telegram_service.send_message(
+            chat_id,
+            (
+                "Дайджест требует базу задач Notion.\n"
+                "Добавьте <code>NOTION_TASKS_DATABASE_ID</code> и подключите базу "
+                "к интеграции бота."
+            ),
         )
         return
     await telegram_service.send_message(chat_id, await notion_service.get_morning_digest())
@@ -1071,6 +1081,9 @@ async def _handle_manager_callback(
         return True
     if callback_data == "menu:calendar":
         await _handle_calendar_test(chat_id, user_id)
+        return True
+    if callback_data == "menu:digest":
+        await _handle_morning_digest(chat_id)
         return True
     if callback_data == "menu:jobs":
         await _show_audio_jobs(chat_id, user_id, db)

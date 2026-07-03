@@ -388,6 +388,15 @@ async def _handle_text_command(
     return plan.intent != "analyze_conversation"
 
 
+async def _handle_notion_test(chat_id: int) -> None:
+    await telegram_service.send_message(chat_id, "🔄 Проверяю Notion…")
+    try:
+        report = await notion_service.run_notion_diagnostics()
+    except notion_service.NotionAPIError as exc:
+        report = notion_service.format_user_error(exc)
+    await telegram_service.send_message(chat_id, report)
+
+
 async def _handle_morning_digest(chat_id: int) -> None:
     if not settings.notion_api_token.strip():
         await telegram_service.send_message(
@@ -1090,10 +1099,13 @@ async def _handle_manager_callback(
         await _handle_kommo_test(chat_id, user_id, db)
         return True
     if callback_data == "menu:calendar":
-        await _handle_calendar_test(chat_id, user_id)
+        await _handle_calendar_test(chat_id, user_id, include_write_probe=True)
         return True
     if callback_data == "menu:digest":
         await _handle_morning_digest(chat_id)
+        return True
+    if callback_data == "menu:notion":
+        await _handle_notion_test(chat_id)
         return True
     if callback_data == "menu:jobs":
         await _show_audio_jobs(chat_id, user_id, db)
@@ -2452,13 +2464,17 @@ async def telegram_webhook(
 
         if text.startswith("/calendar_test_write"):
             await _handle_calendar_test(chat_id, user_id, include_write_probe=True)
-            return
+            return {"ok": True}
         if text.startswith("/calendar_test"):
-            await _handle_calendar_test(chat_id, user_id)
+            await _handle_calendar_test(chat_id, user_id, include_write_probe=True)
             return {"ok": True}
 
         if text.startswith(("/digest", "/morning")):
             await _handle_morning_digest(chat_id)
+            return {"ok": True}
+
+        if text.startswith("/notion_test"):
+            await _handle_notion_test(chat_id)
             return {"ok": True}
 
         if text.startswith("/jobs"):

@@ -160,6 +160,26 @@ def get_calendar_metadata() -> dict[str, Any]:
     }
 
 
+def service_account_email() -> str | None:
+    try:
+        info = _load_service_account_info()
+        email = str(info.get("client_email") or "").strip()
+        return email or None
+    except GoogleCalendarError:
+        return None
+
+
+def _access_role_label(role: str | None) -> str:
+    mapping = {
+        "owner": "владелец",
+        "writer": "редактор",
+        "reader": "только чтение",
+        "freebusyreader": "только занятость",
+        "none": "нет доступа",
+    }
+    return mapping.get(str(role or "").lower(), str(role or "—"))
+
+
 def diagnose_google_calendar(*, include_write_probe: bool = False) -> dict[str, Any]:
     result: dict[str, Any] = {
         "provider": "Google Calendar",
@@ -173,6 +193,7 @@ def diagnose_google_calendar(*, include_write_probe: bool = False) -> dict[str, 
         "write_ok": False,
         "calendar_summary": None,
         "access_role": None,
+        "service_account_email": service_account_email(),
         "error": None,
     }
     if not is_configured():
@@ -188,18 +209,17 @@ def diagnose_google_calendar(*, include_write_probe: bool = False) -> dict[str, 
         result["calendar_summary"] = meta.get("summary")
         result["access_role"] = meta.get("access_role")
         role = str(meta.get("access_role") or "").lower()
-        if role in {"owner", "writer"}:
-            result["write_ok"] = True
-        elif role == "reader":
+        if role == "reader":
             result["error"] = (
-                "У сервисного аккаунта только чтение. "
-                "Предоставьте право «Вносить изменения в мероприятия»."
+                "Google API видит роль «только чтение». "
+                "Проверьте, что в JSON Railway тот же email, что в доступе календаря, "
+                "и выбрано «Вносить изменения в мероприятия»."
             )
     except GoogleCalendarError as exc:
         result["error"] = str(exc)
         return result
 
-    if include_write_probe and result["write_ok"]:
+    if include_write_probe and result["read_ok"]:
         from datetime import datetime, timedelta
         from zoneinfo import ZoneInfo
 
@@ -216,9 +236,13 @@ def diagnose_google_calendar(*, include_write_probe: bool = False) -> dict[str, 
             )
             delete_event(probe["event_id"])
             result["write_ok"] = True
+            result["error"] = None
         except GoogleCalendarError as exc:
             result["write_ok"] = False
             result["error"] = str(exc)
+    elif str(result.get("access_role") or "").lower() in {"owner", "writer"}:
+        result["write_ok"] = True
+        result["error"] = None
     return result
 
 
@@ -241,10 +265,23 @@ def format_diagnostic_report(info: dict[str, Any]) -> str:
         f"Calendar ID: {'настроен' if info.get('calendar_id_set') else 'не задан'}",
         f"Чтение: {'✅' if info.get('read_ok') else '❌'}",
         f"Создание событий: {'✅' if info.get('write_ok') else '❌'}",
+        f"Роль в календаре: {_access_role_label(info.get('access_role'))} "
+        f"(<code>{info.get('access_role') or '—'}</code>)",
         f"Часовой пояс: {info.get('timezone') or '—'}",
     ]
-    if info.get("error"):
-        lines.extend(["", f"⚠️ {info['error']}"])
+    email = info.get("service_account_email")
+    if email:
+        lines.append(f"Service account: <code>{email}</code>")
+    if info.get("error") or not info.get("write_ok"):
+        if info.get("error"):
+            lines.extend(["", f"⚠️ {info['error']}"])
+        elif not info.get("write_ok"):
+            lines.extend(["", "⚠️ Запись не проверена. Запустите /calendar_test_write"])
+        if not info.get("write_ok") and email:
+            lines.append(
+                "Расшарьте календарь «B&BS Work» на этот email с правом "
+                "<b>Вносить изменения в мероприятия</b>."
+            )
     return "\n".join(lines)
 
 

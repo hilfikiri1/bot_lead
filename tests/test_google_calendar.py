@@ -140,6 +140,50 @@ class TestGoogleCalendarService:
         assert result["event_id"] == "evt123"
         assert "calendar.google.com" in result["event_url"]
 
+    def test_diagnose_reader_role_shows_write_error(self):
+        with patch.object(google_calendar_service, "is_configured", return_value=True), patch.object(
+            google_calendar_service,
+            "get_calendar_metadata",
+            return_value={
+                "summary": "B&BS Work",
+                "access_role": "reader",
+                "time_zone": "Europe/Warsaw",
+            },
+        ), patch.object(
+            google_calendar_service,
+            "service_account_email",
+            return_value="bot@test.iam.gserviceaccount.com",
+        ):
+            info = google_calendar_service.diagnose_google_calendar()
+        assert info["read_ok"] is True
+        assert info["write_ok"] is False
+        report = google_calendar_service.format_diagnostic_report(info)
+        assert "только чтение" in report
+        assert "bot@test.iam.gserviceaccount.com" in report
+
+    def test_diagnose_write_probe_success(self):
+        with patch.object(google_calendar_service, "is_configured", return_value=True), patch.object(
+            google_calendar_service,
+            "get_calendar_metadata",
+            return_value={
+                "summary": "B&BS Work",
+                "access_role": "reader",
+                "time_zone": "Europe/Warsaw",
+            },
+        ), patch.object(
+            google_calendar_service,
+            "create_event",
+            return_value={"event_id": "evt1", "event_url": "https://example.com"},
+        ), patch.object(google_calendar_service, "delete_event"), patch.object(
+            google_calendar_service,
+            "service_account_email",
+            return_value="bot@test.iam.gserviceaccount.com",
+        ):
+            info = google_calendar_service.diagnose_google_calendar(
+                include_write_probe=True
+            )
+        assert info["write_ok"] is True
+
     def test_write_permission_failure_message(self):
         class FakeHttpError(Exception):
             resp = MagicMock(status=403)

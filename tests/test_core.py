@@ -368,17 +368,30 @@ class TestNotionHelpers:
             mp.setattr(notion_service.settings, "notion_api_token", "secret")
             assert notion_service.is_configured() is True
 
-    def test_resolve_notion_database_id_prefers_view_from_url(self):
+    def test_extract_notion_id_candidates_from_inline_url(self):
         from app.services import notion_service
 
         url = (
             "https://app.notion.com/p/3918a54a26de80da9582d466738c9abd"
             "?v=3918a54a26de81a9a792000c31774295"
         )
-        assert (
-            notion_service.resolve_notion_database_id(url)
-            == "3918a54a-26de-81a9-a792-000c31774295"
-        )
+        candidates = notion_service.extract_notion_id_candidates(url)
+        assert candidates[0] == "3918a54a-26de-81a9-a792-000c31774295"
+        assert "3918a54a-26de-80da-9582-d466738c9abd" in candidates
+
+    def test_extract_notion_id_candidates_from_slug_url(self):
+        from app.services import notion_service
+
+        url = "https://www.notion.so/buybringsolutions/04-tasks-3918a54a26de81a9a792000c31774295"
+        candidates = notion_service.extract_notion_id_candidates(url)
+        assert candidates[-1] == "3918a54a-26de-81a9-a792-000c31774295"
+
+    def test_validate_notion_token_format(self):
+        from app.services import notion_service
+
+        assert notion_service.validate_notion_token_format("secret_abc") is None
+        assert notion_service.validate_notion_token_format("ntn_abc") is None
+        assert "secret_" in (notion_service.validate_notion_token_format("bad") or "")
 
     def test_format_user_error_mentions_connections(self):
         from app.services import notion_service

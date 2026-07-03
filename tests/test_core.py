@@ -386,6 +386,13 @@ class TestNotionHelpers:
         candidates = notion_service.extract_notion_id_candidates(url)
         assert candidates[-1] == "3918a54a-26de-81a9-a792-000c31774295"
 
+    def test_validate_notion_token_format(self):
+        from app.services import notion_service
+
+        assert notion_service.validate_notion_token_format("secret_abc") is None
+        assert notion_service.validate_notion_token_format("ntn_abc") is None
+        assert "secret_" in (notion_service.validate_notion_token_format("bad") or "")
+
     def test_format_user_error_mentions_connections(self):
         from app.services import notion_service
 

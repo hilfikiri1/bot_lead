@@ -138,20 +138,63 @@ async def resolve_accessible_database_id(
     return None, attempts
 
 
+def validate_notion_token_format(token: str) -> str | None:
+    """Return a human hint when the env token does not look like a Notion internal secret."""
+    clean = (token or "").strip().strip('"').strip("'")
+    if not clean:
+        return "NOTION_API_TOKEN пустой."
+    if clean.startswith("oauth_"):
+        return (
+            "Похоже на OAuth-токен. Нужен <b>Internal Integration Secret</b> "
+            "из https://www.notion.so/my-integrations"
+        )
+    if not (clean.startswith("secret_") or clean.startswith("ntn_")):
+        return (
+            "Токен должен начинаться с <code>secret_</code> или <code>ntn_</code>. "
+            "Скопируйте Secret именно у интеграции <b>Buy Bring Bot</b>."
+        )
+    return None
+
+
 async def run_notion_diagnostics() -> str:
     """Detailed Telegram report for Notion token and database access."""
     lines = ["<b>🔌 Проверка Notion</b>", ""]
 
-    if not settings.notion_api_token.strip():
+    token = settings.notion_api_token.strip().strip('"').strip("'")
+    if not token:
         lines.append("❌ <code>NOTION_API_TOKEN</code> не задан.")
         return "\n".join(lines)
+
+    token_hint = validate_notion_token_format(token)
+    if token_hint:
+        lines.append(f"⚠️ {token_hint}")
+    else:
+        prefix = "ntn_" if token.startswith("ntn_") else "secret_"
+        lines.append(f"Формат токена: <code>{prefix}…</code>")
 
     try:
         me = await _request("GET", "/users/me")
         bot_name = me.get("name") or me.get("id") or "интеграция"
-        lines.append(f"✅ Токен OK · <b>{html_escape(str(bot_name))}</b>")
+        bot_type = me.get("type") or "—"
+        lines.append(
+            f"✅ API отвечает · интеграция <b>{html_escape(str(bot_name))}</b> "
+            f"(type: <code>{html_escape(str(bot_type))}</code>)"
+        )
+        if bot_name != "Buy Bring Bot":
+            lines.append(
+                "⚠️ Имя интеграции не <b>Buy Bring Bot</b>. "
+                "В Notion → Connections должен быть подключён тот же бот, "
+                "чей токен в Railway."
+            )
     except NotionAPIError as exc:
-        lines.append(f"❌ Токен: {html_escape(str(exc))}")
+        if exc.status_code == 401:
+            lines.append(
+                "❌ <b>Неверный NOTION_API_TOKEN</b>\n"
+                "Создайте Internal integration на https://www.notion.so/my-integrations\n"
+                "→ Buy Bring Bot → Configuration → Internal Integration Secret → Show"
+            )
+        else:
+            lines.append(f"❌ API: {html_escape(str(exc))}")
         return "\n".join(lines)
 
     checks = [
@@ -244,7 +287,13 @@ def format_user_error(exc: NotionAPIError) -> str:
             "Запустите <code>/notion_test</code> — бот проверит все ID из ссылки."
         )
     if exc.status_code == 401:
-        return "❌ <b>Notion отклонил токен</b>\n\nПроверьте <code>NOTION_API_TOKEN</code>."
+        return (
+            "❌ <b>Неверный NOTION_API_TOKEN</b>\n\n"
+            "Нужен <b>Internal Integration Secret</b> (не OAuth):\n"
+            "https://www.notion.so/my-integrations → Buy Bring Bot → "
+            "Configuration → Secret → Show\n\n"
+            "Токен начинается с <code>secret_</code> или <code>ntn_</code>."
+        )
     if exc.status_code == 403:
         return (
             "❌ <b>Notion: нет доступа</b>\n\n"

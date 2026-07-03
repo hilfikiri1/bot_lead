@@ -44,7 +44,14 @@ def provider_label() -> str:
 
 
 def _clean_env_value(value: str | None) -> str:
-    return str(value or "").strip().strip('"').strip("'")
+    return str(value or "").strip().strip('"').strip("'").strip()
+
+
+def _normalize_caldav_url(href: str, base_url: str) -> str:
+    clean_href = href.strip()
+    if clean_href.startswith("http://") or clean_href.startswith("https://"):
+        return clean_href.rstrip("/") + "/"
+    return urljoin(base_url.rstrip("/") + "/", clean_href.lstrip("/")).rstrip("/") + "/"
 
 
 def _icloud_password_candidates() -> list[str]:
@@ -219,7 +226,7 @@ def _create_google_event(
 
 
 def _icloud_credentials() -> tuple[str, list[str]]:
-    username = _clean_env_value(settings.icloud_username).casefold()
+    username = _clean_env_value(settings.icloud_username)
     passwords = _icloud_password_candidates()
     if not username:
         raise CalendarIntegrationError("ICLOUD_USERNAME не задан в Railway Variables.")
@@ -325,7 +332,7 @@ def _propfind(url: str, xml_body: str, *, depth: int = 0) -> tuple[bytes, str]:
     return response.content, final_url
 
 
-def _first_property_href(xml_bytes: bytes, property_tag: str) -> str | None:
+def _extract_property_href(xml_bytes: bytes, property_tag: str) -> str | None:
     try:
         root = ET.fromstring(xml_bytes)
     except ET.ParseError as exc:
@@ -344,84 +351,101 @@ def _first_property_href(xml_bytes: bytes, property_tag: str) -> str | None:
         href = node.findtext(f"{{{DAV_NS}}}href")
         if href:
             return href.strip()
+        for href_node in node.findall(f".//{{{DAV_NS}}}href"):
+            if href_node.text and href_node.text.strip():
+                return href_node.text.strip()
     return None
 
 
-def _caldav_discovery_candidates() -> list[str]:
-    configured = (
-        _clean_env_value(settings.icloud_caldav_url)
-        or "https://caldav.icloud.com/.well-known/caldav"
-    ).rstrip("/")
+def _first_property_href(xml_bytes: bytes, property_tag: str) -> str | None:
+    return _extract_property_href(xml_bytes, property_tag)
 
+
+def _caldav_discovery_candidates() -> list[str]:
     candidates: list[str] = []
     for candidate in (
-        configured,
-        "https://caldav.icloud.com/.well-known/caldav",
         "https://caldav.icloud.com/",
+        "https://caldav.icloud.com/.well-known/caldav",
+        _clean_env_value(settings.icloud_caldav_url),
     ):
         if candidate and candidate not in candidates:
             candidates.append(candidate)
     return candidates
 
 
-def _discover_calendar_home() -> str:
-    principal_xml = """<?xml version="1.0" encoding="utf-8" ?>
+def _principal_propfind_bodies() -> list[str]:
+    return [
+        """<?xml version="1.0" encoding="utf-8" ?>
 <d:propfind xmlns:d="DAV:">
   <d:prop><d:current-user-principal /></d:prop>
-</d:propfind>"""
+</d:propfind>""",
+        """<?xml version="1.0" encoding="utf-8"?>
+<propfind xmlns="DAV:">
+  <prop><current-user-principal/></prop>
+</propfind>""",
+    ]
 
-    principal_response: bytes | None = None
-    final_base_url: str | None = None
+
+def _discover_calendar_home() -> str:
     failures: list[str] = []
+    principal_href: str | None = None
+    final_base_url: str | None = None
 
     for candidate in _caldav_discovery_candidates():
-        try:
-            principal_response, final_base_url = _propfind(
-                candidate, principal_xml, depth=0
-            )
-            principal_href = _first_property_href(
-                principal_response,
-                f"{{{DAV_NS}}}current-user-principal",
-            )
-            if principal_href:
-                break
-            failures.append(f"{candidate}: current-user-principal отсутствует")
-        except CalendarIntegrationError as exc:
-            failures.append(f"{candidate}: {exc}")
-            logger.warning("iCloud CalDAV discovery failed for %s: %s", candidate, exc)
-            principal_response = None
-            final_base_url = None
+        for body in _principal_propfind_bodies():
+            try:
+                principal_response, final_base_url = _propfind(
+                    candidate, body, depth=0
+                )
+                principal_href = _extract_property_href(
+                    principal_response,
+                    f"{{{DAV_NS}}}current-user-principal",
+                )
+                if principal_href:
+                    break
+                failures.append(
+                    f"{candidate}: ответ получен, но current-user-principal пустой"
+                )
+            except CalendarIntegrationError as exc:
+                failures.append(f"{candidate}: {exc}")
+                logger.warning(
+                    "iCloud CalDAV discovery failed for %s: %s", candidate, exc
+                )
+        if principal_href:
+            break
     else:
+        details = "\n".join(f"• {item}" for item in failures[:6])
         raise CalendarIntegrationError(
-            "iCloud CalDAV не смог определить адрес календарей. "
-            "Проверьте ICLOUD_CALDAV_URL, Apple ID и пароль приложения. "
-            "Рекомендуемый URL: https://caldav.icloud.com/.well-known/caldav"
+            "iCloud CalDAV не смог определить адрес календарей.\n\n"
+            f"{details}\n\n"
+            "Проверьте:\n"
+            "1. <code>ICLOUD_USERNAME</code> — полный Apple ID (email)\n"
+            "2. <code>ICLOUD_APP_SPECIFIC_PASSWORD</code> — новый пароль приложения "
+            "с appleid.apple.com (не обычный пароль iCloud)\n"
+            "3. Очистите <code>ICLOUD_CALDAV_URL</code> или оставьте "
+            "<code>https://caldav.icloud.com/</code>\n"
+            "4. На Apple ID должна быть включена двухфакторная аутентификация"
         )
 
-    assert principal_response is not None
     assert final_base_url is not None
-    principal_href = _first_property_href(
-        principal_response,
-        f"{{{DAV_NS}}}current-user-principal",
-    )
-    if not principal_href:
-        raise CalendarIntegrationError(
-            "iCloud не вернул current-user-principal для этого аккаунта."
-        )
-    principal_url = urljoin(final_base_url, principal_href)
+    assert principal_href is not None
+    principal_url = _normalize_caldav_url(principal_href, final_base_url)
 
     home_xml = f"""<?xml version="1.0" encoding="utf-8" ?>
 <d:propfind xmlns:d="DAV:" xmlns:c="{CALDAV_NS}">
   <d:prop><c:calendar-home-set /></d:prop>
 </d:propfind>"""
     home_response, final_principal_url = _propfind(principal_url, home_xml, depth=0)
-    home_href = _first_property_href(
+    home_href = _extract_property_href(
         home_response,
         f"{{{CALDAV_NS}}}calendar-home-set",
     )
     if not home_href:
-        raise CalendarIntegrationError("iCloud не вернул адрес хранилища календарей.")
-    return urljoin(final_principal_url, home_href)
+        raise CalendarIntegrationError(
+            "iCloud не вернул calendar-home-set. "
+            "Создайте новый пароль приложения Apple и обновите Railway."
+        )
+    return _normalize_caldav_url(home_href, final_principal_url)
 
 
 def list_icloud_calendars() -> list[tuple[str, str]]:
@@ -462,7 +486,7 @@ def list_icloud_calendars() -> list[tuple[str, str]]:
             display_name = (
                 prop.findtext(f"{{{DAV_NS}}}displayname") or "Без названия"
             ).strip()
-            calendars.append((display_name, urljoin(final_home_url, href)))
+            calendars.append((display_name, _normalize_caldav_url(href, final_home_url)))
     return calendars
 
 
@@ -479,9 +503,11 @@ def diagnose_icloud_calendar() -> dict[str, Any]:
         "username_masked": masked_user,
         "password_set": bool(_icloud_password_candidates()),
         "calendar_name": _clean_env_value(settings.icloud_calendar_name) or "—",
+        "caldav_url": _clean_env_value(settings.icloud_caldav_url) or "auto",
         "provider": provider_label(),
         "calendars": [],
         "selected_calendar": None,
+        "discovery_errors": [],
         "error": None,
     }
     try:
@@ -496,6 +522,12 @@ def diagnose_icloud_calendar() -> dict[str, Any]:
         }
     except CalendarIntegrationError as exc:
         info["error"] = str(exc)
+        if "•" in str(exc):
+            info["discovery_errors"] = [
+                line.strip("• ").strip()
+                for line in str(exc).splitlines()
+                if line.strip().startswith("•")
+            ]
     return info
 
 

@@ -129,6 +129,22 @@ class Settings(BaseSettings):
     audio_queue_fallback_seconds: int = 45
     manager_timezone: str = "Europe/Warsaw"
     kommo_default_task_type_id: int = 1
+    kommo_unreviewed_pipeline_id: Optional[int] = None
+    kommo_unreviewed_status_id: Optional[int] = None
+    kommo_unreviewed_page_size: int = 8
+
+    # Google Sheets lead registry (read-only service account)
+    google_sheets_spreadsheet_id: str = ""
+    google_sheets_worksheet_name: str = ""
+    google_sheets_service_account_json: str = ""
+    google_sheets_phone_column: str = "O"
+    google_sheets_product_column: str = "P"
+    google_sheets_lead_number_column: str = "Y"
+    google_sheets_email_column: str = ""
+    google_sheets_client_name_column: str = ""
+    google_sheets_company_column: str = ""
+    google_sheets_header_row: int = 1
+    google_sheets_cache_ttl_seconds: int = 300
 
     # Notion workspace integration
     notion_api_token: str = ""

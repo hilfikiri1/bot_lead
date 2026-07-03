@@ -4,5 +4,14 @@ from app.models.voice_note import VoiceNote
 from app.models.ai_report import AIReport
 from app.models.action import Action
 from app.models.integration_check import IntegrationCheck
+from app.models.spreadsheet_lead_mapping import SpreadsheetLeadMapping
 
-__all__ = ["Client", "Lead", "VoiceNote", "AIReport", "Action", "IntegrationCheck"]
+__all__ = [
+    "Client",
+    "Lead",
+    "VoiceNote",
+    "AIReport",
+    "Action",
+    "IntegrationCheck",
+    "SpreadsheetLeadMapping",
+]

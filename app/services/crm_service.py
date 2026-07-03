@@ -11,7 +11,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.models import Action, AIReport, Client, Lead, VoiceNote
+from app.models import Action, AIReport, Client, Lead, SpreadsheetLeadMapping, VoiceNote
 
 logger = logging.getLogger(__name__)
 
@@ -343,6 +343,38 @@ async def save_notion_mapping(
         if voice_note:
             voice_note.notion_page_id = call_page_id
     await db.commit()
+
+
+async def save_spreadsheet_lead_mapping(
+    db: AsyncSession,
+    *,
+    kommo_lead_id: int,
+    spreadsheet_lead_number: str,
+    original_product: str | None,
+    short_product_ru: str | None,
+    old_kommo_name: str | None,
+    new_kommo_name: str | None,
+    spreadsheet_row_number: int | None,
+    matched_by: str | None,
+    matched_value_hash: str | None,
+    created_by_telegram_user_id: int | None,
+) -> SpreadsheetLeadMapping:
+    record = SpreadsheetLeadMapping(
+        kommo_lead_id=kommo_lead_id,
+        spreadsheet_lead_number=spreadsheet_lead_number[:32],
+        original_product=original_product,
+        short_product_ru=(short_product_ru or "")[:120] or None,
+        old_kommo_name=old_kommo_name,
+        new_kommo_name=new_kommo_name,
+        spreadsheet_row_number=spreadsheet_row_number,
+        matched_by=(matched_by or "")[:32] or None,
+        matched_value_hash=(matched_value_hash or "")[:64] or None,
+        created_by_telegram_user_id=created_by_telegram_user_id,
+    )
+    db.add(record)
+    await db.commit()
+    await db.refresh(record)
+    return record
 
 
 async def get_user_command_context(

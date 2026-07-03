@@ -400,8 +400,8 @@ async def _handle_morning_digest(chat_id: int) -> None:
             chat_id,
             (
                 "Дайджест требует базу задач Notion.\n"
-                "Добавьте <code>NOTION_TASKS_DATABASE_ID</code> и подключите базу "
-                "к интеграции бота."
+                "Добавьте <code>NOTION_TASKS_DATABASE_ID</code>.\n\n"
+                f"{notion_service.notion_access_instructions()}"
             ),
         )
         return

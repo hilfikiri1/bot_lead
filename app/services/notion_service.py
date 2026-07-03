@@ -41,22 +41,37 @@ class NotionAPIError(RuntimeError):
         self.status_code = status_code
 
 
+def notion_access_instructions(*, compact: bool = False) -> str:
+    """Shared setup hint for granting the bot access to Notion databases."""
+    if compact:
+        return (
+            "Откройте базу → <b>⋯ → Connections</b> → добавьте "
+            "<b>Buy Bring Bot</b>. Private workspace подходит."
+        )
+    return (
+        "Private workspace — <b>нормально</b>, teamspace не нужен.\n"
+        "1. Откройте базу (Tasks / Clients / Leads / Calls).\n"
+        "2. <b>⋯ → Connections → Add connections</b> → выберите "
+        "<b>Buy Bring Bot</b>.\n"
+        "3. Если база внутри страницы — подключите интеграцию и к родительской странице.\n"
+        "4. В Railway укажите <b>database ID</b> из URL базы (32 символа), "
+        "не ID обычной заметки."
+    )
+
+
 def format_user_error(exc: NotionAPIError) -> str:
     """Return a short Telegram-friendly explanation for common Notion failures."""
     if exc.status_code == 404 or "object_not_found" in str(exc).lower():
         return (
             "❌ <b>База Notion не найдена</b>\n\n"
-            "Проверьте ID базы в Railway и что она расшарена на интеграцию "
-            "<b>Buy Bring Bot</b> (Invite → Connections).\n\n"
-            "Нужен именно <b>database ID</b>, не ID страницы. "
-            "Откройте базу в Notion → ⋯ → Copy link → ID из URL."
+            f"{notion_access_instructions()}"
         )
     if exc.status_code == 401:
         return "❌ <b>Notion отклонил токен</b>\n\nПроверьте <code>NOTION_API_TOKEN</code>."
     if exc.status_code == 403:
         return (
             "❌ <b>Notion: нет доступа</b>\n\n"
-            "Подключите базу к интеграции Buy Bring Bot в Notion."
+            f"{notion_access_instructions()}"
         )
     return f"❌ <b>Ошибка Notion</b>\n\n{html_escape(str(exc)[:400])}"
 
@@ -165,7 +180,8 @@ async def _request(
         preview = response.text.replace("\n", " ")[:400]
         if response.status_code == 404:
             raise NotionAPIError(
-                "База Notion не найдена или не расшарена на интеграцию Buy Bring Bot.",
+                "База Notion не найдена. Подключите её к интеграции Buy Bring Bot "
+                "(⋯ → Connections), даже если база в Private.",
                 status_code=404,
             )
         raise NotionAPIError(

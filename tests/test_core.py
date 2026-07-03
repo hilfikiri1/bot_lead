@@ -368,6 +368,16 @@ class TestNotionHelpers:
             mp.setattr(notion_service.settings, "notion_api_token", "secret")
             assert notion_service.is_configured() is True
 
+    def test_format_user_error_mentions_connections(self):
+        from app.services import notion_service
+
+        message = notion_service.format_user_error(
+            notion_service.NotionAPIError("object_not_found", status_code=404)
+        )
+        assert "Connections" in message
+        assert "Buy Bring Bot" in message
+        assert "Private" in message
+
     @pytest.mark.asyncio
     async def test_create_reminder_skips_notion_tasks(self):
         from app.services import command_router_service

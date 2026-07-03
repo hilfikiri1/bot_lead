@@ -389,6 +389,12 @@ class TestIncomingLeadsFilter:
         ), patch(
             "app.services.kommo_service.settings.kommo_unreviewed_pipeline_id",
             None,
+        ), patch(
+            "app.services.kommo_service.settings.kommo_unreviewed_use_unsorted",
+            False,
+        ), patch(
+            "app.services.kommo_service.settings.kommo_unreviewed_hide_numbered",
+            True,
         ):
             result = await get_all_unreviewed_leads()
 
@@ -419,6 +425,9 @@ class TestIncomingLeadsFilter:
         ), patch(
             "app.services.kommo_service.settings.kommo_unreviewed_pipeline_id",
             None,
+        ), patch(
+            "app.services.kommo_service.settings.kommo_unreviewed_use_unsorted",
+            False,
         ):
             result = await get_all_unreviewed_leads()
 
@@ -455,6 +464,9 @@ class TestIncomingLeadsFilter:
         ), patch(
             "app.services.kommo_service.settings.kommo_menu_pipeline_id",
             2,
+        ), patch(
+            "app.services.kommo_service.settings.kommo_unreviewed_use_unsorted",
+            False,
         ):
             result = await get_all_unreviewed_leads()
 
@@ -481,6 +493,65 @@ class TestIncomingLeadsFilter:
             scope = await resolve_unreviewed_status_scope()
 
         assert scope["status_pairs"] == {(5, 77)}
+
+    @pytest.mark.asyncio
+    async def test_unsorted_inbox_returns_facebook_leads(self):
+        from app.services.kommo_service import get_all_unreviewed_leads
+
+        unsorted_payload = {
+            "_embedded": {
+                "unsorted": [
+                    {
+                        "uid": "abc123",
+                        "source_name": "Buy and Bring Solutions",
+                        "category": "forms",
+                        "pipeline_id": 5,
+                        "created_at": 1719875520,
+                        "metadata": {"form_name": "Facebook lead"},
+                        "_embedded": {
+                            "leads": [{"id": 1001, "name": "Facebook №1363143882357932"}],
+                            "contacts": [{"id": 2001}],
+                        },
+                    },
+                    {
+                        "uid": "def456",
+                        "source_name": "Buy and Bring Solutions",
+                        "category": "forms",
+                        "pipeline_id": 5,
+                        "created_at": 1719868440,
+                        "_embedded": {
+                            "leads": [{"id": 1002}],
+                            "contacts": [{"id": 2002}],
+                        },
+                    },
+                ]
+            }
+        }
+        with patch(
+            "app.services.kommo_service._request",
+            new_callable=AsyncMock,
+            return_value=unsorted_payload,
+        ), patch(
+            "app.services.kommo_service.get_pipeline_index",
+            new_callable=AsyncMock,
+            return_value=({5: "Sales"}, {}),
+        ), patch(
+            "app.services.kommo_service.settings.kommo_unreviewed_pipeline_id",
+            5,
+        ), patch(
+            "app.services.kommo_service.settings.kommo_unreviewed_use_unsorted",
+            True,
+        ), patch(
+            "app.services.kommo_service.settings.kommo_unreviewed_hide_numbered",
+            False,
+        ):
+            result = await get_all_unreviewed_leads()
+
+        assert result["source"] == "unsorted"
+        assert result["status_label"] == "Неразобранное"
+        assert [lead["id"] for lead in result["leads"]] == [1001, 1002]
+        assert result["leads"][0]["name"] == "Facebook №1363143882357932"
+        assert result["leads"][1]["is_unsorted"] is True
 
 
 class TestGoogleSheetsCredentials:

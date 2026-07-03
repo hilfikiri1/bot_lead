@@ -1388,9 +1388,27 @@ async def resolve_unreviewed_status_scope() -> dict[str, Any]:
 async def get_all_unreviewed_leads(
     max_pages: int | None = None,
 ) -> dict[str, Any]:
-    """Return open Kommo leads in Incoming leads without an internal numeric prefix."""
+    """Return Kommo unreviewed leads from the unsorted inbox or pipeline stage."""
+    configured_pipeline = configured_unreviewed_pipeline_id()
+
+    if settings.kommo_unreviewed_use_unsorted:
+        result = await get_all_unsorted_leads(
+            max_pages=max_pages,
+            pipeline_id=configured_pipeline,
+        )
+        pipeline_name = result.get("pipeline_name")
+        if configured_pipeline and not pipeline_name:
+            pipeline_names, _ = await get_pipeline_index()
+            pipeline_name = pipeline_names.get(configured_pipeline)
+        return {
+            **result,
+            "pipeline_id": configured_pipeline,
+            "pipeline_name": pipeline_name,
+            "status_label": "Неразобранное",
+            "source": "unsorted",
+        }
+
     scope = await resolve_unreviewed_status_scope()
-    configured_pipeline = scope["pipeline_id"]
     status_pairs = scope["status_pairs"]
     pipeline_ids = scope["pipeline_ids"]
 
@@ -1408,7 +1426,9 @@ async def get_all_unreviewed_leads(
     )
     filtered: list[dict[str, Any]] = []
     for lead in result.get("leads") or []:
-        if lead_has_internal_id(lead.get("name")):
+        if settings.kommo_unreviewed_hide_numbered and lead_has_internal_id(
+            lead.get("name")
+        ):
             continue
         pair = (lead.get("pipeline_id"), lead.get("status_id"))
         if pair not in status_pairs:
@@ -1432,6 +1452,123 @@ async def get_all_unreviewed_leads(
         "status_id": next(iter(scope["status_ids"])) if len(scope["status_ids"]) == 1 else None,
         "status_ids": sorted(scope["status_ids"]),
         "status_label": scope["status_label"],
+        "source": "pipeline",
+    }
+
+
+def _lead_id_from_unsorted(item: dict[str, Any]) -> int | None:
+    leads = (item.get("_embedded") or {}).get("leads") or []
+    if not leads:
+        return None
+    lead_id = leads[0].get("id")
+    return lead_id if isinstance(lead_id, int) else None
+
+
+def _contact_id_from_unsorted(item: dict[str, Any]) -> int | None:
+    contacts = (item.get("_embedded") or {}).get("contacts") or []
+    if not contacts:
+        return None
+    contact_id = contacts[0].get("id")
+    return contact_id if isinstance(contact_id, int) else None
+
+
+def _unsorted_display_name(item: dict[str, Any], *, lead_name: str | None = None) -> str:
+    if lead_name and str(lead_name).strip():
+        return str(lead_name).strip()
+    metadata = item.get("metadata") or {}
+    for key in ("form_name", "source_name", "subject", "title"):
+        value = metadata.get(key) or item.get(key)
+        if value:
+            return str(value).strip()
+    source = item.get("source_name")
+    if source:
+        category = str(item.get("category") or "").strip()
+        if category:
+            return f"{source} ({category})"
+        return str(source).strip()
+    uid = str(item.get("uid") or "").strip()
+    if uid:
+        return f"Заявка {uid[:8]}"
+    return "Без названия"
+
+
+async def get_all_unsorted_leads(
+    *,
+    pipeline_id: int | None = None,
+    max_pages: int | None = None,
+) -> dict[str, Any]:
+    """Fetch Kommo incoming/unsorted leads (Неразобранное inbox)."""
+    page_cap = max(1, min(max_pages or settings.kommo_open_leads_max_pages, 20))
+    raw_items: list[dict[str, Any]] = []
+
+    for page in range(1, page_cap + 1):
+        params: dict[str, Any] = {
+            "page": page,
+            "limit": PAGE_SIZE,
+            "order[created_at]": "desc",
+        }
+        if pipeline_id is not None:
+            params["filter[pipeline_id]"] = pipeline_id
+        try:
+            data = await _request("GET", "/api/v4/leads/unsorted", params=params)
+        except KommoAPIError as exc:
+            if exc.status_code in {401, 403}:
+                raise KommoAPIError(
+                    "Нет доступа к неразобранным сделкам в Kommo. "
+                    "Проверьте права интеграции на чтение входящих заявок."
+                ) from exc
+            raise
+        if not data:
+            break
+        batch = (data.get("_embedded") or {}).get("unsorted") or []
+        if not batch:
+            break
+        raw_items.extend(batch)
+        if len(batch) < PAGE_SIZE:
+            break
+
+    pipeline_names, _ = await get_pipeline_index()
+    normalized: list[dict[str, Any]] = []
+    for item in raw_items:
+        lead_id = _lead_id_from_unsorted(item)
+        if lead_id is None:
+            continue
+        item_pipeline_id = item.get("pipeline_id")
+        if pipeline_id is not None and item_pipeline_id != pipeline_id:
+            continue
+        lead_name: str | None = None
+        embedded_leads = (item.get("_embedded") or {}).get("leads") or []
+        if embedded_leads:
+            lead_name = embedded_leads[0].get("name")
+        display_name = _unsorted_display_name(item, lead_name=lead_name)
+        if settings.kommo_unreviewed_hide_numbered and lead_has_internal_id(display_name):
+            continue
+        normalized.append(
+            {
+                "id": lead_id,
+                "unsorted_uid": item.get("uid"),
+                "name": display_name,
+                "pipeline_id": item_pipeline_id,
+                "pipeline_name": pipeline_names.get(
+                    item_pipeline_id, f"Воронка {item_pipeline_id}"
+                ),
+                "created_at": item.get("created_at"),
+                "source_name": item.get("source_name"),
+                "category": item.get("category"),
+                "metadata": item.get("metadata") or {},
+                "contact_id": _contact_id_from_unsorted(item),
+                "url": f"{_base_url()}/leads/detail/{lead_id}",
+                "is_unsorted": True,
+            }
+        )
+
+    pipeline_name = pipeline_names.get(pipeline_id) if pipeline_id else None
+    return {
+        "leads": normalized,
+        "open_count": len(normalized),
+        "pipeline_id": pipeline_id,
+        "pipeline_name": pipeline_name,
+        "scanned_count": len(raw_items),
     }
 
 
@@ -1448,6 +1585,26 @@ async def enrich_leads_with_contacts(
             details = await get_lead_details(lead_id)
         except Exception as exc:
             logger.warning("Could not enrich lead %s: %s", lead_id, exc)
+            contact_id = lead.get("contact_id")
+            if isinstance(contact_id, int):
+                try:
+                    contact = await _request("GET", f"/api/v4/contacts/{contact_id}") or {}
+                    phones, emails = _contact_channels(contact)
+                    enriched.append(
+                        {
+                            **lead,
+                            "contact_name": contact.get("name"),
+                            "phones": phones,
+                            "emails": emails,
+                        }
+                    )
+                    continue
+                except Exception as contact_exc:
+                    logger.warning(
+                        "Could not enrich unsorted contact %s: %s",
+                        contact_id,
+                        contact_exc,
+                    )
             enriched.append(lead)
             continue
         contacts = details.get("contacts") or []
@@ -1455,6 +1612,7 @@ async def enrich_leads_with_contacts(
         enriched.append(
             {
                 **lead,
+                "name": details.get("name") or lead.get("name"),
                 "contact_name": contact.get("name"),
                 "phones": contact.get("phones") or [],
                 "emails": contact.get("emails") or [],

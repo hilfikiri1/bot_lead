@@ -157,6 +157,10 @@ class Settings(BaseSettings):
     # Used when status_id is not set explicitly. Default Kommo stage: Incoming leads.
     kommo_unreviewed_status_name: str = "Incoming leads"
     kommo_unreviewed_page_size: int = 8
+    # True = Kommo inbox «Неразобранное» via /api/v4/leads/unsorted (Facebook forms etc.)
+    kommo_unreviewed_use_unsorted: bool = True
+    # When False, hide leads that already have internal name like "110 - Игрушки".
+    kommo_unreviewed_hide_numbered: bool = False
 
     # Google Sheets lead registry (read-only service account)
     google_sheets_spreadsheet_id: str = ""

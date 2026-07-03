@@ -1,7 +1,7 @@
 from functools import lru_cache
 from typing import List, Optional
 
-from pydantic import model_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -29,6 +29,20 @@ class Settings(BaseSettings):
     redis_url: str = "redis://redis:6379/0"
     celery_broker_url: str = "redis://redis:6379/0"
     celery_result_backend: str = "redis://redis:6379/1"
+
+    @field_validator(
+        "kommo_default_pipeline_id",
+        "kommo_default_status_id",
+        "kommo_menu_pipeline_id",
+        "kommo_unreviewed_pipeline_id",
+        "kommo_unreviewed_status_id",
+        mode="before",
+    )
+    @classmethod
+    def empty_optional_int(cls, value):
+        if value is None or value == "":
+            return None
+        return value
 
     @model_validator(mode="after")
     def resolve_redis_urls(self) -> "Settings":

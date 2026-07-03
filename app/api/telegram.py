@@ -380,6 +380,7 @@ async def _handle_text_command(
         chat_id=chat_id,
         telegram_user_id=user_id,
         context=context,
+        source_text=text,
     )
     if reply is not None:
         if reply:

@@ -248,6 +248,7 @@ async def _process(
                         chat_id=chat_id,
                         telegram_user_id=telegram_user_id,
                         context=command_context,
+                        source_text=transcript,
                     )
                 except Exception as exc:
                     logger.exception("Voice command execution failed")

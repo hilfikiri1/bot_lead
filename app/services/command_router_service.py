@@ -88,7 +88,7 @@ JSON schema:
   "client_reference": {"by": "name|active", "value": "string|null"},
   "note_text": "string|null",
   "task_title": "string|null",
-  "calendar": {"title": "string|null", "start_time": "ISO-8601|null", "duration_minutes": 15},
+  "calendar": {"title": "string|null", "start_time": "relative phrase like 'завтра в 10:00' or null", "duration_minutes": 15},
   "lead_updates": {"title": "string|null", "product": "string|null", "budget": "string|null"},
   "clarification_question": "string|null",
   "reply_language": "ru"
@@ -100,6 +100,9 @@ Rules:
 - "this deal/lead" means active context.
 - destructive intents should set clarification_question if target is ambiguous.
 - reply in Russian in clarification_question.
+- CONTEXT.now is the current local date/time in CONTEXT.timezone. Use it for "завтра", "сегодня", weekdays.
+- For calendar.start_time prefer relative phrases ("завтра в 10:00", "в пятницу в 15:30"). Do NOT output ISO dates with past years.
+- If the user gives only a day without time, use a reasonable default like 10:00 on that day.
 """
 
 
@@ -141,6 +144,12 @@ async def classify_message(
     elif not _looks_like_command(transcript):
         return CommandPlan("analyze_conversation", 0.9, {})
 
+    enriched_context = {
+        **context,
+        "now": datetime.now(tz=_manager_tz()).isoformat(),
+        "timezone": settings.google_calendar_timezone or settings.manager_timezone,
+    }
+
     response = await _client.chat.completions.create(
         model=settings.openai_model,
         messages=[
@@ -148,7 +157,7 @@ async def classify_message(
             {
                 "role": "user",
                 "content": (
-                    f"CONTEXT:\n{json.dumps(context, ensure_ascii=False)}\n\n"
+                    f"CONTEXT:\n{json.dumps(enriched_context, ensure_ascii=False)}\n\n"
                     f"COMMAND:\n{transcript}"
                 ),
             },
@@ -178,22 +187,43 @@ COMMAND_NOT_RECOGNIZED = (
 
 def _manager_tz() -> ZoneInfo:
     try:
-        return ZoneInfo(settings.manager_timezone)
+        tz_name = settings.google_calendar_timezone or settings.manager_timezone
+        return ZoneInfo(tz_name)
     except Exception:
         return ZoneInfo("UTC")
 
 
-def _parse_relative_time(value: str | None) -> str | None:
-    if not value:
-        return None
-    raw = value.strip()
-    try:
-        return datetime.fromisoformat(raw).astimezone(_manager_tz()).isoformat()
-    except ValueError:
-        pass
+_RELATIVE_DAY_WORDS = ("завтра", "сегодня", "послезавтра")
+_WEEKDAY_WORDS = (
+    "понедельник",
+    "вторник",
+    "среда",
+    "среду",
+    "четверг",
+    "пятница",
+    "пятницу",
+    "суббота",
+    "субботу",
+    "воскресенье",
+)
 
-    lowered = raw.casefold().replace("ё", "е")
-    now = datetime.now(tz=_manager_tz())
+
+def _contains_relative_time_hint(text: str) -> bool:
+    lowered = text.casefold().replace("ё", "е")
+    if any(word in lowered for word in _RELATIVE_DAY_WORDS):
+        return True
+    if "через" in lowered and "час" in lowered:
+        return True
+    if any(word in lowered for word in _WEEKDAY_WORDS):
+        return True
+    return bool(re.search(r"\b\d{1,2}[:\.]\d{2}\b", lowered))
+
+
+def _parse_relative_phrase(
+    lowered: str,
+    *,
+    now: datetime,
+) -> str | None:
     day_offset = 0
     if "послезавтра" in lowered:
         day_offset = 2
@@ -222,7 +252,7 @@ def _parse_relative_time(value: str | None) -> str | None:
 
     if day_offset or any(
         token in lowered
-        for token in ("завтра", "сегодня", "послезавтра", "в ", ":", ".")
+        for token in (*_RELATIVE_DAY_WORDS, "в ", ":", ".")
     ):
         target = (now + timedelta(days=day_offset)).replace(
             hour=hour, minute=minute, second=0, microsecond=0
@@ -233,20 +263,80 @@ def _parse_relative_time(value: str | None) -> str | None:
     return None
 
 
-def _resolve_calendar_start(raw: dict[str, Any], *, fallback_text: str) -> str | None:
+def _parse_iso_future(value: str, *, now: datetime) -> str | None:
+    tz = _manager_tz()
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=tz)
+    else:
+        parsed = parsed.astimezone(tz)
+    if parsed <= now:
+        return None
+    if parsed.year < now.year:
+        return None
+    return parsed.isoformat()
+
+
+def _looks_like_iso_datetime(text: str) -> bool:
+    return bool(re.match(r"^\d{4}-\d{2}-\d{2}", text.strip()))
+
+
+def _has_relative_day_words(lowered: str) -> bool:
+    if any(word in lowered for word in _RELATIVE_DAY_WORDS):
+        return True
+    if any(word in lowered for word in _WEEKDAY_WORDS):
+        return True
+    return "через" in lowered and "час" in lowered
+
+
+def _parse_relative_time(value: str | None, *, now: datetime | None = None) -> str | None:
+    if not value:
+        return None
+    raw = value.strip()
+    if not raw:
+        return None
+
+    tz = _manager_tz()
+    now = now or datetime.now(tz=tz)
+    lowered = raw.casefold().replace("ё", "е")
+    iso_like = _looks_like_iso_datetime(raw)
+    has_relative_words = _has_relative_day_words(lowered)
+
+    if has_relative_words or (not iso_like and _contains_relative_time_hint(raw)):
+        relative = _parse_relative_phrase(lowered, now=now)
+        if relative:
+            return relative
+
+    if iso_like:
+        return _parse_iso_future(raw, now=now)
+
+    return _parse_relative_phrase(lowered, now=now)
+
+
+def _resolve_calendar_start(
+    raw: dict[str, Any],
+    *,
+    source_text: str,
+    fallback_text: str,
+) -> str | None:
     calendar = raw.get("calendar") or {}
-    start_iso = calendar.get("start_time")
-    if start_iso:
-        parsed = _parse_relative_time(str(start_iso))
-        if parsed:
-            return parsed
-    for candidate in (
+    candidates: list[str] = []
+    for value in (
+        source_text,
+        calendar.get("start_time"),
         calendar.get("title"),
         raw.get("task_title"),
         raw.get("note_text"),
         fallback_text,
     ):
-        parsed = _parse_relative_time(str(candidate or ""))
+        clean = str(value or "").strip()
+        if clean and clean not in candidates:
+            candidates.append(clean)
+    for candidate in candidates:
+        parsed = _parse_relative_time(candidate)
         if parsed:
             return parsed
     return None
@@ -293,6 +383,7 @@ async def execute_plan(
     chat_id: int,
     telegram_user_id: int,
     context: dict[str, Any],
+    source_text: str = "",
 ) -> str | None:
     try:
         return await _execute_plan_body(
@@ -301,6 +392,7 @@ async def execute_plan(
             chat_id=chat_id,
             telegram_user_id=telegram_user_id,
             context=context,
+            source_text=source_text,
         )
     except notion_service.NotionAPIError as exc:
         logger.warning("Notion API error during command: %s", exc)
@@ -318,6 +410,7 @@ async def _execute_plan_body(
     chat_id: int,
     telegram_user_id: int,
     context: dict[str, Any],
+    source_text: str = "",
 ) -> str | None:
     if plan.intent == "analyze_conversation":
         return None
@@ -378,7 +471,11 @@ async def _execute_plan_body(
             or "Напоминание"
         ).strip()
         duration = int(calendar.get("duration_minutes") or 30)
-        start_iso = _resolve_calendar_start(raw, fallback_text=title)
+        start_iso = _resolve_calendar_start(
+            raw,
+            source_text=source_text,
+            fallback_text=title,
+        )
         calendar_requested = intent in {"create_calendar", "create_reminder"} or bool(
             start_iso
         )

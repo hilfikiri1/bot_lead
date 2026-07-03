@@ -129,16 +129,47 @@ class TestGoogleCalendarService:
             google_calendar_service, "configured_calendar_id", return_value="cal@test"
         ), patch.object(
             google_calendar_service, "_calendar_service", return_value=mock_service
+        ), patch.object(
+            google_calendar_service, "calendar_timezone", return_value="Europe/Warsaw"
         ):
             result = google_calendar_service.create_event(
                 title="Созвон",
                 description="test",
-                start_iso="2026-07-04T10:00:00+02:00",
-                end_iso="2026-07-04T10:30:00+02:00",
+                start_iso="2026-07-05T16:00:00+02:00",
+                end_iso="2026-07-05T16:30:00+02:00",
                 reminder_minutes=30,
             )
         assert result["event_id"] == "evt123"
         assert "calendar.google.com" in result["event_url"]
+        body = mock_service.events.return_value.insert.call_args.kwargs["body"]
+        assert body["start"] == {
+            "dateTime": "2026-07-05T16:00:00",
+            "timeZone": "Europe/Warsaw",
+        }
+        assert body["end"] == {
+            "dateTime": "2026-07-05T16:30:00",
+            "timeZone": "Europe/Warsaw",
+        }
+
+    def test_google_calendar_datetime_fields_naive_input(self):
+        tz = ZoneInfo("Europe/Warsaw")
+        fields = google_calendar_service.google_calendar_datetime_fields(
+            datetime(2026, 7, 5, 16, 0, 0),
+            tz,
+        )
+        assert fields == {
+            "dateTime": "2026-07-05T16:00:00",
+            "timeZone": "Europe/Warsaw",
+        }
+
+    def test_ensure_timezone_aware_naive(self):
+        tz = ZoneInfo("Europe/Warsaw")
+        aware = google_calendar_service.ensure_timezone_aware(
+            datetime(2026, 7, 5, 16, 0, 0),
+            tz,
+        )
+        assert aware.tzinfo == tz
+        assert aware.hour == 16
 
     def test_diagnose_reader_role_shows_write_error(self):
         with patch.object(google_calendar_service, "is_configured", return_value=True), patch.object(

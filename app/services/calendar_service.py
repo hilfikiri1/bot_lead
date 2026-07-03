@@ -151,11 +151,13 @@ def _resolve_event_times(
     start_time_iso: str | None,
     duration_minutes: int,
 ) -> tuple[datetime, datetime]:
-    manager_tz = ZoneInfo(settings.manager_timezone)
+    from app.services.calendar_event_builder import ensure_timezone_aware, manager_timezone
+
+    calendar_tz = manager_timezone()
 
     if start_time_iso:
         try:
-            start_dt = datetime.fromisoformat(start_time_iso)
+            start_dt = ensure_timezone_aware(datetime.fromisoformat(start_time_iso), calendar_tz)
         except ValueError:
             logger.warning(
                 "Could not parse start_time '%s', defaulting to tomorrow 10:00",
@@ -165,11 +167,7 @@ def _resolve_event_times(
     else:
         start_dt = _default_start()
 
-    if start_dt.tzinfo is None:
-        start_dt = start_dt.replace(tzinfo=manager_tz)
-    else:
-        start_dt = start_dt.astimezone(manager_tz)
-
+    start_dt = start_dt.astimezone(calendar_tz)
     duration_minutes = max(5, min(int(duration_minutes or 15), 8 * 60))
     return start_dt, start_dt + timedelta(minutes=duration_minutes)
 
@@ -194,8 +192,8 @@ def _create_google_event(
         return google_calendar_service.create_event(
             title=title,
             description=description,
-            start_iso=start_dt.isoformat(),
-            end_iso=end_dt.isoformat(),
+            start_dt=start_dt,
+            end_dt=end_dt,
             reminder_minutes=reminder_minutes,
         )
     except google_calendar_service.GoogleCalendarError as exc:
@@ -708,6 +706,7 @@ def test_google_connection(*, include_write_probe: bool = False) -> str:
 
 
 def _default_start() -> datetime:
-    manager_tz = ZoneInfo(settings.manager_timezone)
-    tomorrow = datetime.now(tz=manager_tz) + timedelta(days=1)
+    from app.services.calendar_event_builder import manager_timezone
+
+    tomorrow = datetime.now(tz=manager_timezone()) + timedelta(days=1)
     return tomorrow.replace(hour=10, minute=0, second=0, microsecond=0)

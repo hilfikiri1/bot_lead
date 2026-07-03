@@ -70,6 +70,12 @@ class ScheduledEventDraft:
         return self.end_at.isoformat()
 
 
+def ensure_timezone_aware(dt: datetime, tz: ZoneInfo | None = None) -> datetime:
+    if dt.tzinfo is not None:
+        return dt
+    return dt.replace(tzinfo=tz or manager_timezone())
+
+
 def manager_timezone() -> ZoneInfo:
     try:
         return ZoneInfo(settings.google_calendar_timezone or settings.manager_timezone)
@@ -399,7 +405,7 @@ def draft_from_lead_details(
         event_type=event_type,
         title=title,
         description=description,
-        start_at=start_at.astimezone(manager_timezone()),
+        start_at=ensure_timezone_aware(start_at).astimezone(manager_timezone()),
         duration_minutes=duration_minutes,
         reminder_minutes=reminder_minutes,
         kommo_lead_id=int(lead_details.get("id") or 0) or None,

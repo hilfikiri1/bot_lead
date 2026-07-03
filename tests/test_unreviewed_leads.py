@@ -555,6 +555,21 @@ class TestIncomingLeadsFilter:
 
 
 class TestGoogleSheetsCredentials:
+    def test_extract_spreadsheet_id_from_url(self):
+        from app.services import google_sheets_service as sheets
+
+        url = "https://docs.google.com/spreadsheets/d/abc123XYZ/edit#gid=0"
+        assert sheets.extract_spreadsheet_id(url) == "abc123XYZ"
+
+    def test_resolve_worksheet_name_case_insensitive(self):
+        from app.services import google_sheets_service as sheets
+
+        resolved = sheets.resolve_worksheet_name(
+            ["КРОТ Заявки BnB Польша", "Архив"],
+            "крот заявки bnb польша",
+        )
+        assert resolved == "КРОТ Заявки BnB Польша"
+
     def test_uses_calendar_service_account_when_sheets_json_missing(self):
         from app.services import google_sheets_service as sheets
 

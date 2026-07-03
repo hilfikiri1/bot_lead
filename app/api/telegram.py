@@ -398,6 +398,15 @@ async def _handle_notion_test(chat_id: int) -> None:
     await telegram_service.send_message(chat_id, report)
 
 
+async def _handle_sheets_test(chat_id: int) -> None:
+    await telegram_service.send_message(chat_id, "🔄 Проверяю Google Sheets…")
+    try:
+        report = google_sheets_service.diagnose_google_sheets(include_sample_rows=True)
+    except google_sheets_service.GoogleSheetsError as exc:
+        report = str(exc)
+    await telegram_service.send_message(chat_id, report)
+
+
 async def _handle_morning_digest(chat_id: int) -> None:
     if not settings.notion_api_token.strip():
         await telegram_service.send_message(
@@ -801,7 +810,7 @@ async def _start_unreviewed_matching(
         )
     except google_sheets_service.GoogleSheetsError as exc:
         await telegram_service.send_message(
-            chat_id, f"❌ <b>Ошибка Google Sheets</b>\n\n{html.escape(str(exc)[:500])}"
+            chat_id, f"❌ <b>Ошибка Google Sheets</b>\n\n{str(exc)[:900]}"
         )
         return
     except Exception as exc:
@@ -1109,6 +1118,9 @@ async def _handle_manager_callback(
         return True
     if callback_data == "menu:notion":
         await _handle_notion_test(chat_id)
+        return True
+    if callback_data == "menu:sheets":
+        await _handle_sheets_test(chat_id)
         return True
     if callback_data == "menu:jobs":
         await _show_audio_jobs(chat_id, user_id, db)
@@ -2059,7 +2071,7 @@ async def _handle_text_state(
         except google_sheets_service.GoogleSheetsError as exc:
             await telegram_service.send_message(
                 chat_id,
-                f"❌ <b>Ошибка Google Sheets</b>\n\n{html.escape(str(exc)[:500])}",
+                f"❌ <b>Ошибка Google Sheets</b>\n\n{str(exc)[:900]}",
             )
             return True
         await _show_unreviewed_preview(
@@ -2478,6 +2490,10 @@ async def telegram_webhook(
 
         if text.startswith("/notion_test"):
             await _handle_notion_test(chat_id)
+            return {"ok": True}
+
+        if text.startswith("/sheets_test"):
+            await _handle_sheets_test(chat_id)
             return {"ok": True}
 
         if text.startswith("/jobs"):

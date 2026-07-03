@@ -380,6 +380,7 @@ async def _handle_text_command(
         chat_id=chat_id,
         telegram_user_id=user_id,
         context=context,
+        source_text=text,
     )
     if reply is not None:
         if reply:
@@ -528,7 +529,9 @@ async def _build_calendar_draft_from_state(
 ) -> calendar_event_builder.ScheduledEventDraft:
     lead_id = int(state.get("kommo_lead_id") or 0)
     details = await kommo_service.get_lead_details(lead_id)
-    start_at = datetime.fromisoformat(str(state.get("start_iso")))
+    start_at = calendar_event_builder.ensure_timezone_aware(
+        datetime.fromisoformat(str(state.get("start_iso")))
+    )
     return calendar_event_builder.draft_from_lead_details(
         event_type=str(state.get("event_type") or "call"),
         lead_details=details,

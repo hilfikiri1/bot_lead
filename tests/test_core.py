@@ -496,6 +496,54 @@ class TestCommandRouter:
         parsed = _parse_relative_time("сегодня в 15:30")
         assert parsed is not None
 
+    def test_parse_relative_time_rejects_stale_llm_iso(self):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        from app.services.command_router_service import _parse_relative_time
+
+        tz = ZoneInfo("Europe/Warsaw")
+        now = datetime(2026, 7, 3, 9, 0, tzinfo=tz)
+        parsed = _parse_relative_time(
+            "напомни завтра позвонить клиенту",
+            now=now,
+        )
+        assert parsed is not None
+        assert parsed.startswith("2026-07-04")
+        assert "T10:00" in parsed
+
+        stale = _parse_relative_time("2023-10-06T12:00:00", now=now)
+        assert stale is None
+
+    def test_resolve_calendar_start_prefers_transcript_over_stale_iso(self):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        from app.services.command_router_service import _resolve_calendar_start
+
+        tz = ZoneInfo("Europe/Warsaw")
+        now = datetime(2026, 7, 3, 9, 0, tzinfo=tz)
+        with patch(
+            "app.services.command_router_service._parse_relative_time",
+            side_effect=lambda value, now=None: (
+                "2026-07-04T10:00:00+02:00"
+                if "завтра" in value
+                else None
+            ),
+        ):
+            resolved = _resolve_calendar_start(
+                {
+                    "calendar": {
+                        "title": "Позвонить клиенту",
+                        "start_time": "2023-10-06T12:00:00",
+                    },
+                    "task_title": "Позвонить клиенту",
+                },
+                source_text="напомни завтра позвонить клиенту",
+                fallback_text="Позвонить клиенту",
+            )
+        assert resolved == "2026-07-04T10:00:00+02:00"
+
 
 class TestTelegramStateSerialization:
     def test_dumps_state_serializes_datetime(self):

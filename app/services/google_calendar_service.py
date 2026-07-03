@@ -5,7 +5,9 @@ from __future__ import annotations
 import base64
 import json
 import logging
+from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from app.config import get_settings
 
@@ -32,6 +34,41 @@ def configured_calendar_id() -> str:
 
 def calendar_timezone() -> str:
     return (settings.google_calendar_timezone or settings.manager_timezone or "Europe/Warsaw").strip()
+
+
+def calendar_zoneinfo() -> ZoneInfo:
+    try:
+        return ZoneInfo(calendar_timezone())
+    except Exception:
+        return ZoneInfo("Europe/Warsaw")
+
+
+def ensure_timezone_aware(dt: datetime, tz: ZoneInfo | None = None) -> datetime:
+    """Attach calendar timezone when datetime has no tzinfo (e.g. after Redis round-trip)."""
+    if dt.tzinfo is not None:
+        return dt
+    return dt.replace(tzinfo=tz or calendar_zoneinfo())
+
+
+def google_calendar_datetime_fields(
+    dt: datetime | str,
+    tz: ZoneInfo | None = None,
+) -> dict[str, str]:
+    """Build Google Calendar start/end fields.
+
+    Google expects wall-clock local time in dateTime plus a separate timeZone field.
+    Including a UTC offset in dateTime together with timeZone can shift the event.
+    """
+    zone = tz or calendar_zoneinfo()
+    if isinstance(dt, str):
+        parsed = datetime.fromisoformat(dt)
+    else:
+        parsed = dt
+    local = ensure_timezone_aware(parsed, zone).astimezone(zone)
+    return {
+        "dateTime": local.strftime("%Y-%m-%dT%H:%M:%S"),
+        "timeZone": str(zone),
+    }
 
 
 def is_configured() -> bool:
@@ -220,18 +257,17 @@ def diagnose_google_calendar(*, include_write_probe: bool = False) -> dict[str, 
         return result
 
     if include_write_probe and result["read_ok"]:
-        from datetime import datetime, timedelta
-        from zoneinfo import ZoneInfo
+        from datetime import timedelta
 
-        tz = ZoneInfo(calendar_timezone())
+        tz = calendar_zoneinfo()
         start = datetime.now(tz=tz) + timedelta(hours=2)
         end = start + timedelta(minutes=5)
         try:
             probe = create_event(
                 title="BBS Bot write test",
                 description="Временная проверка записи. Будет удалена.",
-                start_iso=start.isoformat(),
-                end_iso=end.isoformat(),
+                start_dt=start,
+                end_dt=end,
                 reminder_minutes=0,
             )
             delete_event(probe["event_id"])
@@ -289,25 +325,38 @@ def create_event(
     *,
     title: str,
     description: str,
-    start_iso: str,
-    end_iso: str,
+    start_dt: datetime | None = None,
+    end_dt: datetime | None = None,
+    start_iso: str | None = None,
+    end_iso: str | None = None,
     reminder_minutes: int | None = None,
 ) -> dict[str, Any]:
     calendar_id = configured_calendar_id()
     if not calendar_id:
         raise GoogleCalendarError("GOOGLE_CALENDAR_ID не задан.")
 
+    zone = calendar_zoneinfo()
+    if start_dt is None:
+        if not start_iso:
+            raise GoogleCalendarError("Не указано время начала события.")
+        start_dt = ensure_timezone_aware(datetime.fromisoformat(start_iso), zone)
+    if end_dt is None:
+        if not end_iso:
+            raise GoogleCalendarError("Не указано время окончания события.")
+        end_dt = ensure_timezone_aware(datetime.fromisoformat(end_iso), zone)
+    start_dt = ensure_timezone_aware(start_dt, zone)
+    end_dt = ensure_timezone_aware(end_dt, zone)
+
     reminder = (
         reminder_minutes
         if reminder_minutes is not None
         else int(settings.google_calendar_default_reminder_minutes or 30)
     )
-    tz = calendar_timezone()
     event_body: dict[str, Any] = {
         "summary": title[:1024],
         "description": description[:8000],
-        "start": {"dateTime": start_iso, "timeZone": tz},
-        "end": {"dateTime": end_iso, "timeZone": tz},
+        "start": google_calendar_datetime_fields(start_dt, zone),
+        "end": google_calendar_datetime_fields(end_dt, zone),
     }
     if reminder > 0:
         event_body["reminders"] = {

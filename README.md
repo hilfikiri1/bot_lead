@@ -255,3 +255,9 @@ buybring/
 В проект добавлены безопасное подтверждение создания лидов Kommo, защита от дублей, статусы аудио, русский AI-отчёт, обновлённый Telegram UX и защита admin API.
 
 Подробности и инструкции Railway: [`PHASE1_RELEASE_NOTES.md`](PHASE1_RELEASE_NOTES.md).
+
+## Phase 2 (2026-07-03)
+
+Google Calendar (service account), неразобранные сделки Kommo с Google Sheets, редактирование сделок в Telegram, Notion auto-sync, голосовые команды менеджера, авто-миграции БД при старте.
+
+Подробности, env vars и чеклист после deployment: [`PHASE2_RELEASE_NOTES.md`](PHASE2_RELEASE_NOTES.md).

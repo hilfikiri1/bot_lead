@@ -44,22 +44,167 @@ def normalize_notion_id(value: str) -> str:
     return f"{clean[:8]}-{clean[8:12]}-{clean[12:16]}-{clean[16:20]}-{clean[20:]}"
 
 
-def resolve_notion_database_id(value: str) -> str:
-    """Accept UUID, hyphenated UUID, or full Notion URL (prefers ?v= for inline DB)."""
+def extract_notion_id_candidates(value: str) -> list[str]:
+    """Collect unique Notion UUID candidates from env value or pasted URL."""
     raw = (value or "").strip()
+    candidates: list[str] = []
+    seen: set[str] = set()
+
+    def add(candidate: str) -> None:
+        normalized = normalize_notion_id(candidate)
+        compact = re.sub(r"[^a-f0-9]", "", normalized)
+        if len(compact) == 32 and normalized not in seen:
+            seen.add(normalized)
+            candidates.append(normalized)
+
     if not raw:
-        return ""
+        return []
+
     if "notion.com" in raw or raw.startswith("http"):
-        view_match = re.search(r"[?&]v=([a-f0-9-]{32,36})", raw, re.I)
-        if view_match:
-            return normalize_notion_id(view_match.group(1))
-        page_match = re.search(r"/(?:p|database)/([a-f0-9-]{32,36})", raw, re.I)
-        if page_match:
-            return normalize_notion_id(page_match.group(1))
-        hex_match = re.search(r"([a-f0-9]{32})", raw, re.I)
-        if hex_match:
-            return normalize_notion_id(hex_match.group(1))
-    return normalize_notion_id(raw)
+        for match in re.finditer(r"[?&]v=([a-f0-9-]{32,36})", raw, re.I):
+            add(match.group(1))
+        for match in re.finditer(r"/database/([a-f0-9-]{32,36})", raw, re.I):
+            add(match.group(1))
+        for match in re.finditer(r"/p/([a-f0-9-]{32,36})", raw, re.I):
+            add(match.group(1))
+        for match in re.finditer(r"-([a-f0-9]{32})(?:[/?#]|$)", raw, re.I):
+            add(match.group(1))
+        for match in re.finditer(r"([a-f0-9]{32})", raw, re.I):
+            add(match.group(1))
+    else:
+        add(raw)
+
+    return candidates
+
+
+def resolve_notion_database_id(value: str) -> str:
+    """Return the first parsed candidate ID."""
+    candidates = extract_notion_id_candidates(value)
+    return candidates[0] if candidates else ""
+
+
+async def retrieve_database(database_id: str) -> dict[str, Any]:
+    return await _request("GET", f"/databases/{database_id}")
+
+
+def _database_title(data: dict[str, Any]) -> str:
+    title = data.get("title") or []
+    if isinstance(title, list) and title:
+        first = title[0]
+        if isinstance(first, dict):
+            plain = first.get("plain_text")
+            if plain:
+                return str(plain)
+    return "Без названия"
+
+
+def _database_property_names(data: dict[str, Any]) -> list[str]:
+    props = data.get("properties") or {}
+    return sorted(str(name) for name in props.keys())
+
+
+async def resolve_accessible_database_id(
+    raw_value: str,
+    *,
+    label: str = "database",
+) -> tuple[str | None, list[dict[str, Any]]]:
+    """Try each parsed ID until Notion returns the database metadata."""
+    candidates = extract_notion_id_candidates(raw_value)
+    attempts: list[dict[str, Any]] = []
+    if not candidates:
+        return None, attempts
+
+    for candidate in candidates:
+        try:
+            data = await retrieve_database(candidate)
+            attempts.append(
+                {
+                    "id": candidate,
+                    "ok": True,
+                    "title": _database_title(data),
+                    "properties": _database_property_names(data),
+                }
+            )
+            return candidate, attempts
+        except NotionAPIError as exc:
+            attempts.append(
+                {
+                    "id": candidate,
+                    "ok": False,
+                    "error": str(exc)[:160],
+                    "status_code": exc.status_code,
+                }
+            )
+    return None, attempts
+
+
+async def run_notion_diagnostics() -> str:
+    """Detailed Telegram report for Notion token and database access."""
+    lines = ["<b>🔌 Проверка Notion</b>", ""]
+
+    if not settings.notion_api_token.strip():
+        lines.append("❌ <code>NOTION_API_TOKEN</code> не задан.")
+        return "\n".join(lines)
+
+    try:
+        me = await _request("GET", "/users/me")
+        bot_name = me.get("name") or me.get("id") or "интеграция"
+        lines.append(f"✅ Токен OK · <b>{html_escape(str(bot_name))}</b>")
+    except NotionAPIError as exc:
+        lines.append(f"❌ Токен: {html_escape(str(exc))}")
+        return "\n".join(lines)
+
+    checks = [
+        ("Tasks", settings.notion_tasks_database_id, True),
+        ("Clients", settings.notion_clients_database_id, False),
+        ("Leads", settings.notion_leads_database_id, False),
+        ("Calls", settings.notion_calls_database_id, False),
+    ]
+
+    for name, raw_value, required in checks:
+        lines.append("")
+        if not (raw_value or "").strip():
+            if required:
+                lines.append(f"⚠️ <b>{name}</b>: переменная не задана")
+            continue
+
+        lines.append(f"<b>{name}</b>")
+        candidates = extract_notion_id_candidates(raw_value)
+        if len(candidates) > 1:
+            lines.append(f"ID из ссылки: {len(candidates)} вариантов")
+        db_id, attempts = await resolve_accessible_database_id(raw_value, label=name)
+        for attempt in attempts:
+            mark = "✅" if attempt.get("ok") else "❌"
+            lines.append(f"{mark} <code>{html_escape(attempt['id'])}</code>")
+            if attempt.get("ok"):
+                lines.append(f"   Название: <b>{html_escape(attempt.get('title') or '—')}</b>")
+                props = attempt.get("properties") or []
+                if props:
+                    preview = ", ".join(html_escape(prop) for prop in props[:12])
+                    suffix = "…" if len(props) > 12 else ""
+                    lines.append(f"   Поля: {preview}{suffix}")
+            else:
+                lines.append(f"   {html_escape(str(attempt.get('error') or 'ошибка'))}")
+
+        if db_id and name == "Tasks":
+            try:
+                sample = await query_database(db_id, page_size=3)
+                lines.append(f"   Записей в выборке: <b>{len(sample)}</b>")
+            except NotionAPIError as exc:
+                lines.append(f"   ⚠️ Query: {html_escape(str(exc)[:160])}")
+
+    lines.extend(["", notion_access_instructions(compact=True)])
+    lines.append("")
+    lines.append(
+        "Если все ID ❌ — откройте базу в Notion (не меню сбоку), "
+        "справа вверху <b>⋯ → Connections → Buy Bring Bot</b>."
+    )
+    return "\n".join(lines)
+
+
+async def _tasks_database_id() -> str | None:
+    db_id, _ = await resolve_accessible_database_id(settings.notion_tasks_database_id)
+    return db_id
 
 
 def _database_id(value: str) -> str:
@@ -95,7 +240,8 @@ def format_user_error(exc: NotionAPIError) -> str:
     if exc.status_code == 404 or "object_not_found" in str(exc).lower():
         return (
             "❌ <b>База Notion не найдена</b>\n\n"
-            f"{notion_access_instructions()}"
+            f"{notion_access_instructions()}\n\n"
+            "Запустите <code>/notion_test</code> — бот проверит все ID из ссылки."
         )
     if exc.status_code == 401:
         return "❌ <b>Notion отклонил токен</b>\n\nПроверьте <code>NOTION_API_TOKEN</code>."
@@ -511,7 +657,7 @@ async def create_task_page(
     lead_page_id: str | None = None,
     source: str = "AI",
 ) -> str | None:
-    db_id = _database_id(settings.notion_tasks_database_id)
+    db_id = await _tasks_database_id()
     if not db_id:
         return None
 
@@ -691,39 +837,48 @@ async def delete_page_soft(page_id: str) -> None:
 
 
 async def get_morning_digest() -> str:
-    db_id = _database_id(settings.notion_tasks_database_id)
+    db_id = await _tasks_database_id()
     if not db_id:
-        return "Notion tasks database не настроена."
+        _, attempts = await resolve_accessible_database_id(settings.notion_tasks_database_id)
+        tried = ", ".join(item["id"] for item in attempts) or "—"
+        raise NotionAPIError(
+            f"Tasks DB недоступна. Проверены ID: {tried}. Запустите /notion_test.",
+            status_code=404,
+        )
 
     tz = ZoneInfo(settings.manager_timezone)
     today = datetime.now(tz=tz).date()
     tomorrow = today + timedelta(days=1)
 
-    due_tasks = await query_database(
-        db_id,
-        filter_body={
-            "and": [
-                {"property": "Status", "select": {"equals": "Todo"}},
-                {
-                    "or": [
-                        {"property": "Due", "date": {"equals": today.isoformat()}},
-                        {"property": "Due", "date": {"equals": tomorrow.isoformat()}},
-                    ]
-                },
-            ]
-        },
-        page_size=20,
-    )
-    goals = await query_database(
-        db_id,
-        filter_body={
-            "and": [
-                {"property": "Type", "select": {"equals": "Goal"}},
-                {"property": "Status", "select": {"equals": "Todo"}},
-            ]
-        },
-        page_size=10,
-    )
+    try:
+        due_tasks = await query_database(
+            db_id,
+            filter_body={
+                "and": [
+                    {"property": "Status", "select": {"equals": "Todo"}},
+                    {
+                        "or": [
+                            {"property": "Due", "date": {"equals": today.isoformat()}},
+                            {"property": "Due", "date": {"equals": tomorrow.isoformat()}},
+                        ]
+                    },
+                ]
+            },
+            page_size=20,
+        )
+        goals = await query_database(
+            db_id,
+            filter_body={
+                "and": [
+                    {"property": "Type", "select": {"equals": "Goal"}},
+                    {"property": "Status", "select": {"equals": "Todo"}},
+                ]
+            },
+            page_size=10,
+        )
+    except NotionAPIError:
+        due_tasks = await query_database(db_id, page_size=20)
+        goals = []
 
     lines = ["<b>Утренний дайджест</b>", ""]
     if goals:

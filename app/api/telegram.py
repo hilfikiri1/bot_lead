@@ -25,10 +25,12 @@ from app.services import (
     calendar_service,
     command_router_service,
     crm_service,
+    google_sheets_service,
     kommo_service,
     notion_service,
     telegram_service,
     telegram_state_service,
+    unreviewed_leads_service,
 )
 from app.tasks.voice_note_tasks import process_voice_note, process_voice_note_async
 
@@ -625,6 +627,258 @@ async def _show_lead_edit_preview(
     )
 
 
+async def _show_unreviewed_page(chat_id: int, user_id: int, page: int = 1) -> None:
+    if not _is_allowed_user(user_id):
+        await telegram_service.send_message(chat_id, "Доступ запрещён.")
+        return
+    await telegram_service.send_message(
+        chat_id, "🔄 Загружаю неразобранные сделки из Kommo…"
+    )
+    try:
+        result = await kommo_service.get_unreviewed_leads_page(page=page)
+    except Exception as exc:
+        await telegram_service.send_message(
+            chat_id,
+            f"❌ <b>Не удалось загрузить сделки</b>\n\n{html.escape(str(exc)[:500])}",
+        )
+        return
+    await telegram_service.send_unreviewed_lead_selection_menu(
+        chat_id, result, page=page
+    )
+
+
+async def _show_unreviewed_lead_card(
+    chat_id: int,
+    lead_id: int,
+    *,
+    return_page: int = 1,
+) -> None:
+    details = await kommo_service.get_lead_details(lead_id)
+    await telegram_service.send_unreviewed_lead_card(
+        chat_id, details, return_page=return_page
+    )
+
+
+async def _store_unreviewed_preview_state(
+    user_id: int,
+    chat_id: int,
+    *,
+    lead_id: int,
+    return_page: int,
+    current_name: str,
+    preview: dict[str, Any],
+) -> None:
+    await telegram_state_service.set_state(
+        user_id,
+        {
+            "mode": "unreviewed_preview",
+            "chat_id": chat_id,
+            "kommo_lead_id": lead_id,
+            "return_page": return_page,
+            "lead_name": current_name,
+            "preview": preview,
+        },
+        ttl_seconds=settings.telegram_state_ttl_minutes * 60,
+    )
+
+
+async def _show_unreviewed_preview(
+    chat_id: int,
+    user_id: int,
+    *,
+    lead_id: int,
+    return_page: int,
+    current_name: str,
+    preview: dict[str, Any],
+) -> None:
+    await _store_unreviewed_preview_state(
+        user_id,
+        chat_id,
+        lead_id=lead_id,
+        return_page=return_page,
+        current_name=current_name,
+        preview=preview,
+    )
+    await telegram_service.send_unreviewed_rename_preview(
+        chat_id,
+        lead_id=lead_id,
+        return_page=return_page,
+        current_name=current_name,
+        preview=preview,
+    )
+
+
+def _candidate_display(candidate: Any) -> dict[str, Any]:
+    row = candidate.row
+    return {
+        "row_number": row.row_number,
+        "lead_number": row.lead_number,
+        "product": row.product,
+        "phone": row.phone,
+        "client_name": row.client_name,
+        "company": row.company,
+    }
+
+
+async def _start_unreviewed_matching(
+    chat_id: int,
+    user_id: int,
+    lead_id: int,
+    return_page: int,
+    *,
+    force_refresh: bool = False,
+) -> None:
+    if not google_sheets_service.is_configured():
+        await telegram_service.send_message(
+            chat_id,
+            (
+                "❌ <b>Google Sheets не настроен</b>\n\n"
+                "Задайте GOOGLE_SHEETS_SPREADSHEET_ID, GOOGLE_SHEETS_WORKSHEET_NAME "
+                "и GOOGLE_SHEETS_SERVICE_ACCOUNT_JSON в Railway Variables."
+            ),
+        )
+        return
+    await telegram_service.send_message(
+        chat_id, "🔄 Ищу строку в таблице и готовлю название…"
+    )
+    try:
+        details = await kommo_service.get_lead_details(lead_id)
+        match = await unreviewed_leads_service.match_lead_from_sheets(
+            details, force_refresh=force_refresh
+        )
+    except google_sheets_service.GoogleSheetsError as exc:
+        await telegram_service.send_message(
+            chat_id, f"❌ <b>Ошибка Google Sheets</b>\n\n{html.escape(str(exc)[:500])}"
+        )
+        return
+    except Exception as exc:
+        await telegram_service.send_message(
+            chat_id,
+            f"❌ <b>Не удалось сопоставить строку</b>\n\n{html.escape(str(exc)[:500])}",
+        )
+        return
+
+    if match.is_empty:
+        await telegram_service.send_unreviewed_no_match(
+            chat_id, lead_id=lead_id, return_page=return_page
+        )
+        return
+    if len(match.candidates) > 1:
+        await telegram_service.send_unreviewed_match_candidates(
+            chat_id,
+            lead_id=lead_id,
+            return_page=return_page,
+            candidates=[_candidate_display(item) for item in match.candidates],
+        )
+        return
+
+    candidate = match.single
+    if not candidate:
+        await telegram_service.send_unreviewed_no_match(
+            chat_id, lead_id=lead_id, return_page=return_page
+        )
+        return
+    try:
+        preview = await unreviewed_leads_service.build_preview_from_row(
+            candidate.row, candidate=candidate
+        )
+    except ValueError as exc:
+        await telegram_service.send_message(chat_id, f"❌ {html.escape(str(exc))}")
+        return
+    await _show_unreviewed_preview(
+        chat_id,
+        user_id,
+        lead_id=lead_id,
+        return_page=return_page,
+        current_name=str(details.get("name") or ""),
+        preview=preview,
+    )
+
+
+async def _confirm_unreviewed_rename(
+    chat_id: int,
+    user_id: int,
+    db: AsyncSession,
+    *,
+    lead_id: int,
+    return_page: int,
+    allow_replace: bool = False,
+) -> None:
+    state = await telegram_state_service.get_state(user_id)
+    if not state or state.get("mode") != "unreviewed_preview":
+        await telegram_service.send_message(
+            chat_id, "⚠️ Сессия устарела. Откройте сделку заново."
+        )
+        return
+    if int(state.get("kommo_lead_id") or 0) != lead_id:
+        await telegram_service.send_message(chat_id, "❌ Сделка в сессии не совпадает.")
+        return
+    preview = dict(state.get("preview") or {})
+    current_name = str(state.get("lead_name") or "")
+    try:
+        details = await kommo_service.get_lead_details(lead_id)
+        current_name = str(details.get("name") or current_name)
+    except Exception:
+        pass
+
+    existing_number, _ = unreviewed_leads_service.parse_internal_lead_name(current_name)
+    new_number = str(preview.get("spreadsheet_lead_number") or "").strip()
+    if existing_number and existing_number != new_number and not allow_replace:
+        await telegram_service.send_unreviewed_replace_warning(
+            chat_id,
+            lead_id=lead_id,
+            return_page=return_page,
+            current_name=current_name,
+            preview=preview,
+        )
+        return
+
+    await telegram_service.send_message(chat_id, "⏳ Обновляю название в Kommo…")
+    try:
+        result = await unreviewed_leads_service.apply_lead_rename(
+            db,
+            lead_id=lead_id,
+            current_name=current_name,
+            preview=preview,
+            telegram_user_id=user_id,
+            allow_replace=allow_replace,
+        )
+    except ValueError as exc:
+        if str(exc) == "replace_required":
+            await telegram_service.send_unreviewed_replace_warning(
+                chat_id,
+                lead_id=lead_id,
+                return_page=return_page,
+                current_name=current_name,
+                preview=preview,
+            )
+            return
+        await telegram_service.send_message(
+            chat_id, f"❌ {html.escape(str(exc)[:500])}"
+        )
+        return
+    except kommo_service.KommoAPIError as exc:
+        await telegram_service.send_message(
+            chat_id,
+            f"❌ <b>Ошибка Kommo</b>\n\n{html.escape(str(exc)[:500])}",
+        )
+        return
+    except Exception as exc:
+        await telegram_service.send_message(
+            chat_id,
+            f"❌ <b>Не удалось обновить сделку</b>\n\n{html.escape(str(exc)[:500])}",
+        )
+        return
+
+    await telegram_state_service.clear_state(user_id)
+    await telegram_service.send_unreviewed_success(
+        chat_id,
+        lead_id=lead_id,
+        return_page=return_page,
+        result=result,
+    )
+
+
 async def _prompt_search(chat_id: int, user_id: int) -> None:
     await telegram_state_service.set_state(
         user_id,
@@ -843,6 +1097,174 @@ async def _handle_manager_callback(
     if callback_data.startswith("menu:leads:"):
         page = int(callback_data.rsplit(":", 1)[1])
         await _show_lead_page(chat_id, user_id, page)
+        return True
+    if callback_data.startswith("menu:unrev:"):
+        page = int(callback_data.rsplit(":", 1)[1])
+        await _show_unreviewed_page(chat_id, user_id, page)
+        return True
+    if callback_data.startswith("unrev:view:"):
+        _, _, lead_id_raw, page_raw = callback_data.split(":", 3)
+        await _show_unreviewed_lead_card(
+            chat_id, int(lead_id_raw), return_page=int(page_raw)
+        )
+        return True
+    if callback_data.startswith("unrev:add:"):
+        _, _, lead_id_raw, page_raw = callback_data.split(":", 3)
+        await _start_unreviewed_matching(
+            chat_id, user_id, int(lead_id_raw), int(page_raw)
+        )
+        return True
+    if callback_data.startswith("unrev:refresh:"):
+        _, _, lead_id_raw, page_raw = callback_data.split(":", 3)
+        google_sheets_service.clear_cache()
+        await _start_unreviewed_matching(
+            chat_id,
+            user_id,
+            int(lead_id_raw),
+            int(page_raw),
+            force_refresh=True,
+        )
+        return True
+    if callback_data.startswith("unrev:manual:"):
+        _, _, lead_id_raw, page_raw = callback_data.split(":", 3)
+        lead_id = int(lead_id_raw)
+        return_page = int(page_raw)
+        await telegram_state_service.set_state(
+            user_id,
+            {
+                "mode": "unreviewed_manual_entry",
+                "chat_id": chat_id,
+                "kommo_lead_id": lead_id,
+                "return_page": return_page,
+            },
+            ttl_seconds=settings.telegram_state_ttl_minutes * 60,
+        )
+        await telegram_service.send_message(
+            chat_id,
+            (
+                "🔎 <b>Ввод номера лида</b>\n\n"
+                "Отправьте внутренний номер из колонки Y таблицы. "
+                "Например: <code>110</code>"
+            ),
+            reply_markup={
+                "inline_keyboard": [
+                    [
+                        {
+                            "text": "⬅️ Назад",
+                            "callback_data": f"unrev:view:{lead_id}:{return_page}",
+                        }
+                    ]
+                ]
+            },
+        )
+        return True
+    if callback_data.startswith("unrev:pick:"):
+        _, _, row_number_raw, lead_id_raw, page_raw = callback_data.split(":", 4)
+        row_number = int(row_number_raw)
+        lead_id = int(lead_id_raw)
+        return_page = int(page_raw)
+        row = google_sheets_service.get_row_by_number(row_number)
+        if not row:
+            await telegram_service.send_message(
+                chat_id, "❌ Строка таблицы не найдена. Обновите кэш."
+            )
+            return True
+        try:
+            preview = await unreviewed_leads_service.build_preview_from_row(row)
+            details = await kommo_service.get_lead_details(lead_id)
+        except ValueError as exc:
+            await telegram_service.send_message(chat_id, f"❌ {html.escape(str(exc))}")
+            return True
+        await _show_unreviewed_preview(
+            chat_id,
+            user_id,
+            lead_id=lead_id,
+            return_page=return_page,
+            current_name=str(details.get("name") or ""),
+            preview=preview,
+        )
+        return True
+    if callback_data.startswith("unrev:confirm:"):
+        _, _, lead_id_raw, page_raw = callback_data.split(":", 3)
+        await _confirm_unreviewed_rename(
+            chat_id,
+            user_id,
+            db,
+            lead_id=int(lead_id_raw),
+            return_page=int(page_raw),
+        )
+        return True
+    if callback_data.startswith("unrev:replace:"):
+        _, _, lead_id_raw, page_raw = callback_data.split(":", 3)
+        await _confirm_unreviewed_rename(
+            chat_id,
+            user_id,
+            db,
+            lead_id=int(lead_id_raw),
+            return_page=int(page_raw),
+            allow_replace=True,
+        )
+        return True
+    if callback_data.startswith("unrev:editname:"):
+        _, _, lead_id_raw, page_raw = callback_data.split(":", 3)
+        lead_id = int(lead_id_raw)
+        return_page = int(page_raw)
+        state = await telegram_state_service.get_state(user_id)
+        if not state or state.get("mode") != "unreviewed_preview":
+            await telegram_service.send_message(chat_id, "⚠️ Сессия устарела.")
+            return True
+        await telegram_state_service.set_state(
+            user_id,
+            {**state, "mode": "unreviewed_edit_name"},
+            ttl_seconds=settings.telegram_state_ttl_minutes * 60,
+        )
+        await telegram_service.send_message(
+            chat_id,
+            (
+                "✏️ <b>Изменить название</b>\n\n"
+                "Отправьте полное новое название сделки.\n"
+                f"Сейчас: <b>{html.escape(str((state.get('preview') or {}).get('proposed_name') or '—'))}</b>"
+            ),
+            reply_markup={
+                "inline_keyboard": [
+                    [
+                        {
+                            "text": "⬅️ Назад",
+                            "callback_data": f"unrev:preview:{lead_id}:{return_page}",
+                        }
+                    ]
+                ]
+            },
+        )
+        return True
+    if callback_data.startswith("unrev:preview:"):
+        _, _, lead_id_raw, page_raw = callback_data.split(":", 3)
+        lead_id = int(lead_id_raw)
+        return_page = int(page_raw)
+        state = await telegram_state_service.get_state(user_id)
+        if not state or int(state.get("kommo_lead_id") or 0) != lead_id:
+            await telegram_service.send_message(chat_id, "⚠️ Сессия устарела.")
+            return True
+        preview = dict(state.get("preview") or {})
+        current_name = str(state.get("lead_name") or "")
+        await _show_unreviewed_preview(
+            chat_id,
+            user_id,
+            lead_id=lead_id,
+            return_page=return_page,
+            current_name=current_name,
+            preview=preview,
+        )
+        return True
+    if callback_data.startswith("unrev:repick:"):
+        _, _, lead_id_raw, page_raw = callback_data.split(":", 3)
+        await _start_unreviewed_matching(
+            chat_id, user_id, int(lead_id_raw), int(page_raw), force_refresh=True
+        )
+        return True
+    if callback_data.startswith("unrev:next:"):
+        page = int(callback_data.rsplit(":", 1)[1])
+        await _show_unreviewed_page(chat_id, user_id, page)
         return True
     if callback_data.startswith("lead:view:"):
         _, _, lead_id_raw, page_raw = callback_data.split(":", 3)
@@ -1415,6 +1837,59 @@ async def _handle_text_state(
             result,
             page=1,
             search_mode=True,
+        )
+        return True
+
+    if mode == "unreviewed_manual_entry":
+        lead_id = int(state.get("kommo_lead_id") or 0)
+        return_page = int(state.get("return_page") or 1)
+        lead_number = text.strip()
+        if not lead_number.isdigit():
+            await telegram_service.send_message(
+                chat_id, "Введите числовой внутренний номер лида."
+            )
+            return True
+        try:
+            preview = await unreviewed_leads_service.build_preview_from_manual_number(
+                lead_number
+            )
+            details = await kommo_service.get_lead_details(lead_id)
+        except ValueError as exc:
+            await telegram_service.send_message(chat_id, f"❌ {html.escape(str(exc))}")
+            return True
+        except google_sheets_service.GoogleSheetsError as exc:
+            await telegram_service.send_message(
+                chat_id,
+                f"❌ <b>Ошибка Google Sheets</b>\n\n{html.escape(str(exc)[:500])}",
+            )
+            return True
+        await _show_unreviewed_preview(
+            chat_id,
+            user_id,
+            lead_id=lead_id,
+            return_page=return_page,
+            current_name=str(details.get("name") or ""),
+            preview=preview,
+        )
+        return True
+
+    if mode == "unreviewed_edit_name":
+        lead_id = int(state.get("kommo_lead_id") or 0)
+        return_page = int(state.get("return_page") or 1)
+        preview = dict(state.get("preview") or {})
+        new_name = text.strip()
+        if not new_name:
+            await telegram_service.send_message(chat_id, "Название не может быть пустым.")
+            return True
+        preview["proposed_name"] = new_name[:255]
+        current_name = str(state.get("lead_name") or "")
+        await _show_unreviewed_preview(
+            chat_id,
+            user_id,
+            lead_id=lead_id,
+            return_page=return_page,
+            current_name=current_name,
+            preview=preview,
         )
         return True
 

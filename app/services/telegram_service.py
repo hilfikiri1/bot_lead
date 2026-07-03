@@ -399,6 +399,12 @@ async def send_main_menu(chat_id: int) -> dict:
             [
                 {"text": "📅 Проверить календарь", "callback_data": "menu:calendar"},
             ],
+            [
+                {
+                    "text": "📥 Неразобранные сделки",
+                    "callback_data": "menu:unrev:1",
+                },
+            ],
         ]
     }
     return await send_message(
@@ -874,3 +880,338 @@ def format_audio_jobs(jobs: list[Any]) -> str:
             block += f"\nОшибка: <code>{_esc(job.processing_error[:300])}</code>"
         lines.append(block)
     return "\n\n".join(lines)
+
+
+def _unreviewed_lead_button_label(lead: dict[str, Any]) -> str:
+    name = _short_button_title(lead.get("name"), limit=24)
+    contact = lead.get("contact_name")
+    if contact:
+        suffix = _short_button_title(contact, limit=12)
+        label = f"{name} · {suffix}"
+    else:
+        label = name
+    return label if len(label) <= 38 else label[:37] + "…"
+
+
+async def send_unreviewed_lead_selection_menu(
+    chat_id: int,
+    result: dict[str, Any],
+    *,
+    page: int = 1,
+) -> dict:
+    leads = result.get("leads") or []
+    total = result.get("open_count", len(leads))
+    total_pages = result.get("total_pages", 1)
+    page = result.get("page", page)
+    if not leads:
+        return await send_message(
+            chat_id,
+            (
+                "📥 <b>Неразобранные сделки</b>\n\n"
+                "Сейчас нет открытых сделок без внутреннего номера."
+            ),
+            reply_markup={
+                "inline_keyboard": [
+                    [{"text": "🔄 Обновить", "callback_data": "menu:unrev:1"}],
+                    [{"text": "🏠 Главное меню", "callback_data": "menu:home"}],
+                ]
+            },
+        )
+
+    rows: list[list[dict[str, Any]]] = []
+    for lead in leads:
+        lead_id = lead.get("id")
+        if isinstance(lead_id, int):
+            rows.append(
+                [
+                    {
+                        "text": _unreviewed_lead_button_label(lead),
+                        "callback_data": f"unrev:view:{lead_id}:{page}",
+                    }
+                ]
+            )
+    if total_pages > 1:
+        nav: list[dict[str, Any]] = []
+        if page > 1:
+            nav.append({"text": "⬅️ Назад", "callback_data": f"menu:unrev:{page - 1}"})
+        nav.append({"text": f"{page}/{total_pages}", "callback_data": "noop"})
+        if page < total_pages:
+            nav.append({"text": "➡️ Далее", "callback_data": f"menu:unrev:{page + 1}"})
+        rows.append(nav)
+    rows.append([{"text": "🏠 Главное меню", "callback_data": "menu:home"}])
+
+    pipeline_name = result.get("pipeline_name")
+    pipeline_suffix = (
+        f" · воронка <b>{_esc(pipeline_name)}</b>" if pipeline_name else ""
+    )
+    lines = [
+        "📥 <b>Неразобранные сделки</b>",
+        f"Всего: <b>{total}</b>{pipeline_suffix} · стр. {page}/{total_pages}",
+        "",
+    ]
+    for lead in leads[:5]:
+        phones = ", ".join(lead.get("phones") or []) or "—"
+        created = _format_unix_timestamp(lead.get("created_at"))
+        lines.append(
+            f"• <b>{_esc(lead.get('name'))}</b>\n"
+            f"  ID <code>{_esc(lead.get('id'))}</code> · "
+            f"{_esc(lead.get('contact_name') or '—')} · "
+            f"{_esc(phones)} · {created}"
+        )
+    if len(leads) > 5:
+        lines.append(f"<i>…и ещё {len(leads) - 5} на этой странице</i>")
+    lines.append("\nВыберите сделку:")
+    return await send_message(
+        chat_id,
+        "\n".join(lines),
+        reply_markup={"inline_keyboard": rows},
+    )
+
+
+def format_unreviewed_lead_card(details: dict[str, Any]) -> str:
+    contacts = details.get("contacts") or []
+    contact = contacts[0] if contacts else {}
+    phones = ", ".join(contact.get("phones") or []) or "—"
+    emails = ", ".join(contact.get("emails") or []) or "—"
+    created = _format_unix_timestamp(details.get("created_at"))
+    return (
+        "📥 <b>НЕРАЗОБРАННАЯ СДЕЛКА</b>\n\n"
+        f"Название: {_esc(details.get('name'))}\n"
+        f"Kommo ID: <code>{_esc(details.get('id'))}</code>\n"
+        f"Клиент: {_esc(contact.get('name') or '—')}\n"
+        f"Телефон: {_esc(phones)}\n"
+        f"Email: {_esc(emails)}\n"
+        f"Этап: {_esc(details.get('status_name'))}\n"
+        f"Создана: {created}"
+    )
+
+
+async def send_unreviewed_lead_card(
+    chat_id: int,
+    details: dict[str, Any],
+    *,
+    return_page: int = 1,
+) -> dict:
+    lead_id = int(details["id"])
+    keyboard = {
+        "inline_keyboard": [
+            [
+                {
+                    "text": "➕ Добавить ID",
+                    "callback_data": f"unrev:add:{lead_id}:{return_page}",
+                }
+            ],
+            [
+                {"text": "🔗 Открыть Kommo", "url": details.get("url")},
+                {
+                    "text": "⬅️ Назад",
+                    "callback_data": f"menu:unrev:{return_page}",
+                },
+            ],
+            [{"text": "🏠 Главное меню", "callback_data": "menu:home"}],
+        ]
+    }
+    return await send_message(
+        chat_id, format_unreviewed_lead_card(details), reply_markup=keyboard
+    )
+
+
+async def send_unreviewed_match_candidates(
+    chat_id: int,
+    *,
+    lead_id: int,
+    return_page: int,
+    candidates: list[dict[str, Any]],
+) -> dict:
+    rows: list[list[dict[str, Any]]] = []
+    for item in candidates[:8]:
+        row_number = item.get("row_number")
+        label = (
+            f"{item.get('lead_number')} · "
+            f"{_short_button_title(item.get('product'), 18)}"
+        )
+        rows.append(
+            [
+                {
+                    "text": label[:38],
+                    "callback_data": f"unrev:pick:{row_number}:{lead_id}:{return_page}",
+                }
+            ]
+        )
+    rows.extend(
+        [
+            [
+                {
+                    "text": "⬅️ Назад",
+                    "callback_data": f"unrev:view:{lead_id}:{return_page}",
+                }
+            ],
+            [{"text": "🏠 Главное меню", "callback_data": "menu:home"}],
+        ]
+    )
+    lines = ["⚠️ <b>Найдено несколько строк</b>", "", "Выберите правильный вариант:", ""]
+    for item in candidates[:8]:
+        lines.append(
+            f"• <b>{_esc(item.get('lead_number'))}</b> · "
+            f"{_esc(item.get('product'))}\n"
+            f"  {_esc(item.get('phone') or '—')} · "
+            f"{_esc(item.get('client_name') or item.get('company') or '—')}"
+        )
+    return await send_message(
+        chat_id, "\n".join(lines), reply_markup={"inline_keyboard": rows}
+    )
+
+
+async def send_unreviewed_no_match(
+    chat_id: int,
+    *,
+    lead_id: int,
+    return_page: int,
+) -> dict:
+    return await send_message(
+        chat_id,
+        (
+            "❌ <b>Строка в таблице не найдена</b>\n\n"
+            "Проверьте номер телефона, email или имя клиента."
+        ),
+        reply_markup={
+            "inline_keyboard": [
+                [
+                    {
+                        "text": "🔎 Ввести номер лида вручную",
+                        "callback_data": f"unrev:manual:{lead_id}:{return_page}",
+                    }
+                ],
+                [
+                    {
+                        "text": "🔄 Обновить таблицу",
+                        "callback_data": f"unrev:refresh:{lead_id}:{return_page}",
+                    }
+                ],
+                [
+                    {
+                        "text": "⬅️ Назад",
+                        "callback_data": f"unrev:view:{lead_id}:{return_page}",
+                    }
+                ],
+            ]
+        },
+    )
+
+
+async def send_unreviewed_rename_preview(
+    chat_id: int,
+    *,
+    lead_id: int,
+    return_page: int,
+    current_name: str,
+    preview: dict[str, Any],
+) -> dict:
+    text = (
+        "✏️ <b>ПРОВЕРКА НАЗВАНИЯ</b>\n\n"
+        f"Текущее название:\n{_esc(current_name)}\n\n"
+        "Строка таблицы:\n"
+        f"ID: {_esc(preview.get('spreadsheet_lead_number'))}\n"
+        f"Товар: {_esc(preview.get('original_product'))}\n\n"
+        f"Название по-русски:\n{_esc(preview.get('short_product_ru'))}\n\n"
+        f"Новое название:\n<b>{_esc(preview.get('proposed_name'))}</b>"
+    )
+    keyboard = {
+        "inline_keyboard": [
+            [
+                {
+                    "text": "✅ Обновить название",
+                    "callback_data": f"unrev:confirm:{lead_id}:{return_page}",
+                }
+            ],
+            [
+                {
+                    "text": "✏️ Изменить название",
+                    "callback_data": f"unrev:editname:{lead_id}:{return_page}",
+                },
+                {
+                    "text": "🔄 Выбрать другую строку",
+                    "callback_data": f"unrev:repick:{lead_id}:{return_page}",
+                },
+            ],
+            [
+                {
+                    "text": "❌ Отмена",
+                    "callback_data": f"unrev:view:{lead_id}:{return_page}",
+                }
+            ],
+        ]
+    }
+    return await send_message(chat_id, text, reply_markup=keyboard)
+
+
+async def send_unreviewed_replace_warning(
+    chat_id: int,
+    *,
+    lead_id: int,
+    return_page: int,
+    current_name: str,
+    preview: dict[str, Any],
+) -> dict:
+    return await send_message(
+        chat_id,
+        (
+            "⚠️ <b>У сделки уже есть внутренний номер</b>\n\n"
+            f"Текущее название:\n{_esc(current_name)}\n\n"
+            f"Новая строка:\n<b>{_esc(preview.get('proposed_name'))}</b>\n\n"
+            "Заменить существующий номер?"
+        ),
+        reply_markup={
+            "inline_keyboard": [
+                [
+                    {
+                        "text": "⚠️ Да, заменить",
+                        "callback_data": f"unrev:replace:{lead_id}:{return_page}",
+                    }
+                ],
+                [
+                    {
+                        "text": "❌ Отмена",
+                        "callback_data": f"unrev:view:{lead_id}:{return_page}",
+                    }
+                ],
+            ]
+        },
+    )
+
+
+async def send_unreviewed_success(
+    chat_id: int,
+    *,
+    lead_id: int,
+    return_page: int,
+    result: dict[str, Any],
+) -> dict:
+    return await send_message(
+        chat_id,
+        (
+            "✅ <b>НАЗВАНИЕ ОБНОВЛЕНО</b>\n\n"
+            f"<b>{_esc(result.get('lead_name'))}</b>\n\n"
+            f"Kommo ID: <code>{lead_id}</code>\n"
+            f"Внутренний номер: {_esc(result.get('internal_number'))}\n"
+            f"Категория: {_esc(result.get('short_product_ru'))}"
+        ),
+        reply_markup={
+            "inline_keyboard": [
+                [{"text": "🔗 Открыть Kommo", "url": result.get("url")}],
+                [
+                    {
+                        "text": "➡️ Следующая сделка",
+                        "callback_data": f"unrev:next:{return_page}",
+                    }
+                ],
+                [
+                    {
+                        "text": "📥 К списку",
+                        "callback_data": f"menu:unrev:{return_page}",
+                    },
+                    {"text": "🏠 Главное меню", "callback_data": "menu:home"},
+                ],
+            ]
+        },
+    )

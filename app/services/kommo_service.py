@@ -613,6 +613,7 @@ async def get_all_open_leads(
                 ),
                 "responsible_user_id": lead.get("responsible_user_id"),
                 "updated_at": lead.get("updated_at"),
+                "created_at": lead.get("created_at"),
                 "closest_task_at": lead.get("closest_task_at"),
                 "url": f"{_base_url()}/leads/detail/{lead.get('id')}",
             }
@@ -1261,4 +1262,96 @@ async def create_lead_task(
         "complete_till": complete_till,
         "text": clean_text,
         "url": details.get("url"),
+    }
+
+
+_UNREVIEWED_NAME_RE = re.compile(r"^\d+\s*-\s*.+$")
+
+
+def lead_has_internal_id(name: Any) -> bool:
+    return bool(_UNREVIEWED_NAME_RE.match(str(name or "").strip()))
+
+
+def configured_unreviewed_pipeline_id() -> int | None:
+    return settings.kommo_unreviewed_pipeline_id
+
+
+def configured_unreviewed_status_id() -> int | None:
+    return settings.kommo_unreviewed_status_id
+
+
+async def get_all_unreviewed_leads(
+    max_pages: int | None = None,
+) -> dict[str, Any]:
+    """Return open Kommo leads that do not yet have an internal numeric prefix."""
+    pipeline_id = configured_unreviewed_pipeline_id()
+    status_id = configured_unreviewed_status_id()
+    result = await get_all_open_leads(max_pages=max_pages, pipeline_id=pipeline_id)
+    filtered: list[dict[str, Any]] = []
+    for lead in result.get("leads") or []:
+        if lead_has_internal_id(lead.get("name")):
+            continue
+        if status_id is not None and lead.get("status_id") != status_id:
+            continue
+        filtered.append(lead)
+    return {
+        **result,
+        "leads": filtered,
+        "open_count": len(filtered),
+        "pipeline_id": pipeline_id,
+        "status_id": status_id,
+    }
+
+
+async def enrich_leads_with_contacts(
+    leads: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    enriched: list[dict[str, Any]] = []
+    for lead in leads:
+        lead_id = lead.get("id")
+        if not isinstance(lead_id, int):
+            enriched.append(lead)
+            continue
+        try:
+            details = await get_lead_details(lead_id)
+        except Exception as exc:
+            logger.warning("Could not enrich lead %s: %s", lead_id, exc)
+            enriched.append(lead)
+            continue
+        contacts = details.get("contacts") or []
+        contact = contacts[0] if contacts else {}
+        enriched.append(
+            {
+                **lead,
+                "contact_name": contact.get("name"),
+                "phones": contact.get("phones") or [],
+                "emails": contact.get("emails") or [],
+                "created_at": details.get("created_at") or lead.get("created_at"),
+                "url": details.get("url") or lead.get("url"),
+            }
+        )
+    return enriched
+
+
+async def get_unreviewed_leads_page(
+    page: int = 1, page_size: int | None = None
+) -> dict[str, Any]:
+    """Return one Telegram page of unreviewed Kommo leads."""
+    page_size = page_size or settings.kommo_unreviewed_page_size
+    page_size = max(1, min(page_size, 10))
+    result = await get_all_unreviewed_leads()
+    leads = result.get("leads") or []
+    total = len(leads)
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    page = max(1, min(page, total_pages))
+    start = (page - 1) * page_size
+    page_leads = leads[start : start + page_size]
+    page_leads = await enrich_leads_with_contacts(page_leads)
+    return {
+        **result,
+        "leads": page_leads,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": total_pages,
+        "open_count": total,
     }

@@ -3,72 +3,41 @@ version: "3.9"
 services:
   db:
     image: postgres:16-alpine
-    restart: unless-stopped
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-buybring}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-buybring}
-      POSTGRES_DB: ${POSTGRES_DB:-buybring}
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: catalog_bot
     volumes:
       - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d catalog_bot"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
     ports:
       - "5432:5432"
+
+  bot:
+    build: .
+    env_file:
+      - .env
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - browser_session:/app/storage/browser
+      - temporary_storage:/app/storage/temporary
+      - output_storage:/app/storage/output
+    ports:
+      - "8080:8080"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-buybring}"]
-      interval: 5s
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/health || exit 1"]
+      interval: 15s
       timeout: 5s
       retries: 10
 
-  redis:
-    image: redis:7-alpine
-    restart: unless-stopped
-    ports:
-      - "6379:6379"
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-
-  api:
-    build: .
-    restart: unless-stopped
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
-    env_file: .env
-    volumes:
-      - .:/app
-      - ./storage:/app/storage
-    ports:
-      - "8000:8000"
-    depends_on:
-      db:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-
-  worker:
-    build: .
-    restart: unless-stopped
-    command: celery -A app.celery_app:celery_app worker --loglevel=info -Q voice_notes --concurrency=2
-    env_file: .env
-    volumes:
-      - .:/app
-      - ./storage:/app/storage
-    depends_on:
-      db:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-
-  flower:
-    build: .
-    restart: unless-stopped
-    command: celery -A app.celery_app:celery_app flower --port=5555
-    env_file: .env
-    ports:
-      - "5555:5555"
-    depends_on:
-      - redis
-      - worker
-
 volumes:
   pgdata:
+  browser_session:
+  temporary_storage:
+  output_storage:

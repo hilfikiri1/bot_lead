@@ -1,263 +1,230 @@
-# Buy & Bring Solutions — Voice Bot MVP
+# Babrik Solutions 1688 Catalog Bot (MVP)
 
-Automated voice note processing for B2B sourcing calls.  
-A manager records a voice note after a client call → the system transcribes, analyses, and generates follow-up drafts.
+Telegram-бот принимает ссылку на товар 1688.com, извлекает данные через Playwright, структурирует русскоязычный контент через OpenAI Structured Outputs и формирует PDF-каталог в фирменном стиле Babrik Solutions.
 
----
+## Архитектура
 
-## Architecture
+- `aiogram 3.x` — Telegram polling bot (готов к расширению под webhook).
+- `FastAPI` — `/health` endpoint.
+- `Playwright (Chromium)` — динамический парсинг карточек 1688 и HTML→PDF.
+- `OpenAI Responses API` + `JSON Schema` — перевод и структурирование текста.
+- `PostgreSQL` + `SQLAlchemy async` + `Alembic` — хранение задач `catalog_jobs`.
+- `Jinja2 + CSS` — шаблон каталога.
+- `Pillow` — нормализация изображений.
 
+## Структура проекта
+
+```text
+app/
+  main.py
+  config.py
+  logging_config.py
+  exceptions.py
+  bot/
+    __init__.py
+    handlers/
+      __init__.py
+      start.py
+      product_link.py
+    keyboards/__init__.py
+    middlewares/__init__.py
+    messages.py
+  parser/
+    __init__.py
+    models.py
+    url_validator.py
+    browser.py
+    parser_1688.py
+    selectors.py
+    image_downloader.py
+    session_manager.py
+  ai/
+    __init__.py
+    openai_client.py
+    schemas.py
+    prompts.py
+  catalog/
+    __init__.py
+    formatting.py
+    renderer.py
+    models.py
+    templates/catalog.html
+    static/catalog.css
+    static/fonts/.gitkeep
+  database/
+    __init__.py
+    base.py
+    session.py
+    models.py
+    repositories.py
+    migrations/.gitkeep
+  services/
+    catalog_service.py
+    task_service.py
+    cleanup_service.py
+  api/health.py
+  utils/
+    filenames.py
+    retry.py
+    images.py
+scripts/
+  login_1688.py
+tests/
+  fixtures/product_1688_sample.html
+  test_url_validator.py
+  test_openai_schema.py
+  test_catalog_renderer.py
+  test_parser_fixtures.py
+storage/
+  temporary/.gitkeep
+  output/.gitkeep
+  browser/.gitkeep
+migrations/
+  env.py
+  versions/001_catalog_jobs.py
+Dockerfile
+docker-compose.yml
+pyproject.toml
+.env.example
+alembic.ini
 ```
-Telegram Bot
-    │  (voice note)
-    ▼
-FastAPI Webhook
-    │
-    ▼
-Celery Worker (Redis queue)
-    │
-    ├── Download audio (Telegram API)
-    ├── Save to storage (local / S3)
-    ├── Transcribe (OpenAI Whisper)
-    ├── Analyse (GPT-4o, JSON schema)
-    ├── Save to PostgreSQL
-    │      ├── clients
-    │      ├── leads
-    │      ├── voice_notes
-    │      ├── ai_reports
-    │      └── actions
-    └── Send report to Telegram (with inline buttons)
-            │
-            ▼ (manager approves)
-    ┌───────────────────────────────────┐
-    │  Gmail Draft  │  Calendar Event   │
-    │  WhatsApp*    │  CRM Save         │
-    └───────────────────────────────────┘
-    * Draft only — NOT sent automatically
-```
 
----
+## 1) Создать Telegram-бота через BotFather
 
-## Services
+1. Откройте `@BotFather`.
+2. Выполните `/newbot`.
+3. Скопируйте токен в `.env` → `TELEGRAM_BOT_TOKEN`.
 
-| File | Responsibility |
-|------|---------------|
-| `telegram_service.py` | Download voice notes, send reports, handle callbacks |
-| `transcription_service.py` | OpenAI Whisper transcription |
-| `ai_analysis_service.py` | GPT-4o structured JSON analysis |
-| `storage_service.py` | Local / S3 audio file storage |
-| `gmail_service.py` | Create Gmail drafts (never auto-sends) |
-| `calendar_service.py` | Create Google Calendar events after approval |
-| `whatsapp_service.py` | Prepare WhatsApp drafts (disabled until verified) |
-| `crm_service.py` | Save clients, leads, voice notes, reports to DB |
-| `approval_service.py` | Route inline button callbacks to correct actions |
+## 2) Получить OpenAI API key
 
----
+1. Создайте ключ в OpenAI Console.
+2. Сохраните в `.env` → `OPENAI_API_KEY`.
 
-## Quick Start
-
-### 1. Clone & configure
+## 3) Заполнить `.env`
 
 ```bash
-git clone <repo>
-cd buybring
 cp .env.example .env
-# Edit .env with your credentials
 ```
 
-### 2. Google OAuth setup
+Отредактируйте значения токенов и при необходимости бренд-настройки.
 
-1. Go to [Google Cloud Console](https://console.cloud.google.com)
-2. Create a project → Enable **Gmail API** and **Google Calendar API**
-3. Create OAuth 2.0 credentials (Desktop app or Web)
-4. Download `credentials.json` → save to `credentials/google_oauth.json`
-5. Add your email to the test users list (while in testing mode)
+## 4) Куда положить логотип
 
-### 3. Telegram Bot setup
+Путь по умолчанию:
 
-1. Talk to [@BotFather](https://t.me/BotFather) → `/newbot`
-2. Copy the token to `TELEGRAM_BOT_TOKEN` in `.env`
-3. Set `WEBHOOK_BASE_URL` to your public HTTPS domain
-   - For local dev, use [ngrok](https://ngrok.com): `ngrok http 8000`
+```text
+app/catalog/static/logo.png
+```
 
-### 4. Start with Docker Compose
+Если файл отсутствует, используется текстовый логотип.
+
+## 5) Запустить PostgreSQL
 
 ```bash
-docker-compose up --build
+docker compose up -d db
 ```
 
-### 5. Authorize Google (first time)
+## 6) Выполнить Alembic migrations
+
+Локально:
 
 ```bash
-# Open in browser:
-http://localhost:8000/auth/google
-# Follow the OAuth flow → credentials saved automatically
+alembic upgrade head
 ```
 
-### 6. Register the Telegram webhook
+В Docker миграции выполняются при старте сервиса `bot`.
 
-The webhook auto-registers on startup if `WEBHOOK_BASE_URL` is set.  
-To register manually:
-```bash
-curl -X POST "https://api.telegram.org/bot<TOKEN>/setWebhook" \
-  -d "url=https://your-domain.com/webhook/telegram" \
-  -d "secret_token=your_secret"
-```
-
-### 7. Run database migrations
+## 7) Установить Playwright локально
 
 ```bash
-docker-compose exec api alembic upgrade head
+pip install -e .
+playwright install chromium
 ```
 
----
-
-## Usage
-
-1. Open your Telegram bot
-2. Send a voice message describing a client call
-3. The bot replies with a structured report:
-   - Client details (name, company, language, phone, email)
-   - Product, budget, country/city, urgency
-   - What was covered in the call
-   - Mistakes / weak points in the conversation
-   - Missing questions to ask the client
-   - Recommended next step
-   - Email draft (in client's language)
-   - WhatsApp message draft
-   - Calendar follow-up event
-4. Tap inline buttons to approve actions:
-   - **✉️ Create Gmail draft** → creates draft in your Gmail
-   - **📅 Add to Calendar** → creates event in Google Calendar
-   - **💬 Send WhatsApp draft to me** → sends draft text to your Telegram
-   - **💾 Save to CRM** → updates lead in database
-   - **❌ Cancel** → no action taken
-
----
-
-## Admin API
-
-```
-GET /admin/leads         — List all leads
-GET /admin/leads/{id}    — Lead detail with voice notes, reports, actions
-GET /admin/clients       — List all clients
-GET /admin/reports       — List all AI reports
-GET /health              — Health check
-GET /docs                — Swagger UI
-```
-
----
-
-## Environment Variables
-
-See `.env.example` for the full list.
-
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `DATABASE_URL` | ✅ | PostgreSQL async URL |
-| `REDIS_URL` | ✅ | Redis connection |
-| `TELEGRAM_BOT_TOKEN` | ✅ | From BotFather |
-| `TELEGRAM_WEBHOOK_SECRET` | ✅ | Random secret for webhook validation |
-| `WEBHOOK_BASE_URL` | ✅ | Public HTTPS URL for your service |
-| `OPENAI_API_KEY` | ✅ | OpenAI API key |
-| `GOOGLE_CLIENT_ID` | ✅ | For Gmail + Calendar |
-| `GOOGLE_CLIENT_SECRET` | ✅ | For Gmail + Calendar |
-| `STORAGE_BACKEND` | ❌ | `local` (default) or `s3` |
-| `WHATSAPP_ENABLED` | ❌ | `false` by default — enable after business verification |
-
----
-
-## Running Tests
+## 8) Выполнить ручной вход в 1688
 
 ```bash
-# In container
-docker-compose exec api pytest tests/ -v
-
-# Locally
-pip install -r requirements.txt
-pytest tests/ -v
+python scripts/login_1688.py
 ```
 
----
+Скрипт сохранит сессию в:
 
-## WhatsApp Integration
-
-WhatsApp sending is **disabled by default** and requires:
-1. Meta Business Account verification
-2. WhatsApp Business API approval
-3. `WHATSAPP_ENABLED=true` + `WHATSAPP_PHONE_NUMBER_ID` + `WHATSAPP_ACCESS_TOKEN` in `.env`
-
-Until enabled, the "Send WhatsApp draft" button forwards the draft text to the manager's Telegram for manual copy-paste.
-
----
-
-## Security Notes
-
-- API keys are stored in environment variables only
-- Gmail creates drafts only — never auto-sends
-- WhatsApp is disabled by default
-- All AI outputs logged with `raw_json` in `ai_reports`
-- All user approvals logged in `actions` table
-- Telegram webhook validated with secret token
-- Retry logic on Whisper, OpenAI, Telegram, and Google APIs
-
----
-
-## Project Structure
-
-```
-buybring/
-├── app/
-│   ├── main.py                  # FastAPI app + lifespan
-│   ├── config.py                # Pydantic settings
-│   ├── database.py              # SQLAlchemy async engine
-│   ├── celery_app.py            # Celery configuration
-│   ├── api/
-│   │   ├── telegram.py          # Webhook endpoint
-│   │   ├── admin.py             # Admin REST endpoints
-│   │   └── auth.py              # Google OAuth flow
-│   ├── models/
-│   │   ├── client.py
-│   │   ├── lead.py
-│   │   ├── voice_note.py
-│   │   ├── ai_report.py
-│   │   └── action.py
-│   ├── services/
-│   │   ├── telegram_service.py
-│   │   ├── transcription_service.py
-│   │   ├── ai_analysis_service.py
-│   │   ├── storage_service.py
-│   │   ├── gmail_service.py
-│   │   ├── calendar_service.py
-│   │   ├── whatsapp_service.py
-│   │   ├── crm_service.py
-│   │   └── approval_service.py
-│   └── tasks/
-│       └── voice_note_tasks.py
-├── migrations/
-│   ├── env.py
-│   └── versions/
-│       └── 001_initial.py
-├── tests/
-│   └── test_core.py
-├── docker-compose.yml
-├── Dockerfile
-├── alembic.ini
-├── requirements.txt
-├── .env.example
-└── README.md
+```text
+storage/browser/1688_storage_state.json
 ```
 
----
+## 9) Запуск проекта локально
 
-## Phase 1 (2026-06-29)
+```bash
+python -m app.main
+```
 
-В проект добавлены безопасное подтверждение создания лидов Kommo, защита от дублей, статусы аудио, русский AI-отчёт, обновлённый Telegram UX и защита admin API.
+## 10) Запуск через Docker Compose
 
-Подробности и инструкции Railway: [`PHASE1_RELEASE_NOTES.md`](PHASE1_RELEASE_NOTES.md).
+```bash
+docker compose up --build
+```
 
-## Phase 2 (2026-07-03)
+## 11) Проверка `/health`
 
-Google Calendar (service account), неразобранные сделки Kommo с Google Sheets, редактирование сделок в Telegram, Notion auto-sync, голосовые команды менеджера, авто-миграции БД при старте.
+```bash
+curl http://localhost:8080/health
+```
 
-Подробности, env vars и чеклист после deployment: [`PHASE2_RELEASE_NOTES.md`](PHASE2_RELEASE_NOTES.md).
+Ожидается:
+
+```json
+{"status":"ok"}
+```
+
+## 12) Отправка тестовой ссылки
+
+1. Напишите боту `/start`.
+2. Отправьте ссылку вида:
+   `https://detail.1688.com/offer/xxxxxxxx.html`
+
+## 13) Ограничения парсинга 1688
+
+- 1688 динамический и может менять структуру.
+- Часть полей может отсутствовать.
+- При отсутствии цены в PDF выводится: `Цена уточняется у поставщика.`
+
+## 14) Что делать при CAPTCHA
+
+Если бот сообщает про CAPTCHA/авторизацию:
+
+1. Повторите ручной вход `python scripts/login_1688.py`.
+2. Проверьте актуальность `PLAYWRIGHT_STORAGE_STATE`.
+
+## 15) Как изменить фирменные цвета
+
+Измените в `.env`:
+
+- `BRAND_PRIMARY_COLOR`
+- `BRAND_ACCENT_COLOR`
+- `BRAND_TEXT_COLOR`
+
+## 16) Как заменить логотип
+
+1. Положите PNG в `app/catalog/static/logo.png`.
+2. Или измените путь `BRAND_LOGO_PATH` в `.env`.
+
+## Команды разработки
+
+```bash
+pip install -e ".[dev]"
+pytest
+```
+
+## Безопасность и SSRF-защита
+
+- Разрешён только `https`.
+- Домены только `1688.com` и поддомены.
+- Блокируются `localhost` и внутренние IP.
+- Повторная проверка домена после redirect.
+
+## Примечания по MVP
+
+- Одна задача = одна ссылка = один товар.
+- Не обрабатываются массовые загрузки, CRM, оплата, anti-captcha сервисы.
+- OpenAI не создаёт PDF — только структурирует текст, PDF генерируется локально через Jinja2 + Playwright.

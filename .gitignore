@@ -7,6 +7,13 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
-storage/
+storage/*
+!storage/.gitkeep
+!storage/temporary/
+!storage/temporary/.gitkeep
+!storage/output/
+!storage/output/.gitkeep
+!storage/browser/
+!storage/browser/.gitkeep
 credentials/
 *.log

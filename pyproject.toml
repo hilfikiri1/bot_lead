@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "babrik-1688-catalog-bot"
+version = "0.1.0"
+description = "Telegram bot that parses 1688 products and generates Babrik Solutions catalogs"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "aiogram>=3.13.1",
+  "alembic>=1.13.2",
+  "asyncpg>=0.29.0",
+  "fastapi>=0.115.0",
+  "httpx>=0.27.2",
+  "jinja2>=3.1.4",
+  "openai>=1.98.0",
+  "pillow>=10.4.0",
+  "playwright>=1.46.0",
+  "pydantic>=2.9.2",
+  "pydantic-settings>=2.5.2",
+  "python-json-logger>=2.0.7",
+  "sqlalchemy>=2.0.35",
+  "structlog>=24.4.0",
+  "uvicorn>=0.30.6",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3.2",
+  "pytest-asyncio>=0.24.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.setuptools.packages.find]
+include = ["app*"]

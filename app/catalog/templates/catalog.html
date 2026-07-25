@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{{ brand_name }} - Product Catalog</title>
+  <link rel="stylesheet" href="{{ css_path }}">
+</head>
+<body style="--brand-primary: {{ brand_primary_color }}; --brand-accent: {{ brand_accent_color }}; --brand-text: {{ brand_text_color }};">
+  <section class="page cover">
+    <header class="cover-header">
+      {% if logo_path %}
+      <img src="{{ logo_path }}" alt="logo" class="logo" />
+      {% else %}
+      <div class="logo-text">{{ brand_name }}</div>
+      {% endif %}
+      <div class="title-block">
+        <div class="catalog-label">PRODUCT CATALOG</div>
+        <h1>{{ content.product_name_ru }}</h1>
+        <p class="original-name">{{ content.original_name_zh }}</p>
+      </div>
+    </header>
+    {% if image_paths %}
+    <img src="{{ image_paths[0] }}" alt="main image" class="main-image" />
+    {% endif %}
+    <div class="summary-grid">
+      <div><strong>Цена:</strong> {{ content.price_display }}</div>
+      {% if content.moq_display %}<div><strong>MOQ:</strong> {{ content.moq_display }}</div>{% endif %}
+      <div><strong>Дата:</strong> {{ generated_date }}</div>
+      <div><strong>Источник:</strong> <a href="{{ source_url }}">{{ source_url }}</a></div>
+    </div>
+  </section>
+
+  <section class="page">
+    <h2>Описание</h2>
+    <p>{{ content.short_description_ru }}</p>
+    {% if content.price_note %}<p class="note">{{ content.price_note }}</p>{% endif %}
+
+    {% if content.price_tiers %}
+    <h2>Ступенчатые цены</h2>
+    <table>
+      <thead><tr><th>Количество</th><th>Цена</th></tr></thead>
+      <tbody>
+      {% for tier in content.price_tiers %}
+      <tr><td>{{ tier.quantity }}</td><td>{{ tier.price }}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+
+    {% if content.specifications %}
+    <h2>Характеристики</h2>
+    <table>
+      <tbody>
+      {% for spec in content.specifications %}
+      <tr><td>{{ spec.name }}</td><td>{{ spec.value }}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+
+    {% if content.variants %}
+    <h2>Варианты</h2>
+    <table>
+      <tbody>
+      {% for var in content.variants %}
+      <tr><td>{{ var.name }}</td><td>{{ var.value }}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+  </section>
+
+  {% if image_paths|length > 1 %}
+  <section class="page">
+    <h2>Фотогалерея</h2>
+    <div class="gallery">
+    {% for img in image_paths[1:] %}
+      <img src="{{ img }}" alt="gallery image {{ loop.index }}" />
+    {% endfor %}
+    </div>
+    <p class="source-link">Источник: <a href="{{ source_url }}">{{ source_url }}</a></p>
+    <p class="disclaimer">
+      Информация в каталоге сформирована автоматически на основании данных, размещённых поставщиком на платформе 1688.com.
+      Перевод носит информационный характер. Цена, минимальный заказ, характеристики, комплектация и наличие подлежат
+      дополнительному подтверждению у поставщика.
+    </p>
+  </section>
+  {% endif %}
+</body>
+</html>

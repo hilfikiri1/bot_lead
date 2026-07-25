@@ -1,5 +1,5 @@
-"""HTTP API package.
+"""API package."""
 
-Routers are imported explicitly by :mod:`app.main`. Keeping this module light
-avoids importing Telegram/Celery integrations during unrelated unit tests.
-"""
+from app.api.health import router as health_router
+
+__all__ = ["health_router"]

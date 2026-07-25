@@ -7,7 +7,7 @@ celery_app = Celery(
     "buybring",
     broker=settings.celery_broker_url,
     backend=settings.celery_result_backend,
-    include=["app.tasks.voice_note_tasks"],
+    include=["app.tasks.voice_note_tasks", "app.tasks.catalog_tasks"],
 )
 
 celery_app.conf.update(
@@ -24,5 +24,6 @@ celery_app.conf.update(
     result_expires=24 * 60 * 60,
     task_routes={
         "app.tasks.voice_note_tasks.process_voice_note": {"queue": "voice_notes"},
+        "app.tasks.catalog_tasks.process_catalog": {"queue": "catalog_jobs"},
     },
 )

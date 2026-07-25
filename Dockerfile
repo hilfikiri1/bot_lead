@@ -6,10 +6,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     libpq-dev \
     gcc \
+    fonts-noto-cjk \
+    fonts-noto-core \
+    fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+RUN playwright install --with-deps chromium
 
 COPY . .
 

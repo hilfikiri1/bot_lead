@@ -64,15 +64,47 @@ async def send_document(
     filename: str,
     content: bytes,
     caption: str | None = None,
+    mime_type: str = "text/calendar",
 ) -> dict:
     data = {"chat_id": str(chat_id)}
     if caption:
         data["caption"] = caption
         data["parse_mode"] = "HTML"
-    files = {"document": (filename, content, "text/calendar")}
-    async with httpx.AsyncClient(timeout=30) as client:
+    files = {"document": (filename, content, mime_type)}
+    async with httpx.AsyncClient(timeout=60) as client:
         response = await client.post(f"{TELEGRAM_API}/sendDocument", data=data, files=files)
         _ensure_success(response, "sendDocument")
+        return response.json()
+
+
+async def send_pdf_document(
+    chat_id: int,
+    *,
+    filename: str,
+    content: bytes,
+    caption: str | None = None,
+) -> dict:
+    return await send_document(
+        chat_id,
+        filename=filename,
+        content=content,
+        caption=caption,
+        mime_type="application/pdf",
+    )
+
+
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=10))
+async def edit_message_text(chat_id: int, message_id: int, text: str) -> dict:
+    payload = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+    }
+    async with httpx.AsyncClient(timeout=30) as client:
+        response = await client.post(f"{TELEGRAM_API}/editMessageText", json=payload)
+        _ensure_success(response, "editMessageText")
         return response.json()
 
 

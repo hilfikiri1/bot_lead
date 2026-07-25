@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <title>{{ data.content.product_name_ru }}</title>
+  <link rel="stylesheet" href="file://{{ css_path }}">
+  <style>:root { --brand-primary: {{ data.brand_primary_color }}; --brand-accent: {{ data.brand_accent_color }}; --brand-text: {{ data.brand_text_color }}; }</style>
+</head>
+<body>
+  <section class="page cover">
+    <header class="brand-row">
+      {% if data.brand_logo_path %}<img class="logo" src="file://{{ data.brand_logo_path }}" alt="{{ data.brand_name }}">{% else %}<div class="text-logo">{{ data.brand_name }}</div>{% endif %}
+      <div class="catalog-label">PRODUCT CATALOG</div>
+    </header>
+    <main class="cover-grid">
+      <div class="cover-copy">
+        <h1>{{ data.content.product_name_ru }}</h1>
+        <p class="original">{{ data.content.original_name_zh }}</p>
+        <div class="meta-card"><div><span>Цена</span><strong>{{ data.content.price_display }}</strong></div>{% if data.content.moq_display %}<div><span>MOQ</span><strong>{{ data.content.moq_display }}</strong></div>{% endif %}<div><span>Дата</span><strong>{{ data.created_date.strftime('%Y-%m-%d') }}</strong></div></div>
+      </div>
+      {% if data.image_paths %}<img class="hero-image" src="file://{{ data.image_paths[0] }}" alt="Product image">{% endif %}
+    </main>
+    <footer class="source"><a href="{{ data.source_url }}">Источник: {{ data.source_url }}</a></footer>
+  </section>
+  <section class="page content-page">
+    <h2>Описание</h2><p>{{ data.content.short_description_ru }}</p>
+    <div class="info-grid"><div class="panel"><h3>Цена</h3><p>{{ data.content.price_display }}</p>{% if data.content.price_note %}<p class="muted">{{ data.content.price_note }}</p>{% endif %}</div>{% if data.content.supplier_name %}<div class="panel"><h3>Поставщик</h3><p>{{ data.content.supplier_name }}</p></div>{% endif %}</div>
+    {% if data.content.price_tiers %}<h2>Ступенчатые цены</h2><table><thead><tr><th>Количество</th><th>Цена</th></tr></thead><tbody>{% for tier in data.content.price_tiers %}<tr><td>{{ tier.quantity }}</td><td>{{ tier.price }}</td></tr>{% endfor %}</tbody></table>{% endif %}
+    {% if data.content.specifications %}<h2>Характеристики</h2><table><tbody>{% for item in data.content.specifications %}<tr><th>{{ item.name }}</th><td>{{ item.value }}</td></tr>{% endfor %}</tbody></table>{% endif %}
+    {% if data.content.variants %}<h2>Варианты товара</h2><table><tbody>{% for item in data.content.variants %}<tr><th>{{ item.name }}</th><td>{{ item.value }}</td></tr>{% endfor %}</tbody></table>{% endif %}
+  </section>
+  {% if data.image_paths|length > 1 %}<section class="page content-page"><h2>Фотогалерея</h2><div class="gallery">{% for image in data.image_paths[1:] %}<img src="file://{{ image }}" alt="Product gallery image">{% endfor %}</div></section>{% endif %}
+  <section class="note-block"><p>Информация в каталоге сформирована автоматически на основании данных, размещённых поставщиком на платформе 1688.com. Перевод носит информационный характер. Цена, минимальный заказ, характеристики, комплектация и наличие подлежат дополнительному подтверждению у поставщика.</p><p><a href="{{ data.source_url }}">{{ data.source_url }}</a></p><div class="contacts">{{ data.brand_name }}{% if data.brand_website %} · {{ data.brand_website }}{% endif %}{% if data.brand_email %} · {{ data.brand_email }}{% endif %}{% if data.brand_phone %} · {{ data.brand_phone }}{% endif %}</div></section>
+</body>
+</html>

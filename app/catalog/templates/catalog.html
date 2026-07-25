@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=210mm" />
+  <title>{{ brand_name }} — {{ product_name_ru }}</title>
+  <style>
+    /* Inline brand CSS variables */
+    :root {
+      --brand-primary: {{ brand_primary_color }};
+      --brand-accent:  {{ brand_accent_color }};
+      --brand-text:    {{ brand_text_color }};
+    }
+  </style>
+  <link rel="stylesheet" href="{{ css_path }}" />
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════════════════════════
+     PAGE 1 — COVER
+═══════════════════════════════════════════════════════════════════ -->
+<div class="page">
+
+  <!-- Header bar -->
+  <div class="header">
+    <div class="logo-area">
+      {% if logo_path %}
+        <img class="logo-img" src="{{ logo_path }}" alt="{{ brand_name }} logo" />
+      {% else %}
+        <span class="brand-text-logo">{{ brand_name }}</span>
+      {% endif %}
+    </div>
+    <div class="catalog-label">Product Catalog</div>
+  </div>
+
+  <!-- Cover: image + key info side-by-side -->
+  <div class="cover-section">
+
+    <div class="cover-image-wrap">
+      {% if local_image_paths %}
+        <img src="{{ local_image_paths[0] }}" alt="{{ product_name_ru }}" />
+      {% else %}
+        <span style="color:#9CA3AF;font-size:9pt;">Фото недоступно</span>
+      {% endif %}
+    </div>
+
+    <div class="cover-info">
+      <div>
+        <div class="product-name-ru">{{ product_name_ru }}</div>
+        <div class="product-name-zh">{{ original_name_zh }}</div>
+        {% if supplier_name %}
+          <div class="supplier-chip">🏭 {{ supplier_name }}</div>
+        {% endif %}
+      </div>
+
+      <div class="cover-price-block">
+        <div class="cover-price-label">Цена (CNY)</div>
+        <div class="cover-price-value">{{ price_display }}</div>
+        {% if price_note %}
+          <div class="price-note">{{ price_note }}</div>
+        {% endif %}
+      </div>
+
+      {% if moq_display %}
+        <div class="cover-moq">Минимальный заказ: <strong>{{ moq_display }}</strong></div>
+      {% endif %}
+
+      <div class="cover-meta">
+        Дата: {{ created_date }}<br/>
+        <span class="source-link">
+          Источник: <a href="{{ source_url }}">1688.com</a>
+        </span>
+      </div>
+    </div>
+
+  </div><!-- /cover-section -->
+
+  <!-- Contact footer bar on cover page -->
+  <div class="page-footer-bar">
+    <span>{{ brand_name }}</span>
+    <span>
+      {% if brand_website %}{{ brand_website }}{% endif %}
+      {% if brand_email %} · {{ brand_email }}{% endif %}
+      {% if brand_phone %} · {{ brand_phone }}{% endif %}
+    </span>
+    <span>{{ created_date }}</span>
+  </div>
+
+</div><!-- /page 1 -->
+
+
+<!-- ═══════════════════════════════════════════════════════════════
+     PAGE 2 — DESCRIPTION, PRICE TABLE, SPECS, VARIANTS
+═══════════════════════════════════════════════════════════════════ -->
+<div class="page">
+
+  <!-- Header (repeated on every page) -->
+  <div class="header">
+    <div class="logo-area">
+      {% if logo_path %}
+        <img class="logo-img" src="{{ logo_path }}" alt="{{ brand_name }} logo" />
+      {% else %}
+        <span class="brand-text-logo">{{ brand_name }}</span>
+      {% endif %}
+    </div>
+    <div style="font-size:8.5pt;color:#6B7280;">{{ product_name_ru }}</div>
+  </div>
+
+  <!-- Description -->
+  {% if short_description_ru %}
+  <div class="section-title">Описание</div>
+  <p class="description-text">{{ short_description_ru }}</p>
+  {% endif %}
+
+  <!-- Price block -->
+  <div class="section-title">Цена</div>
+  <div class="price-block">
+    <div class="price-main">{{ price_display }}</div>
+    {% if price_note %}<div class="price-note">{{ price_note }}</div>{% endif %}
+    {% if moq_display %}<span class="moq-badge">MOQ: {{ moq_display }}</span>{% endif %}
+  </div>
+
+  <!-- Tiered prices -->
+  {% if price_tiers %}
+  <div class="section-title">Ступенчатые цены</div>
+  <table>
+    <thead>
+      <tr>
+        <th>Количество</th>
+        <th>Цена (CNY)</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for tier in price_tiers %}
+      <tr>
+        <td>{{ tier.quantity }}</td>
+        <td>{{ tier.price }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+
+  <!-- Specifications -->
+  {% if specifications %}
+  <div class="section-title">Характеристики</div>
+  <table>
+    <tbody>
+      {% for spec in specifications %}
+      <tr>
+        <td style="font-weight:500;width:40%;">{{ spec.name }}</td>
+        <td>{{ spec.value }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+
+  <!-- Variants -->
+  {% if variants %}
+  <div class="section-title">Варианты</div>
+  <table>
+    <tbody>
+      {% for v in variants %}
+      <tr>
+        <td style="font-weight:500;width:40%;">{{ v.name }}</td>
+        <td>{{ v.value }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+
+  <div class="page-footer-bar">
+    <span>{{ brand_name }}</span>
+    <span>
+      {% if brand_website %}{{ brand_website }}{% endif %}
+      {% if brand_email %} · {{ brand_email }}{% endif %}
+    </span>
+    <span>{{ created_date }}</span>
+  </div>
+
+</div><!-- /page 2 -->
+
+
+<!-- ═══════════════════════════════════════════════════════════════
+     PAGE 3 — PHOTO GALLERY
+═══════════════════════════════════════════════════════════════════ -->
+{% if local_image_paths|length > 1 %}
+<div class="page">
+
+  <div class="header">
+    <div class="logo-area">
+      {% if logo_path %}
+        <img class="logo-img" src="{{ logo_path }}" alt="{{ brand_name }} logo" />
+      {% else %}
+        <span class="brand-text-logo">{{ brand_name }}</span>
+      {% endif %}
+    </div>
+    <div style="font-size:8.5pt;color:#6B7280;">{{ product_name_ru }}</div>
+  </div>
+
+  <div class="section-title">Фотогалерея</div>
+  <div class="gallery-grid">
+    {% for img_path in local_image_paths[1:] %}
+      <img src="{{ img_path }}" alt="Фото {{ loop.index + 1 }}" />
+    {% endfor %}
+  </div>
+
+  <!-- Source link + disclaimer at bottom -->
+  <div style="margin-top:16px;" class="source-link">
+    Исходная страница:
+    <a href="{{ source_url }}">{{ source_url }}</a>
+  </div>
+
+  <div class="footer">
+    <p class="disclaimer-text">{{ disclaimer }}</p>
+  </div>
+
+  <div class="page-footer-bar">
+    <span>{{ brand_name }}</span>
+    <span>
+      {% if brand_website %}{{ brand_website }}{% endif %}
+      {% if brand_email %} · {{ brand_email }}{% endif %}
+    </span>
+    <span>{{ created_date }}</span>
+  </div>
+
+</div><!-- /page 3 -->
+{% else %}
+<!-- If only one image, add disclaimer on page 2 continuation -->
+<div class="page">
+  <div class="header">
+    <div class="logo-area">
+      {% if logo_path %}
+        <img class="logo-img" src="{{ logo_path }}" alt="{{ brand_name }} logo" />
+      {% else %}
+        <span class="brand-text-logo">{{ brand_name }}</span>
+      {% endif %}
+    </div>
+    <div style="font-size:8.5pt;color:#6B7280;">{{ product_name_ru }}</div>
+  </div>
+
+  <div style="margin-top:16px;" class="source-link">
+    Исходная страница:
+    <a href="{{ source_url }}">{{ source_url }}</a>
+  </div>
+
+  <div class="footer">
+    <p class="disclaimer-text">{{ disclaimer }}</p>
+  </div>
+
+  <div class="page-footer-bar">
+    <span>{{ brand_name }}</span>
+    <span>{{ created_date }}</span>
+  </div>
+</div>
+{% endif %}
+
+</body>
+</html>

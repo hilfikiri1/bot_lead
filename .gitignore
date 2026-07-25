@@ -1,12 +1,56 @@
+# Environment
 .env
 .env.*
 !.env.example
-.DS_Store
+
+# Python
 __pycache__/
 *.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Tests
 .pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Type checkers
 .mypy_cache/
 .ruff_cache/
-storage/
-credentials/
+.pyright/
+
+# Storage (runtime files)
+storage/temporary/
+storage/output/
+storage/browser/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
 *.log
+
+# Alembic
+# (keep migrations directory but exclude __pycache__)
+
+# Docker
+*.env
+
+# Credentials / secrets
+credentials/
+*.pem
+*.key

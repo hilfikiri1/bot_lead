@@ -1,0 +1,63 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: catalog_bot
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d catalog_bot"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  bot:
+    build: .
+    restart: unless-stopped
+    command: ["bot"]
+    env_file:
+      - .env
+    environment:
+      # Inside the compose network the DB host is "db".
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@db:5432/catalog_bot
+      RUN_MIGRATIONS: "true"
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./storage/browser:/app/storage/browser
+      - ./storage/temporary:/app/storage/temporary
+      - ./storage/output:/app/storage/output
+      - ./app/catalog/static:/app/app/catalog/static
+
+  api:
+    build: .
+    restart: unless-stopped
+    command: ["api"]
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@db:5432/catalog_bot
+      RUN_MIGRATIONS: "false"
+    depends_on:
+      db:
+        condition: service_healthy
+      bot:
+        condition: service_started
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - ./storage/output:/app/storage/output
+
+volumes:
+  pg_data:

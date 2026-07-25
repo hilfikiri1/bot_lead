@@ -1,0 +1,1 @@
+"""Catalog PDF rendering subsystem."""

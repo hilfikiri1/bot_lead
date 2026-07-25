@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.env
+
+# Secrets & sessions
+storage/browser/*.json
+!storage/browser/.gitkeep
+
+# Runtime storage
+storage/temporary/*
+storage/output/*
+!storage/temporary/.gitkeep
+!storage/output/.gitkeep
+
+# Playwright / browsers
+ms-playwright/
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# OS
+.DS_Store

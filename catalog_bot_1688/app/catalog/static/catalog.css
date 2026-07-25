@@ -1,0 +1,295 @@
+/* Babrik Solutions catalog styles.
+   Colors are injected as CSS variables (--brand-primary/accent/text) from the
+   template so branding is fully driven by configuration. */
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body {
+  font-family: "Noto Sans", "Noto Sans CJK SC", "DejaVu Sans", "Arial", sans-serif;
+  color: var(--brand-text, #20242A);
+  background: #ffffff;
+  font-size: 12px;
+  line-height: 1.5;
+  -webkit-print-color-adjust: exact;
+  print-color-adjust: exact;
+}
+
+.page {
+  position: relative;
+  width: 100%;
+  min-height: 265mm;
+  padding: 0 4mm;
+  page-break-after: always;
+}
+
+.page:last-child {
+  page-break-after: auto;
+}
+
+/* ---------------- Cover ---------------- */
+.cover-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 3px solid var(--brand-accent, #D8A34A);
+  padding-bottom: 10px;
+  margin-bottom: 22px;
+}
+
+.brand .logo {
+  max-height: 54px;
+  max-width: 240px;
+}
+
+.brand .logo-text {
+  font-size: 24px;
+  font-weight: 700;
+  color: var(--brand-primary, #0B1F3A);
+  letter-spacing: 0.5px;
+}
+
+.catalog-label {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 3px;
+  color: var(--brand-accent, #D8A34A);
+}
+
+.cover-body {
+  display: flex;
+  gap: 24px;
+  align-items: flex-start;
+}
+
+.cover-image {
+  flex: 0 0 46%;
+  border: 1px solid #ece7dd;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #fafafa;
+}
+
+.cover-image img {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
+.cover-info {
+  flex: 1;
+}
+
+.product-name {
+  font-size: 24px;
+  color: var(--brand-primary, #0B1F3A);
+  font-weight: 700;
+  line-height: 1.25;
+  margin-bottom: 6px;
+}
+
+.product-name-zh {
+  font-size: 12px;
+  color: #8a8f98;
+  margin-bottom: 18px;
+}
+
+.cover-facts {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 20px;
+}
+
+.fact {
+  display: flex;
+  justify-content: space-between;
+  border-bottom: 1px dashed #e3e3e3;
+  padding-bottom: 6px;
+}
+
+.fact-label {
+  color: #8a8f98;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.fact-value {
+  font-weight: 600;
+  color: var(--brand-primary, #0B1F3A);
+  text-align: right;
+  max-width: 60%;
+}
+
+.cover-source {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 10px;
+}
+
+.cover-source .qr {
+  width: 84px;
+  height: 84px;
+}
+
+.source-link {
+  color: var(--brand-primary, #0B1F3A);
+  font-size: 10px;
+  word-break: break-all;
+  text-decoration: none;
+  border-bottom: 1px solid var(--brand-accent, #D8A34A);
+}
+
+.cover-footer {
+  position: absolute;
+  bottom: 6mm;
+  left: 4mm;
+  right: 4mm;
+  display: flex;
+  gap: 18px;
+  flex-wrap: wrap;
+  border-top: 1px solid #ece7dd;
+  padding-top: 8px;
+  font-size: 10px;
+  color: #8a8f98;
+}
+
+/* ---------------- Sections ---------------- */
+.section-title {
+  font-size: 18px;
+  color: var(--brand-primary, #0B1F3A);
+  border-left: 4px solid var(--brand-accent, #D8A34A);
+  padding-left: 10px;
+  margin-bottom: 14px;
+  margin-top: 4px;
+}
+
+.block-title {
+  font-size: 14px;
+  color: var(--brand-primary, #0B1F3A);
+  margin: 18px 0 8px;
+}
+
+.description {
+  font-size: 12.5px;
+  color: #33383f;
+  margin-bottom: 16px;
+}
+
+/* ---------------- Price ---------------- */
+.price-block {
+  background: #f7f4ee;
+  border: 1px solid #ece7dd;
+  border-radius: 8px;
+  padding: 14px 16px;
+  margin-bottom: 8px;
+}
+
+.price-main {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+}
+
+.price-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: #8a8f98;
+}
+
+.price-value {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--brand-primary, #0B1F3A);
+}
+
+.price-note {
+  margin-top: 6px;
+  font-size: 11px;
+  color: #a9791f;
+}
+
+.price-moq {
+  margin-top: 6px;
+  font-size: 12px;
+  color: #33383f;
+}
+
+/* ---------------- Tables ---------------- */
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 6px;
+  font-size: 11.5px;
+}
+
+.data-table th {
+  background: var(--brand-primary, #0B1F3A);
+  color: #ffffff;
+  text-align: left;
+  padding: 7px 10px;
+  font-weight: 600;
+}
+
+.data-table td {
+  border-bottom: 1px solid #ececec;
+  padding: 7px 10px;
+  vertical-align: top;
+}
+
+.data-table tr:nth-child(even) td {
+  background: #faf9f6;
+}
+
+.spec-name {
+  color: #6b7078;
+  width: 40%;
+}
+
+/* ---------------- Gallery ---------------- */
+.gallery-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 12px;
+}
+
+.gallery-item {
+  border: 1px solid #ece7dd;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #fafafa;
+}
+
+.gallery-item img {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
+/* ---------------- Disclaimer ---------------- */
+.source-box {
+  margin-bottom: 16px;
+  font-size: 11px;
+}
+
+.source-caption {
+  display: block;
+  color: #8a8f98;
+  margin-bottom: 4px;
+}
+
+.disclaimer {
+  background: #f7f4ee;
+  border-left: 3px solid var(--brand-accent, #D8A34A);
+  padding: 14px 16px;
+  font-size: 11px;
+  color: #565b62;
+  border-radius: 4px;
+}

@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <title>{{ brand.name }} — Product Catalog</title>
+  <style>{{ css }}</style>
+  <style>
+    :root {
+      --brand-primary: {{ brand.primary_color }};
+      --brand-accent: {{ brand.accent_color }};
+      --brand-text: {{ brand.text_color }};
+    }
+  </style>
+</head>
+<body>
+
+  <!-- ======================= COVER PAGE ======================= -->
+  <section class="page cover">
+    <header class="cover-header">
+      <div class="brand">
+        {% if brand.logo_data_uri %}
+          <img class="logo" src="{{ brand.logo_data_uri }}" alt="{{ brand.name }}" />
+        {% else %}
+          <div class="logo-text">{{ brand.name }}</div>
+        {% endif %}
+      </div>
+      <div class="catalog-label">PRODUCT CATALOG</div>
+    </header>
+
+    <div class="cover-body">
+      {% if ctx.main_image %}
+      <div class="cover-image">
+        <img src="{{ ctx.main_image }}" alt="{{ ctx.content.product_name_ru }}" />
+      </div>
+      {% endif %}
+
+      <div class="cover-info">
+        <h1 class="product-name">{{ ctx.content.product_name_ru }}</h1>
+        <div class="product-name-zh">{{ ctx.content.original_name_zh }}</div>
+
+        <div class="cover-facts">
+          <div class="fact">
+            <span class="fact-label">Цена</span>
+            <span class="fact-value">{{ ctx.content.price_display }}</span>
+          </div>
+          {% if ctx.content.moq_display %}
+          <div class="fact">
+            <span class="fact-label">Мин. заказ</span>
+            <span class="fact-value">{{ ctx.content.moq_display }}</span>
+          </div>
+          {% endif %}
+          {% if ctx.content.supplier_name %}
+          <div class="fact">
+            <span class="fact-label">Поставщик</span>
+            <span class="fact-value">{{ ctx.content.supplier_name }}</span>
+          </div>
+          {% endif %}
+          <div class="fact">
+            <span class="fact-label">Дата</span>
+            <span class="fact-value">{{ ctx.generated_date }}</span>
+          </div>
+        </div>
+
+        <div class="cover-source">
+          {% if ctx.qr_code_data_uri %}
+          <img class="qr" src="{{ ctx.qr_code_data_uri }}" alt="QR" />
+          {% endif %}
+          <a class="source-link" href="{{ ctx.source_url }}">{{ ctx.source_url }}</a>
+        </div>
+      </div>
+    </div>
+
+    <footer class="cover-footer">
+      <span>{{ brand.name }}</span>
+      {% if brand.website %}<span>{{ brand.website }}</span>{% endif %}
+      {% if brand.email %}<span>{{ brand.email }}</span>{% endif %}
+      {% if brand.phone %}<span>{{ brand.phone }}</span>{% endif %}
+    </footer>
+  </section>
+
+  <!-- ======================= DETAILS PAGE ======================= -->
+  <section class="page details">
+    <h2 class="section-title">Описание</h2>
+    <p class="description">{{ ctx.content.short_description_ru }}</p>
+
+    <div class="price-block">
+      <div class="price-main">
+        <span class="price-label">Цена (CNY)</span>
+        <span class="price-value">{{ ctx.content.price_display }}</span>
+      </div>
+      {% if ctx.content.price_note %}
+      <div class="price-note">{{ ctx.content.price_note }}</div>
+      {% endif %}
+      {% if ctx.content.moq_display %}
+      <div class="price-moq">Минимальный заказ: {{ ctx.content.moq_display }}</div>
+      {% endif %}
+    </div>
+
+    {% if ctx.has_price_tiers %}
+    <h3 class="block-title">Ступенчатые цены</h3>
+    <table class="data-table">
+      <thead>
+        <tr><th>Количество</th><th>Цена, CNY</th></tr>
+      </thead>
+      <tbody>
+        {% for tier in ctx.content.price_tiers %}
+        <tr><td>{{ tier.quantity }}</td><td>{{ tier.price }}</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+
+    {% if ctx.has_specifications %}
+    <h3 class="block-title">Характеристики</h3>
+    <table class="data-table">
+      <tbody>
+        {% for spec in ctx.content.specifications %}
+        <tr><td class="spec-name">{{ spec.name }}</td><td>{{ spec.value }}</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+
+    {% if ctx.has_variants %}
+    <h3 class="block-title">Варианты</h3>
+    <table class="data-table">
+      <tbody>
+        {% for variant in ctx.content.variants %}
+        <tr><td class="spec-name">{{ variant.name }}</td><td>{{ variant.value }}</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+  </section>
+
+  <!-- ======================= GALLERY PAGE ======================= -->
+  {% if ctx.gallery_images %}
+  <section class="page gallery">
+    <h2 class="section-title">Фотогалерея</h2>
+    <div class="gallery-grid">
+      {% for image in ctx.gallery_images %}
+      <div class="gallery-item"><img src="{{ image }}" alt="Фото товара" /></div>
+      {% endfor %}
+    </div>
+  </section>
+  {% endif %}
+
+  <!-- ======================= DISCLAIMER ======================= -->
+  <section class="page disclaimer-page">
+    <h2 class="section-title">Информация об источнике</h2>
+    <div class="source-box">
+      <span class="source-caption">Ссылка на товар:</span>
+      <a class="source-link" href="{{ ctx.source_url }}">{{ ctx.source_url }}</a>
+    </div>
+    <div class="disclaimer">{{ ctx.content.disclaimer }}</div>
+  </section>
+
+</body>
+</html>

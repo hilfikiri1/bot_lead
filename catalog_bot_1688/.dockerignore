@@ -1,0 +1,15 @@
+.venv/
+venv/
+__pycache__/
+*.pyc
+.git/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.env
+storage/temporary/*
+storage/output/*
+storage/browser/*.json
+*.md
+tests/
+.DS_Store

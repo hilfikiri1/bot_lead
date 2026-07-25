@@ -1,5 +1,7 @@
 # Babrik Solutions — 1688 Catalog Bot
 
+Репозиторий: https://github.com/hilfikiri1/1688_parser
+
 Telegram-бот для автоматического формирования PDF-каталогов товаров с сайта [1688.com](https://www.1688.com).
 
 Пользователь отправляет ссылку на товар → бот парсит страницу, переводит описание через OpenAI и возвращает фирменный PDF-каталог Babrik Solutions.

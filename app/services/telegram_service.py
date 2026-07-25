@@ -760,6 +760,9 @@ async def send_main_menu(chat_id: int) -> dict:
                     "callback_data": "menu:unrev:1",
                 },
             ],
+            [
+                {"text": "📄 Каталог 1688", "callback_data": "menu:catalog"},
+            ],
         ]
     }
     return await send_message(

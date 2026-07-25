@@ -1114,6 +1114,21 @@ async def _handle_manager_callback(
     if callback_data == "menu:jobs":
         await _show_audio_jobs(chat_id, user_id, db)
         return True
+    if callback_data == "menu:catalog":
+        await telegram_service.send_message(
+            chat_id,
+            (
+                "📄 <b>Каталог 1688</b>\n\n"
+                "Отправьте ссылку на товар с сайта <b>1688.com</b>.\n"
+                "Я загружу фотографии, переведу описание и подготовлю PDF-каталог."
+            ),
+            reply_markup={
+                "inline_keyboard": [
+                    [{"text": "🏠 Меню", "callback_data": "menu:home"}],
+                ]
+            },
+        )
+        return True
     if callback_data == "menu:search":
         await _prompt_search(chat_id, user_id)
         return True

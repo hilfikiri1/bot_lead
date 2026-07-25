@@ -48,11 +48,12 @@ services:
   worker:
     build: .
     restart: unless-stopped
-    command: celery -A app.celery_app:celery_app worker --loglevel=info -Q voice_notes --concurrency=2
+    command: celery -A app.celery_app:celery_app worker --loglevel=info -Q voice_notes,catalog_jobs --concurrency=2
     env_file: .env
     volumes:
       - .:/app
       - ./storage:/app/storage
+    shm_size: "1gb"
     depends_on:
       db:
         condition: service_healthy

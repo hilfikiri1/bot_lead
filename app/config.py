@@ -191,6 +191,93 @@ class Settings(BaseSettings):
     secret_key: str = "change-me"
     log_level: str = "INFO"
 
+    # 1688 catalog PDF generation
+    catalog_enabled: bool = True
+    catalog_openai_model: str = ""
+    brand_name: str = "Babrik Solutions"
+    brand_primary_color: str = "#0B1F3A"
+    brand_accent_color: str = "#D8A34A"
+    brand_text_color: str = "#20242A"
+    brand_logo_path: str = "app/catalog/static/logo.png"
+    brand_website: str = ""
+    brand_email: str = ""
+    brand_phone: str = ""
+    playwright_headless: bool = True
+    playwright_timeout_seconds: int = 45
+    playwright_storage_state: str = "storage/browser/1688_storage_state.json"
+    catalog_max_concurrent_jobs: int = 2
+    catalog_max_images: int = 12
+    catalog_max_image_size_mb: int = 10
+    catalog_max_total_download_mb: int = 100
+    catalog_pdf_retention_hours: int = 24
+    catalog_debug_save_page: bool = False
+    catalog_rate_limit_seconds: int = 10
+    catalog_processing_mode: str = "celery"
+
+    @property
+    def catalog_model(self) -> str:
+        return self.catalog_openai_model.strip() or self.openai_model
+
+    @property
+    def catalog_storage_base(self) -> str:
+        return f"{self.local_storage_path.rstrip('/')}/catalog"
+
+    @property
+    def catalog_playwright_timeout_ms(self) -> int:
+        return self.playwright_timeout_seconds * 1000
+
+    @property
+    def catalog_max_image_size_bytes(self) -> int:
+        return self.catalog_max_image_size_mb * 1024 * 1024
+
+    @property
+    def catalog_max_total_download_bytes(self) -> int:
+        return self.catalog_max_total_download_mb * 1024 * 1024
+
+    # Aliases for catalog module compatibility
+    @property
+    def max_images(self) -> int:
+        return self.catalog_max_images
+
+    @property
+    def max_image_size_bytes(self) -> int:
+        return self.catalog_max_image_size_bytes
+
+    @property
+    def max_total_download_bytes(self) -> int:
+        return self.catalog_max_total_download_bytes
+
+    @property
+    def max_image_size_mb(self) -> int:
+        return self.catalog_max_image_size_mb
+
+    @property
+    def max_total_download_mb(self) -> int:
+        return self.catalog_max_total_download_mb
+
+    @property
+    def playwright_timeout_ms(self) -> int:
+        return self.catalog_playwright_timeout_ms
+
+    @property
+    def debug_save_page(self) -> bool:
+        return self.catalog_debug_save_page
+
+    @property
+    def storage_temporary(self):
+        from pathlib import Path
+        return Path(self.catalog_storage_base) / "temporary"
+
+    @property
+    def storage_output(self):
+        from pathlib import Path
+        return Path(self.catalog_storage_base) / "output"
+
+    @property
+    def storage_browser(self):
+        from pathlib import Path
+        return Path(self.local_storage_path.rstrip("/")) / "browser"
+
     # Security / web API
     admin_api_key: str = ""
     cors_allowed_origins: str = ""

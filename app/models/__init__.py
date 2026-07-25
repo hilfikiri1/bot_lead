@@ -1,3 +1,4 @@
+from app.models.catalog_job import CatalogJob
 from app.models.client import Client
 from app.models.lead import Lead
 from app.models.voice_note import VoiceNote
@@ -8,6 +9,7 @@ from app.models.calendar_event import CalendarEvent
 from app.models.spreadsheet_lead_mapping import SpreadsheetLeadMapping
 
 __all__ = [
+    "CatalogJob",
     "Client",
     "Lead",
     "VoiceNote",

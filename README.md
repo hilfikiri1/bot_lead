@@ -51,6 +51,30 @@ Celery Worker (Redis queue)
 | `whatsapp_service.py` | Prepare WhatsApp drafts (disabled until verified) |
 | `crm_service.py` | Save clients, leads, voice notes, reports to DB |
 | `approval_service.py` | Route inline button callbacks to correct actions |
+| `catalog_service.py` | 1688 product page → PDF catalog (Playwright + OpenAI) |
+
+---
+
+## 1688 Catalog PDF (новая функция)
+
+Отправьте боту ссылку на товар с `1688.com` — бот сформирует PDF-каталог Babrik Solutions.
+
+**Команда:** `/catalog`
+
+**Как работает:**
+1. Ссылка попадает в очередь `catalog_jobs` (Celery worker)
+2. Playwright парсит страницу 1688
+3. OpenAI переводит и структурирует описание
+4. PDF формируется локально (Jinja2 + Playwright)
+5. Бот отправляет документ в Telegram
+
+**Первый запуск — сессия 1688:**
+```bash
+pip install playwright && playwright install chromium
+python scripts/login_1688.py
+```
+
+**Переменные `.env`:** см. блок `CATALOG_*` и `BRAND_*` в `.env.example`.
 
 ---
 

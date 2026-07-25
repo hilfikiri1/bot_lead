@@ -25,6 +25,7 @@ from app.services import (
     calendar_event_builder,
     calendar_scheduling_service,
     calendar_service,
+    catalog_telegram_handler,
     command_router_service,
     crm_service,
     google_sheets_service,
@@ -1112,6 +1113,21 @@ async def _handle_manager_callback(
         return True
     if callback_data == "menu:jobs":
         await _show_audio_jobs(chat_id, user_id, db)
+        return True
+    if callback_data == "menu:catalog":
+        await telegram_service.send_message(
+            chat_id,
+            (
+                "📄 <b>Каталог 1688</b>\n\n"
+                "Отправьте ссылку на товар с сайта <b>1688.com</b>.\n"
+                "Я загружу фотографии, переведу описание и подготовлю PDF-каталог."
+            ),
+            reply_markup={
+                "inline_keyboard": [
+                    [{"text": "🏠 Меню", "callback_data": "menu:home"}],
+                ]
+            },
+        )
         return True
     if callback_data == "menu:search":
         await _prompt_search(chat_id, user_id)
@@ -2496,6 +2512,23 @@ async def telegram_webhook(
                 )
             else:
                 await _show_lead_details(chat_id, int(parts[1].strip()), return_page=1)
+            return {"ok": True}
+
+        if text.startswith("/catalog"):
+            await telegram_service.send_message(
+                chat_id,
+                "Отправьте ссылку на товар с сайта <b>1688.com</b>.\n\n"
+                "Я загружу фотографии, переведу информацию и подготовлю PDF-каталог.",
+            )
+            return {"ok": True}
+
+        if text and await catalog_telegram_handler.handle_catalog_link(
+            db=db,
+            chat_id=chat_id,
+            user_id=user_id,
+            text=text,
+            spawn_background=_spawn_background,
+        ):
             return {"ok": True}
 
         if text and await _handle_text_state(

@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>1688 → PDF Catalog</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+
+  <!-- ====== HEADER ====== -->
+  <header class="header">
+    <span class="header-logo">📦</span>
+    <div class="header-title">
+      <h1>1688 Product Catalog</h1>
+      <p>Scrape → AI Enrich → PDF Export</p>
+    </div>
+    <span class="header-badge" id="badge-count">0 items</span>
+  </header>
+
+  <!-- ====== TABS ====== -->
+  <nav class="tabs">
+    <button class="tab-btn active" data-tab="products">🛒 Products</button>
+    <button class="tab-btn" data-tab="settings">⚙️ Settings</button>
+  </nav>
+
+  <!-- ====== PRODUCTS PANEL ====== -->
+  <div class="panel active" id="panel-products">
+
+    <!-- Toolbar -->
+    <div class="toolbar">
+      <button class="btn btn-secondary" id="btn-scan">
+        <span class="btn-icon">🔍</span> Scan Page
+      </button>
+      <button class="btn btn-primary" id="btn-generate" disabled>
+        <span class="btn-icon">✨</span> Generate PDF
+      </button>
+      <span class="selection-info" id="selection-info">0 selected</span>
+    </div>
+
+    <!-- Product list / states -->
+    <div id="view-empty" class="state-box">
+      <div class="state-icon">🔍</div>
+      <div class="state-title">No products yet</div>
+      <div class="state-desc">
+        Navigate to a 1688.com product listing or search results page,
+        then click <strong>Scan Page</strong> to extract products.
+      </div>
+    </div>
+
+    <div id="view-loading" class="state-box" style="display:none">
+      <div class="spinner"></div>
+      <div class="state-title" id="loading-label">Scanning page…</div>
+    </div>
+
+    <div id="view-list" class="product-list" style="display:none"></div>
+
+    <div id="view-error" class="state-box" style="display:none">
+      <div class="state-icon">⚠️</div>
+      <div class="state-title">Something went wrong</div>
+      <div class="state-desc" id="error-desc">Unknown error</div>
+    </div>
+
+    <!-- Progress bar (shown during PDF generation) -->
+    <div id="progress-wrap" class="progress-wrap" style="display:none">
+      <div class="progress-label" id="progress-label">Processing…</div>
+      <div class="progress-bar">
+        <div class="progress-fill" id="progress-fill" style="width:0%"></div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- ====== SETTINGS PANEL ====== -->
+  <div class="panel" id="panel-settings">
+    <div class="settings-panel">
+
+      <p class="form-section-title">Store Branding</p>
+
+      <div class="form-group">
+        <label class="form-label" for="store-name">Store Name</label>
+        <input type="text" id="store-name" class="form-input" placeholder="e.g. Sunrise Imports Ltd." />
+      </div>
+
+      <div class="form-group">
+        <label class="form-label" for="store-logo">
+          Logo URL <span>(optional)</span>
+        </label>
+        <input type="url" id="store-logo" class="form-input" placeholder="https://example.com/logo.png" />
+        <p class="form-hint">Must be a publicly accessible image URL (PNG/JPEG).</p>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label" for="store-contact">
+          Contact / Footer Text <span>(optional)</span>
+        </label>
+        <input type="text" id="store-contact" class="form-input"
+          placeholder="contact@yourstore.com  |  +1 555 000 0000" />
+      </div>
+
+      <div class="form-group">
+        <label class="form-label" for="store-currency">
+          Currency Display <span>(optional)</span>
+        </label>
+        <input type="text" id="store-currency" class="form-input" placeholder="USD" value="USD" />
+        <p class="form-hint">
+          The AI will convert or label prices in this currency.
+        </p>
+      </div>
+
+      <p class="form-section-title" style="margin-top:16px">AI Configuration</p>
+
+      <div class="form-group">
+        <label class="form-label" for="openai-key">
+          OpenAI API Key <span>(required for enrichment)</span>
+        </label>
+        <input type="password" id="openai-key" class="form-input"
+          placeholder="sk-…" autocomplete="off" />
+        <p class="form-hint">
+          Stored locally in Chrome sync storage. Never sent anywhere except
+          OpenAI's API.
+        </p>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label" for="openai-model">AI Model</label>
+        <select id="openai-model" class="form-input">
+          <option value="gpt-4o">GPT-4o (recommended)</option>
+          <option value="gpt-4o-mini">GPT-4o mini (faster / cheaper)</option>
+          <option value="gpt-4-turbo">GPT-4 Turbo</option>
+        </select>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">
+          <input type="checkbox" id="skip-ai" style="accent-color:var(--primary);margin-right:5px" />
+          Skip AI enrichment (use raw scraped data)
+        </label>
+        <p class="form-hint">
+          Enable this if you don't have an API key or want a faster export.
+        </p>
+      </div>
+
+      <div class="save-btn-wrap">
+        <button class="btn btn-primary" id="btn-save-settings">
+          💾 Save Settings
+        </button>
+        <span class="save-status" id="save-status">Saved ✓</span>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ====== TOAST ====== -->
+  <div class="toast" id="toast"></div>
+
+  <!-- Scripts -->
+  <script src="popup.js" type="module"></script>
+</body>
+</html>

@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Настройки Babrik 1688</title>
+  <style>
+    body { font-family: Arial, sans-serif; max-width: 560px; margin: 24px auto; padding: 0 16px; }
+    label { display: block; margin-top: 16px; font-weight: 600; }
+    input { width: 100%; padding: 8px; margin-top: 6px; box-sizing: border-box; }
+    button { margin-top: 20px; padding: 10px 16px; background: #0b1f3a; color: #fff; border: 0; border-radius: 6px; cursor: pointer; }
+    .hint { color: #666; font-size: 12px; margin-top: 4px; }
+    #saved { color: #0b7a3f; margin-top: 12px; }
+  </style>
+</head>
+<body>
+  <h1>Настройки Babrik 1688 Catalog</h1>
+
+  <label for="apiBaseUrl">URL API сервера</label>
+  <input id="apiBaseUrl" type="url" placeholder="http://localhost:8000">
+  <div class="hint">Адрес FastAPI, где развёрнут buybring (например Railway URL).</div>
+
+  <label for="apiKey">API ключ</label>
+  <input id="apiKey" type="password" placeholder="CATALOG_EXTENSION_API_KEY или ADMIN_API_KEY">
+  <div class="hint">Значение из <code>CATALOG_EXTENSION_API_KEY</code> или <code>ADMIN_API_KEY</code> в .env.</div>
+
+  <label for="telegramUserId">Telegram user ID (опционально)</label>
+  <input id="telegramUserId" type="text" placeholder="123456789">
+  <div class="hint">Если указан, готовый PDF также отправится в Telegram.</div>
+
+  <label for="maxProducts">Максимум товаров в одной подборке</label>
+  <input id="maxProducts" type="number" min="1" max="50" value="20">
+
+  <button id="saveBtn" type="button">Сохранить</button>
+  <div id="saved"></div>
+
+  <script src="options.js"></script>
+</body>
+</html>

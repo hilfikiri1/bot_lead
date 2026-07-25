@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{ brand_name }} — {{ collection_title }}</title>
+  <link rel="stylesheet" href="{{ css_path }}">
+</head>
+<body>
+  <div class="page cover-page">
+    <header class="brand-header">
+      {% if logo_path %}
+      <img src="{{ logo_path }}" alt="{{ brand_name }}" class="logo">
+      {% else %}
+      <div class="text-logo">{{ brand_name }}</div>
+      {% endif %}
+      <div class="catalog-label">PRODUCT COLLECTION</div>
+    </header>
+
+    <section class="cover-main">
+      <h1 class="product-title">{{ collection_title }}</h1>
+      <p class="product-title-zh">1688.com — подборка товаров</p>
+
+      <div class="cover-meta batch-cover-meta">
+        <div class="meta-block">
+          <span class="meta-label">Позиций в каталоге</span>
+          <span class="meta-value">{{ sections|length }}</span>
+        </div>
+        <div class="meta-block">
+          <span class="meta-label">Дата каталога</span>
+          <span class="meta-value">{{ created_date.strftime('%d.%m.%Y') }}</span>
+        </div>
+        {% if source_page_url %}
+        <div class="meta-block">
+          <span class="meta-label">Источник</span>
+          <a href="{{ source_page_url }}" class="source-link">{{ source_page_url }}</a>
+        </div>
+        {% endif %}
+      </div>
+    </section>
+  </div>
+
+  {% for section in sections %}
+  <div class="page content-page batch-product-page">
+    <header class="brand-header compact-header">
+      {% if logo_path %}
+      <img src="{{ logo_path }}" alt="{{ brand_name }}" class="logo small-logo">
+      {% else %}
+      <div class="text-logo small-text-logo">{{ brand_name }}</div>
+      {% endif %}
+      <div class="catalog-label">#{{ loop.index }}</div>
+    </header>
+
+    <div class="batch-product-grid">
+      {% if section.main_image %}
+      <div class="batch-product-image">
+        <img src="{{ section.main_image }}" alt="{{ section.content.product_name_ru }}">
+      </div>
+      {% endif %}
+      <div class="batch-product-details">
+        <h2 class="batch-product-title">{{ section.content.product_name_ru }}</h2>
+        <p class="product-title-zh">{{ section.content.original_name_zh }}</p>
+        <p class="description">{{ section.content.short_description_ru }}</p>
+
+        <div class="batch-meta-list">
+          <div class="meta-block">
+            <span class="meta-label">Цена</span>
+            <span class="meta-value price">{{ section.content.price_display }}</span>
+            {% if section.content.price_note %}
+            <span class="meta-note">{{ section.content.price_note }}</span>
+            {% endif %}
+          </div>
+          {% if section.content.moq_display %}
+          <div class="meta-block">
+            <span class="meta-label">Минимальный заказ</span>
+            <span class="meta-value">{{ section.content.moq_display }}</span>
+          </div>
+          {% endif %}
+          {% if section.content.supplier_name %}
+          <div class="meta-block">
+            <span class="meta-label">Поставщик / фабрика</span>
+            <span class="meta-value">{{ section.content.supplier_name }}</span>
+          </div>
+          {% endif %}
+        </div>
+
+        <div class="source-block">
+          <span class="meta-label">Ссылка 1688</span>
+          <a href="{{ section.source_url }}">{{ section.source_url }}</a>
+        </div>
+      </div>
+    </div>
+  </div>
+  {% endfor %}
+
+  <div class="page content-page">
+    <footer class="disclaimer">
+      <p>{{ disclaimer }}</p>
+      <p>Информация в каталоге сформирована автоматически на основании данных, размещённых поставщиком на платформе 1688.com. Перевод носит информационный характер. Цена, минимальный заказ, характеристики, комплектация и наличие подлежат дополнительному подтверждению у поставщика.</p>
+    </footer>
+
+    <div class="brand-footer">
+      <span>{{ brand_name }}</span>
+      {% if brand_website %}<span>{{ brand_website }}</span>{% endif %}
+      {% if brand_email %}<span>{{ brand_email }}</span>{% endif %}
+      {% if brand_phone %}<span>{{ brand_phone }}</span>{% endif %}
+    </div>
+  </div>
+</body>
+</html>

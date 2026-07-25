@@ -23,3 +23,8 @@ def build_pdf_filename(product_name: str, created: date | None = None) -> str:
     created = created or date.today()
     short_name = safe_filename(product_name, max_length=40)
     return f"Babrik_Solutions_{short_name}_{created.isoformat()}.pdf"
+
+
+def build_batch_pdf_filename(product_count: int, created: date | None = None) -> str:
+    created = created or date.today()
+    return f"Babrik_Solutions_1688_batch_{product_count}items_{created.isoformat()}.pdf"

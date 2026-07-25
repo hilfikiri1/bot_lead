@@ -239,3 +239,55 @@ h2 {
   font-size: 8pt;
   color: #888;
 }
+
+.batch-cover-meta {
+  margin-top: 24px;
+}
+
+.compact-header {
+  margin-bottom: 16px;
+}
+
+.small-logo {
+  max-height: 32px;
+}
+
+.small-text-logo {
+  font-size: 14pt;
+}
+
+.batch-product-page {
+  padding-top: 4px;
+}
+
+.batch-product-grid {
+  display: flex;
+  gap: 20px;
+  align-items: flex-start;
+}
+
+.batch-product-image {
+  flex: 0 0 38%;
+  max-width: 38%;
+}
+
+.batch-product-image img {
+  width: 100%;
+  height: auto;
+  border: 1px solid #e8e8e8;
+  border-radius: 4px;
+}
+
+.batch-product-details {
+  flex: 1;
+}
+
+.batch-product-title {
+  font-size: 16pt;
+  color: #0B1F3A;
+  margin-bottom: 4px;
+}
+
+.batch-meta-list {
+  margin: 16px 0;
+}

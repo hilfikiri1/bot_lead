@@ -91,7 +91,9 @@ if cors_origins:
         allow_methods=["GET", "POST"],
         allow_headers=[
             "Content-Type",
+            "Authorization",
             "X-Admin-Key",
+            "X-Catalog-Api-Key",
             "X-Telegram-Bot-Api-Secret-Token",
         ],
         allow_credentials=False,
@@ -99,6 +101,11 @@ if cors_origins:
 
 app.include_router(telegram_router)
 app.include_router(admin_router)
+
+if settings.catalog_enabled:
+    from app.api.catalog import router as catalog_router
+
+    app.include_router(catalog_router)
 
 if settings.enable_google_oauth_routes:
     from app.api.auth import router as auth_router

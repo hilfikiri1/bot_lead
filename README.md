@@ -76,6 +76,20 @@ python scripts/login_1688.py
 
 **Переменные `.env`:** см. блок `CATALOG_*` и `BRAND_*` в `.env.example`.
 
+### Chrome Extension (batch)
+
+Папка `extension/` — расширение для Chrome (Manifest V3), которое парсит **список товаров** со страниц 1688 (поиск, магазин) и отправляет их на API `/api/catalog/batch` для формирования одного PDF-каталога.
+
+**Настройка backend:**
+```env
+CATALOG_ENABLED=true
+CATALOG_EXTENSION_API_KEY=your-secret-key
+```
+
+**Установка:** Chrome → `chrome://extensions` → Режим разработчика → Загрузить распакованное → папка `extension/`.
+
+Подробности: [`extension/README.md`](extension/README.md).
+
 ---
 
 ## Quick Start

@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Babrik 1688 Catalog</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header>
+    <h1>Babrik 1688</h1>
+    <p class="subtitle">PDF-каталог из списка товаров</p>
+  </header>
+
+  <div id="status" class="status">Откройте страницу поиска или магазина на 1688.com</div>
+
+  <div class="toolbar">
+    <button id="refreshBtn" type="button">Обновить список</button>
+    <button id="selectAllBtn" type="button">Выбрать все</button>
+    <button id="clearAllBtn" type="button">Снять выбор</button>
+  </div>
+
+  <div id="productList" class="product-list"></div>
+
+  <footer>
+    <button id="generateBtn" type="button" class="primary" disabled>Сформировать PDF</button>
+    <a id="downloadLink" class="download-link hidden" href="#" target="_blank">Скачать PDF</a>
+  </footer>
+
+  <script src="popup.js"></script>
+</body>
+</html>

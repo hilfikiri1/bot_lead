@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from pathlib import Path
+
+from sqlalchemy import select
 
 from app.catalog_exceptions import CatalogBotError
 from app.celery_app import celery_app
 from app.config import get_settings
 from app.database import AsyncSessionLocal
+from app.models.catalog_job import CatalogJob
 from app.services.catalog_service import CatalogService
 from app.services import telegram_service
 
@@ -104,3 +108,58 @@ async def process_catalog_async(
     status_message_id: int,
 ) -> None:
     await _process_catalog_async(job_id, source_url, chat_id, status_message_id)
+
+
+async def _process_catalog_batch_async(job_id: str) -> None:
+    from app.services.catalog_batch_service import CatalogBatchService
+    from app.services import telegram_service
+
+    service = CatalogBatchService()
+    job_uuid = uuid.UUID(job_id)
+
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(CatalogJob).where(CatalogJob.id == job_uuid))
+        job = result.scalar_one_or_none()
+        chat_id = job.telegram_chat_id if job else None
+
+        try:
+            pdf_path = await service.process(db, job_uuid)
+        except CatalogBotError as exc:
+            if chat_id:
+                await telegram_service.send_message(chat_id, exc.user_message)
+            return
+        except Exception:
+            logger.exception("catalog_batch_task_failed job_id=%s", job_id)
+            if chat_id:
+                await telegram_service.send_message(
+                    chat_id,
+                    "Не удалось сформировать каталог из-за временной ошибки. Попробуйте повторить запрос позже.",
+                )
+            return
+
+    if chat_id:
+        pdf_bytes = Path(pdf_path).read_bytes()
+        await telegram_service.send_pdf_document(
+            chat_id,
+            filename=Path(pdf_path).name,
+            content=pdf_bytes,
+            caption=PDF_CAPTION,
+        )
+    service.cleanup_job(job_uuid)
+
+
+@celery_app.task(
+    bind=True,
+    name="app.tasks.catalog_tasks.process_catalog_batch",
+    max_retries=1,
+    default_retry_delay=30,
+    acks_late=True,
+    soft_time_limit=30 * 60,
+    time_limit=32 * 60,
+)
+def process_catalog_batch(self, job_id: str) -> None:
+    _run(_process_catalog_batch_async(job_id))
+
+
+async def process_catalog_batch_async(job_id: str) -> None:
+    await _process_catalog_batch_async(job_id)

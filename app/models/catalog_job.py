@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import BigInteger, DateTime, String, Text, func
+from sqlalchemy import BigInteger, DateTime, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -14,9 +14,12 @@ class CatalogJob(Base):
     __tablename__ = "catalog_jobs"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    telegram_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
-    telegram_chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    source_url: Mapped[str] = mapped_column(Text, nullable=False)
+    job_type: Mapped[str] = mapped_column(String(16), nullable=False, default="single")
+    telegram_user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
+    telegram_chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    products_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    product_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="received")
     product_title: Mapped[str | None] = mapped_column(Text, nullable=True)
     output_file: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -31,3 +34,7 @@ class CatalogJob(Base):
     @property
     def is_active(self) -> bool:
         return self.status not in {"completed", "failed"}
+
+    @property
+    def is_batch(self) -> bool:
+        return self.job_type == "batch"

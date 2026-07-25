@@ -213,10 +213,16 @@ class Settings(BaseSettings):
     catalog_debug_save_page: bool = False
     catalog_rate_limit_seconds: int = 10
     catalog_processing_mode: str = "celery"
+    catalog_extension_api_key: str = ""
+    catalog_max_products_per_batch: int = 20
 
     @property
     def catalog_model(self) -> str:
         return self.catalog_openai_model.strip() or self.openai_model
+
+    @property
+    def catalog_api_key(self) -> str:
+        return self.catalog_extension_api_key.strip() or self.admin_api_key.strip()
 
     @property
     def catalog_storage_base(self) -> str:

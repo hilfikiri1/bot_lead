@@ -4,7 +4,14 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from fastapi import APIRouter, Header, HTTPException, Query, Request
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Header,
+    HTTPException,
+    Query,
+    Request,
+)
 from fastapi.responses import PlainTextResponse
 
 from app.services import whatsapp_webhook_service
@@ -27,6 +34,7 @@ async def verify_webhook(
 @router.post("")
 async def receive_webhook(
     request: Request,
+    background_tasks: BackgroundTasks,
     x_hub_signature_256: str | None = Header(
         default=None, alias="X-Hub-Signature-256"
     ),
@@ -40,5 +48,9 @@ async def receive_webhook(
         payload = await request.json()
     except Exception as exc:
         raise HTTPException(status_code=400, detail="Invalid JSON") from exc
-    processed = await whatsapp_webhook_service.process_webhook(payload)
-    return {"status": "ok", "processed": processed}
+    messages = whatsapp_webhook_service.extract_incoming_messages(payload)
+    for item in messages:
+        background_tasks.add_task(
+            whatsapp_webhook_service.notify_incoming_message, item
+        )
+    return {"status": "accepted", "messages": len(messages)}

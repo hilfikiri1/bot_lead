@@ -18,6 +18,7 @@ from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.celery_app import celery_app
+from app.agent import service as agent_service
 from app.config import get_settings
 from app.database import get_db
 from app.services import (
@@ -30,9 +31,6 @@ from app.services import (
     google_sheets_service,
     kommo_service,
     notion_service,
-    operational_command_router,
-    operational_command_service,
-    operational_notion_service,
     telegram_service,
     telegram_state_service,
     unreviewed_leads_service,
@@ -367,76 +365,74 @@ async def _handle_text_command(
 ) -> bool:
     if not text or text.startswith("/"):
         return False
-
-    if settings.natural_command_router_enabled:
-        operational = operational_command_router.route(text)
-        if operational is not None:
-            reply = await operational_command_service.execute(
-                db,
-                command=operational,
-                telegram_user_id=user_id,
-            )
-            await telegram_service.send_message(
-                chat_id,
-                reply.text,
-                reply_markup=reply.reply_markup,
-            )
-            return True
-
-    context = await crm_service.get_user_command_context(db, telegram_user_id=user_id)
-    state = await telegram_state_service.get_state(user_id)
-    if state:
-        if state.get("kommo_lead_id"):
-            context["kommo_lead_id"] = state.get("kommo_lead_id")
-        if state.get("notion_lead_page_id"):
-            context["notion_lead_page_id"] = state.get("notion_lead_page_id")
-    plan = await command_router_service.classify_message(text, context=context)
-    if plan.intent == "analyze_conversation":
-        return False
-    reply = await command_router_service.execute_plan(
-        db,
-        plan=plan,
-        chat_id=chat_id,
-        telegram_user_id=user_id,
-        context=context,
-        source_text=text,
-    )
-    if reply is not None:
+    if not settings.agent_enabled:
+        context = await crm_service.get_user_command_context(
+            db, telegram_user_id=user_id
+        )
+        plan = await command_router_service.classify_message(text, context=context)
+        if plan.intent == "analyze_conversation":
+            return False
+        reply = await command_router_service.execute_plan(
+            db,
+            plan=plan,
+            chat_id=chat_id,
+            telegram_user_id=user_id,
+            context=context,
+            source_text=text,
+        )
         if reply:
             await telegram_service.send_message(chat_id, reply)
-        return True
-    return plan.intent != "analyze_conversation"
+        return reply is not None
+
+    reply = await agent_service.handle_message(
+        db,
+        chat_id=chat_id,
+        telegram_user_id=user_id,
+        text=text,
+        source="text",
+        allow_conversation_passthrough=False,
+    )
+    if reply.text:
+        await telegram_service.send_message(
+            chat_id, reply.text, reply_markup=reply.reply_markup
+        )
+    return reply.handled
 
 
 async def _handle_notion_test(chat_id: int) -> None:
-    await telegram_service.send_message(chat_id, "🔄 Проверяю новую структуру Notion…")
+    await telegram_service.send_message(chat_id, "🔄 Проверяю Notion…")
     try:
-        result = await operational_notion_service.validate_schema()
-        report = operational_notion_service.format_schema_report(result)
-    except Exception as exc:
-        report = (
-            "❌ <b>Не удалось проверить Operational Notion</b>\n\n"
-            f"<code>{html.escape(str(exc)[:500])}</code>"
-        )
+        report = await notion_service.run_notion_diagnostics()
+    except notion_service.NotionAPIError as exc:
+        report = notion_service.format_user_error(exc)
     await telegram_service.send_message(chat_id, report)
 
 
-async def _handle_morning_digest(
-    chat_id: int,
-    user_id: int,
-    db: AsyncSession,
-) -> None:
-    await telegram_service.send_message(chat_id, "🔄 Анализирую активные сделки Kommo…")
-    reply = await operational_command_service.execute(
-        db,
-        command=operational_command_router.RoutedCommand("digest"),
-        telegram_user_id=user_id,
-    )
-    await telegram_service.send_message(
-        chat_id,
-        reply.text,
-        reply_markup=reply.reply_markup,
-    )
+async def _handle_morning_digest(chat_id: int) -> None:
+    if not settings.notion_api_token.strip():
+        await telegram_service.send_message(
+            chat_id,
+            "Notion не настроен. Добавьте <code>NOTION_API_TOKEN</code> в Railway.",
+        )
+        return
+    if not settings.notion_tasks_database_id.strip():
+        await telegram_service.send_message(
+            chat_id,
+            (
+                "Дайджест требует базу задач Notion.\n"
+                "Добавьте <code>NOTION_TASKS_DATABASE_ID</code>.\n\n"
+                f"{notion_service.notion_access_instructions()}"
+            ),
+        )
+        return
+    try:
+        await telegram_service.send_message(
+            chat_id, await notion_service.get_morning_digest()
+        )
+    except notion_service.NotionAPIError as exc:
+        await telegram_service.send_message(
+            chat_id, notion_service.format_user_error(exc)
+        )
 
 
 async def _handle_calendar_test(
@@ -453,6 +449,16 @@ async def _handle_calendar_test(
     try:
         if provider == "icloud":
             details = await asyncio.to_thread(calendar_service.test_icloud_connection)
+            if not include_write_probe:
+                await telegram_service.send_message(
+                    chat_id,
+                    (
+                        f"✅ <b>{html.escape(calendar_service.provider_label())} доступен</b>\n\n"
+                        f"{html.escape(details)}\n\n"
+                        "Проверка выполнена без создания тестового события."
+                    ),
+                )
+                return
             manager_tz = _manager_tz()
             tomorrow = datetime.now(tz=manager_tz) + timedelta(days=1)
             test_start = tomorrow.replace(hour=10, minute=0, second=0, microsecond=0)
@@ -1108,53 +1114,52 @@ async def _handle_manager_callback(
     if callback_data == "noop":
         return True
 
-    if callback_data.startswith("opdone:"):
-        _, lead_id_raw, page_id = callback_data.split(":", 2)
-        from app.services import digest_service
-
-        await digest_service.complete_task(
-            db,
-            page_id=page_id,
-            lead_id=int(lead_id_raw),
-            telegram_user_id=user_id,
-        )
-        await telegram_service.send_message(
-            chat_id,
-            "✅ Задача отмечена выполненной в Notion, результат добавлен в Kommo.",
-        )
-        return True
-
-    if callback_data.startswith("opdelay:"):
-        _, lead_id_raw, page_id = callback_data.split(":", 2)
-        from app.services import digest_service
-
-        due_at = await digest_service.postpone_task(
-            db,
-            page_id=page_id,
-            lead_id=int(lead_id_raw),
-            telegram_user_id=user_id,
-        )
-        await telegram_service.send_message(
-            chat_id,
-            f"↪️ Задача перенесена до <b>{due_at.astimezone(_manager_tz()).strftime('%d.%m.%Y %H:%M')}</b>.",
-        )
-        return True
-
     if callback_data == "menu:home":
         await telegram_state_service.clear_state(user_id)
         await telegram_service.send_main_menu(chat_id)
+        return True
+
+    if callback_data == "menu:agent":
+        reply = await agent_service.handle_message(
+            db,
+            chat_id=chat_id,
+            telegram_user_id=user_id,
+            text="/agent",
+            source="text",
+        )
+        await telegram_service.send_message(
+            chat_id, reply.text, reply_markup=reply.reply_markup
+        )
         return True
     if callback_data == "menu:test":
         await _handle_kommo_test(chat_id, user_id, db)
         return True
     if callback_data == "menu:calendar":
-        await _handle_calendar_test(chat_id, user_id, include_write_probe=True)
+        await _handle_calendar_test(chat_id, user_id, include_write_probe=False)
         return True
     if callback_data == "menu:digest":
-        await _handle_morning_digest(chat_id, user_id, db)
+        reply = await agent_service.handle_message(
+            db,
+            chat_id=chat_id,
+            telegram_user_id=user_id,
+            text="/digest",
+            source="text",
+        )
+        await telegram_service.send_message(
+            chat_id, reply.text, reply_markup=reply.reply_markup
+        )
         return True
     if callback_data == "menu:notion":
-        await _handle_notion_test(chat_id)
+        reply = await agent_service.handle_message(
+            db,
+            chat_id=chat_id,
+            telegram_user_id=user_id,
+            text="/notion_test",
+            source="text",
+        )
+        await telegram_service.send_message(
+            chat_id, reply.text, reply_markup=reply.reply_markup
+        )
         return True
     if callback_data == "menu:jobs":
         await _show_audio_jobs(chat_id, user_id, db)
@@ -2461,6 +2466,19 @@ async def telegram_webhook(
                 return {"ok": True}
 
             try:
+                agent_reply = await agent_service.handle_callback(
+                    db,
+                    callback_data=callback_data,
+                    telegram_user_id=user_id,
+                )
+                if agent_reply is not None:
+                    await telegram_service.send_message(
+                        chat_id,
+                        agent_reply.text,
+                        reply_markup=agent_reply.reply_markup,
+                    )
+                    return {"ok": True}
+
                 handled = await _handle_manager_callback(
                     callback_data=callback_data,
                     chat_id=chat_id,
@@ -2512,36 +2530,48 @@ async def telegram_webhook(
             return {"ok": True}
 
         if text.startswith("/calendar_test_write"):
-            await _handle_calendar_test(chat_id, user_id, include_write_probe=True)
+            await telegram_service.send_message(
+                chat_id,
+                (
+                    "ℹ️ Тестовая запись в календарь отключена в безопасном режиме. "
+                    "Попроси агента создать реальное событие — перед записью он покажет "
+                    "предпросмотр и кнопку подтверждения."
+                ),
+            )
             return {"ok": True}
         if text.startswith("/calendar_test"):
-            await _handle_calendar_test(chat_id, user_id, include_write_probe=True)
+            await _handle_calendar_test(chat_id, user_id, include_write_probe=False)
             return {"ok": True}
 
-        if text.startswith(("/digest", "/morning")):
-            await _handle_morning_digest(chat_id, user_id, db)
+        if text.startswith(("/digest", "/morning", "/agent", "/help", "/errors", "/reset_memory", "/sync_leads")):
+            reply = await agent_service.handle_message(
+                db,
+                chat_id=chat_id,
+                telegram_user_id=user_id,
+                text=text,
+                source="text",
+                allow_conversation_passthrough=False,
+            )
+            if reply.text:
+                await telegram_service.send_message(
+                    chat_id, reply.text, reply_markup=reply.reply_markup
+                )
             return {"ok": True}
 
+        if text.startswith("/notion_test") and settings.agent_enabled:
+            reply = await agent_service.handle_message(
+                db,
+                chat_id=chat_id,
+                telegram_user_id=user_id,
+                text=text,
+                source="text",
+            )
+            await telegram_service.send_message(
+                chat_id, reply.text, reply_markup=reply.reply_markup
+            )
+            return {"ok": True}
         if text.startswith("/notion_test"):
             await _handle_notion_test(chat_id)
-            return {"ok": True}
-
-        if text.startswith("/sync_leads"):
-            reply = await operational_command_service.execute(
-                db,
-                command=operational_command_router.RoutedCommand("sync_leads"),
-                telegram_user_id=user_id,
-            )
-            await telegram_service.send_message(chat_id, reply.text)
-            return {"ok": True}
-
-        if text.startswith("/errors"):
-            reply = await operational_command_service.execute(
-                db,
-                command=operational_command_router.RoutedCommand("errors"),
-                telegram_user_id=user_id,
-            )
-            await telegram_service.send_message(chat_id, reply.text)
             return {"ok": True}
 
         if text.startswith("/jobs"):
@@ -2672,7 +2702,11 @@ async def telegram_webhook(
                 else:
                     await telegram_service.send_message(
                         chat_id,
-                        "🎙 Слушаю вашу команду…",
+                        (
+                            "🎙 Слушаю и определяю контекст…"
+                            if settings.agent_enabled and settings.agent_auto_voice_mode
+                            else "🎙 Слушаю вашу команду…"
+                        ),
                     )
                 return {"ok": True}
 
@@ -2719,6 +2753,10 @@ async def telegram_webhook(
                     await telegram_service.send_message(
                         chat_id,
                         (
+                            "🎙 Аудио поставлено в очередь. Агент определит: это команда, вопрос или разговор с клиентом.\n\n"
+                            "Если Celery worker не заберёт задачу, бот автоматически запустит резервную обработку."
+                            if settings.agent_enabled and settings.agent_auto_voice_mode
+                            else
                             "🎙 Команда поставлена в очередь.\n\n"
                             "Если Celery worker не заберёт задачу, бот автоматически запустит резервную обработку."
                         ),

@@ -9,6 +9,8 @@ import logging
 from redis.asyncio import Redis
 
 from app.celery_app import celery_app
+from app.agent import actions as agent_actions
+from app.agent import service as agent_service
 from app.config import get_settings
 from app.database import AsyncSessionLocal
 from app.services import (
@@ -229,67 +231,93 @@ async def _process(
             logger.info("Transcription complete: %d chars", len(transcript))
 
             if audio_intent == "command":
-                command_context = await crm_service.get_user_command_context(
-                    db, telegram_user_id=telegram_user_id
-                )
-                try:
-                    plan = await command_router_service.classify_message(
-                        transcript,
-                        context=command_context,
-                        command_only=True,
-                    )
-                except Exception as exc:
-                    logger.warning("Command classification failed: %s", exc)
-                    plan = command_router_service.CommandPlan("unknown", 0.0, {})
-                try:
-                    command_reply = await command_router_service.execute_plan(
+                if settings.agent_enabled:
+                    agent_reply = await agent_service.handle_message(
                         db,
-                        plan=plan,
                         chat_id=chat_id,
                         telegram_user_id=telegram_user_id,
-                        context=command_context,
-                        source_text=transcript,
+                        text=transcript,
+                        source="voice",
+                        allow_conversation_passthrough=settings.agent_auto_voice_mode,
+                        active_kommo_lead_id=target_kommo_lead_id,
                     )
-                except Exception as exc:
-                    logger.exception("Voice command execution failed")
+                    if agent_reply.handled:
+                        voice_note.audio_url = audio_url
+                        voice_note.transcript = transcript
+                        voice_note.language = language
+                        await crm_service.update_voice_note_status(
+                            db, voice_note, "ready", finished=True
+                        )
+                        if agent_reply.text:
+                            await telegram_service.send_message(
+                                chat_id,
+                                agent_reply.text,
+                                reply_markup=agent_reply.reply_markup,
+                            )
+                        await _mark_processing_done(
+                            telegram_user_id, telegram_message_id
+                        )
+                        return
+                    # The agent classified this as a client conversation. Continue
+                    # through the existing structured call-analysis pipeline.
+                    audio_intent = "new_lead"
+                else:
+                    command_context = await crm_service.get_user_command_context(
+                        db, telegram_user_id=telegram_user_id
+                    )
+                    try:
+                        plan = await command_router_service.classify_message(
+                            transcript,
+                            context=command_context,
+                            command_only=True,
+                        )
+                    except Exception as exc:
+                        logger.warning("Command classification failed: %s", exc)
+                        plan = command_router_service.CommandPlan("unknown", 0.0, {})
+                    try:
+                        command_reply = await command_router_service.execute_plan(
+                            db,
+                            plan=plan,
+                            chat_id=chat_id,
+                            telegram_user_id=telegram_user_id,
+                            context=command_context,
+                            source_text=transcript,
+                        )
+                    except Exception as exc:
+                        logger.exception("Voice command execution failed")
+                        await crm_service.update_voice_note_status(
+                            db,
+                            voice_note,
+                            "failed",
+                            error=f"command:{_user_error_text(exc)}",
+                            finished=True,
+                        )
+                        await telegram_service.send_message(
+                            chat_id,
+                            (
+                                "❌ <b>Команда не выполнена</b>\n\n"
+                                f"<code>{_user_error_text(exc)}</code>"
+                            ),
+                        )
+                        await _mark_processing_done(
+                            telegram_user_id, telegram_message_id
+                        )
+                        return
+
+                    voice_note.audio_url = audio_url
+                    voice_note.transcript = transcript
+                    voice_note.language = language
                     await crm_service.update_voice_note_status(
-                        db,
-                        voice_note,
-                        "failed",
-                        error=f"command:{_user_error_text(exc)}",
-                        finished=True,
+                        db, voice_note, "ready", finished=True
                     )
-                    await telegram_service.send_message(
-                        chat_id,
-                        (
-                            "❌ <b>Команда не выполнена</b>\n\n"
-                            f"<code>{_user_error_text(exc)}</code>\n\n"
-                            "Для календаря проверьте iCloud. Для Notion — ID базы и доступ интеграции."
-                        ),
-                    )
+                    if command_reply:
+                        await telegram_service.send_message(chat_id, command_reply)
+                    elif plan.intent in {"unknown", "analyze_conversation"}:
+                        await telegram_service.send_message(
+                            chat_id, command_router_service.COMMAND_NOT_RECOGNIZED
+                        )
                     await _mark_processing_done(telegram_user_id, telegram_message_id)
                     return
-
-                voice_note.audio_url = audio_url
-                voice_note.transcript = transcript
-                voice_note.language = language
-                await crm_service.update_voice_note_status(
-                    db,
-                    voice_note,
-                    "ready",
-                    finished=True,
-                )
-                if command_reply:
-                    await telegram_service.send_message(chat_id, command_reply)
-                elif plan.intent in {"unknown", "analyze_conversation"}:
-                    await telegram_service.send_message(
-                        chat_id, command_router_service.COMMAND_NOT_RECOGNIZED
-                    )
-                await _mark_processing_done(telegram_user_id, telegram_message_id)
-                return
-
-            if target_kommo_lead_id:
-                command_context["kommo_lead_id"] = target_kommo_lead_id
 
             await crm_service.update_voice_note_status(db, voice_note, "analyzing")
             await telegram_service.send_processing_step(
@@ -317,52 +345,88 @@ async def _process(
                 or lead.product_requested
                 or "Новый запрос"
             )
-            try:
-                notion_result = await notion_service.sync_analyzed_call(
-                    client_id=client.id,
-                    client_name=client.name,
-                    client_company=client.company,
-                    client_phone=client.phone,
-                    client_email=client.email,
-                    client_language=client.language,
-                    client_notion_page_id=client.notion_page_id,
-                    lead_id=lead.id,
-                    lead_title=lead_title,
-                    lead_product=lead.product_requested,
-                    lead_budget=lead.budget,
-                    lead_country=lead.country,
-                    lead_city=lead.city,
-                    lead_kommo_url=lead.kommo_url,
-                    lead_kommo_id=lead.kommo_lead_id,
-                    lead_notion_page_id=lead.notion_page_id,
-                    voice_note_id=voice_note.id,
-                    transcript=transcript,
-                    audio_url=audio_url,
-                    analysis=analysis,
-                )
-                await crm_service.save_notion_mapping(
+            notion_action_id: int | None = None
+            if settings.agent_enabled:
+                # Notion is an external write. In Agent v3 it is never performed
+                # silently: the manager receives a separate confirmation button.
+                action = await agent_actions.stage_action(
                     db,
-                    client_id=client.id,
-                    lead_id=lead.id,
-                    voice_note_id=voice_note.id,
-                    client_page_id=notion_result.client_page_id,
-                    lead_page_id=notion_result.lead_page_id,
-                    call_page_id=notion_result.call_page_id,
+                    telegram_user_id=telegram_user_id,
+                    chat_id=chat_id,
+                    action_type="sync_call_analysis_to_notion",
+                    payload={
+                        "local_lead_id": int(lead.id),
+                        "voice_note_id": int(voice_note.id),
+                    },
+                    preview_text=(
+                        "📓 Сохранить анализ разговора в Notion\n\n"
+                        f"Проект: {lead_title}\n"
+                        "Будут созданы или обновлены связанные записи клиента, "
+                        "проекта и звонка."
+                    ),
                 )
+                notion_action_id = int(action.id)
                 notion_line = (
-                    f"\n\n📓 {notion_result.message}"
-                    if notion_result.call_page_id
-                    else ""
+                    "\n\n📓 <b>Notion</b>: анализ ещё не сохранён. "
+                    "Нажми кнопку ниже, чтобы подтвердить запись."
                 )
-            except notion_service.NotionAPIError as exc:
-                logger.warning("Notion sync failed for voice_note_id=%s: %s", voice_note.id, exc)
-                notion_line = f"\n\n{notion_service.format_user_error(exc)}"
-            except Exception as exc:
-                logger.warning("Notion sync failed for voice_note_id=%s: %s", voice_note.id, exc)
-                notion_line = (
-                    "\n\n⚠️ Notion: не удалось сохранить.\n"
-                    f"{notion_service.notion_access_instructions(compact=True)}"
-                )
+            else:
+                # Compatibility path for installations that explicitly disable
+                # the unified agent and keep the legacy automatic integration.
+                try:
+                    notion_result = await notion_service.sync_analyzed_call(
+                        client_id=client.id,
+                        client_name=client.name,
+                        client_company=client.company,
+                        client_phone=client.phone,
+                        client_email=client.email,
+                        client_language=client.language,
+                        client_notion_page_id=client.notion_page_id,
+                        lead_id=lead.id,
+                        lead_title=lead_title,
+                        lead_product=lead.product_requested,
+                        lead_budget=lead.budget,
+                        lead_country=lead.country,
+                        lead_city=lead.city,
+                        lead_kommo_url=lead.kommo_url,
+                        lead_kommo_id=lead.kommo_lead_id,
+                        lead_notion_page_id=lead.notion_page_id,
+                        voice_note_id=voice_note.id,
+                        transcript=transcript,
+                        audio_url=audio_url,
+                        analysis=analysis,
+                    )
+                    await crm_service.save_notion_mapping(
+                        db,
+                        client_id=client.id,
+                        lead_id=lead.id,
+                        voice_note_id=voice_note.id,
+                        client_page_id=notion_result.client_page_id,
+                        lead_page_id=notion_result.lead_page_id,
+                        call_page_id=notion_result.call_page_id,
+                    )
+                    notion_line = (
+                        f"\n\n📓 {notion_result.message}"
+                        if notion_result.call_page_id
+                        else ""
+                    )
+                except notion_service.NotionAPIError as exc:
+                    logger.warning(
+                        "Notion sync failed for voice_note_id=%s: %s",
+                        voice_note.id,
+                        exc,
+                    )
+                    notion_line = f"\n\n{notion_service.format_user_error(exc)}"
+                except Exception as exc:
+                    logger.warning(
+                        "Notion sync failed for voice_note_id=%s: %s",
+                        voice_note.id,
+                        exc,
+                    )
+                    notion_line = (
+                        "\n\n⚠️ Notion: не удалось сохранить.\n"
+                        f"{notion_service.notion_access_instructions(compact=True)}"
+                    )
 
             report_text = telegram_service.format_report(analysis, transcript)
             report_text += notion_line
@@ -372,6 +436,7 @@ async def _process(
                 lead_id=lead.id,
                 voice_note_id=voice_note.id,
                 target_kommo_lead_id=target_kommo_lead_id,
+                notion_action_id=notion_action_id,
             )
             logger.info("Approval report sent for voice_note_id=%d", voice_note.id)
 

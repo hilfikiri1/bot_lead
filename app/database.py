@@ -37,7 +37,11 @@ async def get_db() -> AsyncSession:
 
 async def init_db():
     """Create all tables in development/tests; production uses Alembic."""
-    from app.models import action, ai_report, client, integration_check, integration_event, lead, voice_note  # noqa
+    from app.models import (  # noqa
+        action, agent_message, agent_session, ai_report, calendar_event, client,
+        integration_check, integration_event, lead, pending_agent_action,
+        spreadsheet_lead_mapping, voice_note,
+    )
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)

@@ -196,27 +196,33 @@ def deterministic_plan(text: str, context: dict[str, Any]) -> AgentPlan | None:
         return AgentPlan(intent="daily_digest", mode="read", confidence=1.0)
     if normalized in {"/evening", "подведи итоги дня"}:
         return AgentPlan(intent="daily_digest", mode="read", confidence=1.0)
-    if normalized in {"/today", "/plan", "план на сегодня"}:
+    if normalized in {"/today", "/plan", "plan", "план", "план на сегодня"}:
         return AgentPlan(intent="daily_plan", mode="read", confidence=1.0)
-    if normalized in {"/inbox", "inbox", "операционный inbox"}:
+    if normalized in {"/inbox", "inbox", "инбокс", "операционный inbox"}:
         return AgentPlan(intent="project_inbox", mode="read", confidence=1.0)
-    if normalized in {"/overdue", "просрочено", "просроченные"}:
+    if normalized in {"/overdue", "overdue", "просрочено", "просроченные"}:
         return AgentPlan(intent="overdue_actions", mode="read", confidence=1.0)
-    if normalized in {"/without_next", "без следующего шага", "нет следующей задачи"}:
+    if normalized in {"/without_next", "without next", "без следующего шага", "нет следующей задачи"}:
         return AgentPlan(intent="without_next_action", mode="read", confidence=1.0)
-    if normalized in {"/waiting_client", "ждём клиента", "ждем клиента"}:
+    if normalized in {"/waiting_client", "waiting client", "ждём клиента", "ждем клиента"}:
         return AgentPlan(intent="waiting_client", mode="read", confidence=1.0)
-    if normalized in {"/waiting_us", "клиент ждёт", "клиент ждет"}:
+    if normalized in {"/waiting_us", "waiting us", "клиент ждёт", "клиент ждет"}:
         return AgentPlan(intent="waiting_us", mode="read", confidence=1.0)
-    if normalized in {"/stale", "давно без контакта"}:
+    if normalized in {"/stale", "stale", "давно без контакта"}:
         return AgentPlan(intent="stale_projects", mode="read", confidence=1.0)
-    if normalized in {"/drive_status", "статус drive", "диагностика drive"}:
+    if normalized in {
+        "/drive_status",
+        "drive status",
+        "drive_status",
+        "статус drive",
+        "диагностика drive",
+    }:
         return AgentPlan(intent="drive_status", mode="read", confidence=1.0)
-    if normalized in {"/integration_status", "статус интеграций"}:
+    if normalized in {"/integration_status", "integration status", "статус интеграций"}:
         return AgentPlan(intent="integration_status", mode="read", confidence=1.0)
-    if normalized in {"/failed_actions", "ошибочные операции"}:
+    if normalized in {"/failed_actions", "failed actions", "ошибочные операции"}:
         return AgentPlan(intent="failed_actions", mode="read", confidence=1.0)
-    if normalized in {"/sheets_sync_preview", "превью sheets", "sheets preview"}:
+    if normalized in {"/sheets_sync_preview", "sheets preview", "превью sheets", "sheets sync preview"}:
         return AgentPlan(intent="sheets_sync_preview", mode="read", confidence=1.0)
     if normalized in {"/costs", "/cost", "расходы ai", "стоимость ai"}:
         return AgentPlan(intent="ai_costs", mode="read", confidence=1.0)

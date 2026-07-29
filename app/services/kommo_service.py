@@ -1028,19 +1028,53 @@ def _flatten_custom_fields(entity: dict[str, Any]) -> list[dict[str, str]]:
 
 
 def _contact_channels(contact: dict[str, Any]) -> tuple[list[str], list[str]]:
+    """Extract phones/emails from Kommo contact custom fields.
+
+    Kommo may expose channels via field_code (PHONE/EMAIL) and/or localized
+    field names without a stable code — accept both.
+    """
     phones: list[str] = []
     emails: list[str] = []
     for field in contact.get("custom_fields_values") or []:
         code = (field.get("field_code") or "").upper()
+        name = str(field.get("field_name") or field.get("name") or "").casefold()
+        field_type = str(field.get("field_type") or "").casefold()
         for item in field.get("values") or []:
             value = str(item.get("value") or "").strip()
             if not value:
                 continue
-            if code == "PHONE":
+            is_phone = code == "PHONE" or (
+                any(token in name for token in ("phone", "телефон", "мобил", "tel", "mobile", "whatsapp"))
+                and (
+                    field_type in {"phone", "multitext", ""}
+                    or code in {"", "PHONE"}
+                )
+            )
+            is_email = code == "EMAIL" or "@" in value or any(
+                token in name for token in ("email", "e-mail", "почта", "mail")
+            )
+            # Prefer explicit codes; avoid treating every multitext as phone.
+            if code == "PHONE" or (
+                code != "EMAIL"
+                and is_phone
+                and any(ch.isdigit() for ch in value)
+            ):
                 phones.append(value)
-            elif code == "EMAIL":
+            elif code == "EMAIL" or is_email:
                 emails.append(value)
-    return phones, emails
+    # Deduplicate while preserving order.
+    def _uniq(items: list[str]) -> list[str]:
+        seen: set[str] = set()
+        out: list[str] = []
+        for item in items:
+            key = item.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(item)
+        return out
+
+    return _uniq(phones), _uniq(emails)
 
 
 async def get_recent_common_notes(lead_id: int, limit: int = 5) -> list[dict[str, Any]]:

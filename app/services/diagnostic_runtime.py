@@ -207,4 +207,12 @@ def install_diagnostic_runtime() -> None:
 
     agent_service.handle_message = handle_message_with_diagnostics
     agent_service.handle_callback = handle_callback_with_diagnostics
+
+    # Install after aliases and wrappers are defined, so the hardening runtime can
+    # replace both module functions and the names imported above.
+    from app.services.diagnostics_hardening_runtime import (
+        install_diagnostics_hardening_runtime,
+    )
+
+    install_diagnostics_hardening_runtime()
     logger.info("System diagnostic runtime installed")

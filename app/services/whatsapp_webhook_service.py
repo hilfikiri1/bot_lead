@@ -155,6 +155,7 @@ async def _close_active_followup(
     lead_id = int(lead.get("id") or 0)
     if not lead_id:
         return False
+    message_id = str(item.get("message_id") or "") or None
     try:
         async with AsyncSessionLocal() as db:
             state = await followup_service.close_followup(
@@ -164,12 +165,13 @@ async def _close_active_followup(
                 waiting_on="us",
                 action_text="Ответить клиенту",
                 incoming_at=_incoming_at(item),
-                incoming_message_id=(
-                    str(item.get("message_id")) if item.get("message_id") else None
-                ),
+                incoming_message_id=message_id,
             )
             metadata = dict((state.metadata_json or {}).get("followup") or {}) if state else {}
-            return metadata.get("closed_reason") == "incoming_whatsapp"
+            return (
+                metadata.get("closed_reason") == "incoming_whatsapp"
+                and metadata.get("incoming_message_id") == message_id
+            )
     except Exception as exc:
         logger.warning("Could not reconcile WhatsApp reply with follow-up: %s", exc)
         return False

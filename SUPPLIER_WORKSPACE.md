@@ -61,6 +61,8 @@ Migration `012_supplier_offer_workspace` creates:
 - `supplier_inquiries`;
 - `supplier_offers`.
 
+The full stacked branch is validated against `main` before the PR is returned to its normal stacked base.
+
 ## Merge order
 
 This change is stacked after:

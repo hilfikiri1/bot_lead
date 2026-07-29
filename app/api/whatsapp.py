@@ -48,9 +48,19 @@ async def receive_webhook(
         payload = await request.json()
     except Exception as exc:
         raise HTTPException(status_code=400, detail="Invalid JSON") from exc
+
     messages = whatsapp_webhook_service.extract_incoming_messages(payload)
+    statuses = whatsapp_webhook_service.extract_status_updates(payload)
     for item in messages:
         background_tasks.add_task(
             whatsapp_webhook_service.notify_incoming_message, item
         )
-    return {"status": "accepted", "messages": len(messages)}
+    for item in statuses:
+        background_tasks.add_task(
+            whatsapp_webhook_service.process_status_update, item
+        )
+    return {
+        "status": "accepted",
+        "messages": len(messages),
+        "statuses": len(statuses),
+    }

@@ -16,7 +16,7 @@ from app.agent import audit
 from app.agent.security import sanitize_text
 from app.models.agent_user import AgentUser
 from app.models.client_message_draft import ClientMessageDraft
-from app.services import client_language_service, identity_service, kommo_service
+from app.services import client_language_service, contact_resolver, identity_service, kommo_service
 
 
 def normalize_whatsapp_phone(phone: str | None, *, language: str | None = None) -> str:
@@ -109,23 +109,22 @@ async def create_client_message_draft(
     channel: str = "whatsapp",
 ) -> ClientMessageDraft:
     actor = await _actor(db, telegram_user_id)
+    resolved = contact_resolver.resolve_contact(lead)
     contact = ((lead.get("contacts") or [{}])[0]) or {}
-    phones = contact.get("phones") or []
-    emails = contact.get("emails") or []
-    recipient = (phones[0] if phones else None) if channel == "whatsapp" else (
-        emails[0] if emails else None
+    recipient = (
+        resolved.phone_display or resolved.phone_normalized
+        if channel == "whatsapp"
+        else resolved.email
     )
     record = ClientMessageDraft(
         kommo_lead_id=int(lead["id"]),
-        kommo_contact_id=(
-            int(contact["id"]) if isinstance(contact.get("id"), int) else None
-        ),
+        kommo_contact_id=resolved.contact_id,
         client_id=client_id,
         channel=channel,
         communication_language=str(draft.get("language") or "pl")[:10],
         language_source=language_source[:32],
         recipient=recipient,
-        client_name=contact.get("name"),
+        client_name=resolved.name or contact.get("name"),
         company=next(
             (
                 str(field.get("value"))
@@ -144,7 +143,9 @@ async def create_client_message_draft(
             "lead_name": lead.get("name"),
             "lead_url": lead.get("url"),
             "draft_kind": draft.get("kind"),
-            "email": emails[0] if emails else None,
+            "email": resolved.email,
+            "phone_normalized": resolved.phone_normalized,
+            "contact_source": resolved.source,
         },
     )
     if not record.body:

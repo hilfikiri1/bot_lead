@@ -192,10 +192,32 @@ def deterministic_plan(text: str, context: dict[str, Any]) -> AgentPlan | None:
         return AgentPlan(intent="cancel_clarification", mode="read", confidence=1.0)
     if normalized in {"забудь контекст", "сбрось память", "reset memory", "/reset_memory"}:
         return AgentPlan(intent="reset_memory", mode="write", confidence=1.0)
-    if normalized in {"дайджест", "digest", "что делать сегодня", "задачи дня", "/digest", "/morning", "/today"}:
+    if normalized in {"дайджест", "digest", "что делать сегодня", "задачи дня", "/digest", "/morning"}:
         return AgentPlan(intent="daily_digest", mode="read", confidence=1.0)
     if normalized in {"/evening", "подведи итоги дня"}:
         return AgentPlan(intent="daily_digest", mode="read", confidence=1.0)
+    if normalized in {"/today", "/plan", "план на сегодня"}:
+        return AgentPlan(intent="daily_plan", mode="read", confidence=1.0)
+    if normalized in {"/inbox", "inbox", "операционный inbox"}:
+        return AgentPlan(intent="project_inbox", mode="read", confidence=1.0)
+    if normalized in {"/overdue", "просрочено", "просроченные"}:
+        return AgentPlan(intent="overdue_actions", mode="read", confidence=1.0)
+    if normalized in {"/without_next", "без следующего шага", "нет следующей задачи"}:
+        return AgentPlan(intent="without_next_action", mode="read", confidence=1.0)
+    if normalized in {"/waiting_client", "ждём клиента", "ждем клиента"}:
+        return AgentPlan(intent="waiting_client", mode="read", confidence=1.0)
+    if normalized in {"/waiting_us", "клиент ждёт", "клиент ждет"}:
+        return AgentPlan(intent="waiting_us", mode="read", confidence=1.0)
+    if normalized in {"/stale", "давно без контакта"}:
+        return AgentPlan(intent="stale_projects", mode="read", confidence=1.0)
+    if normalized in {"/drive_status", "статус drive", "диагностика drive"}:
+        return AgentPlan(intent="drive_status", mode="read", confidence=1.0)
+    if normalized in {"/integration_status", "статус интеграций"}:
+        return AgentPlan(intent="integration_status", mode="read", confidence=1.0)
+    if normalized in {"/failed_actions", "ошибочные операции"}:
+        return AgentPlan(intent="failed_actions", mode="read", confidence=1.0)
+    if normalized in {"/sheets_sync_preview", "превью sheets", "sheets preview"}:
+        return AgentPlan(intent="sheets_sync_preview", mode="read", confidence=1.0)
     if normalized in {"/costs", "/cost", "расходы ai", "стоимость ai"}:
         return AgentPlan(intent="ai_costs", mode="read", confidence=1.0)
     if normalized in {"ошибки", "последние ошибки", "журнал ошибок", "/errors"}:
@@ -423,11 +445,39 @@ def deterministic_plan(text: str, context: dict[str, Any]) -> AgentPlan | None:
         "что мы уже сделали",
         "какие вопросы остались",
         "покажи документы проекта",
+        "что мы обещали",
     )):
         return AgentPlan(
             intent="project_snapshot",
             mode="read",
             confidence=0.94,
+            lead_id=lead_id or context.get("active_kommo_lead_id"),
+            query=query,
+            lead_refs=lead_refs,
+            clarification_question=None if lead_id or query or lead_refs or context.get("active_kommo_lead_id") else user_error_hint(),
+        )
+
+    if normalized.startswith("/history") or any(
+        phrase in normalized for phrase in ("история проекта", "хронология", "timeline")
+    ):
+        history_query = None
+        if " " in normalized:
+            history_query = normalized.split(maxsplit=1)[1]
+        return AgentPlan(
+            intent="project_history",
+            mode="read",
+            confidence=0.95,
+            lead_id=lead_id or context.get("active_kommo_lead_id"),
+            query=query or history_query,
+            lead_refs=lead_refs,
+            clarification_question=None if lead_id or query or lead_refs or history_query or context.get("active_kommo_lead_id") else user_error_hint(),
+        )
+
+    if any(phrase in normalized for phrase in ("оценка лида", "класс лида", "a-лид", "приоритет лида", "/assess")):
+        return AgentPlan(
+            intent="lead_assessment",
+            mode="read",
+            confidence=0.93,
             lead_id=lead_id or context.get("active_kommo_lead_id"),
             query=query,
             lead_refs=lead_refs,

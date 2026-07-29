@@ -23,7 +23,7 @@ from app.services.telegram_service import (
 )
 
 settings = get_settings()
-APP_VERSION = "4.0.0-identity-language-whatsapp"
+APP_VERSION = "5.0.0"
 
 structlog.configure(
     processors=[
@@ -149,10 +149,30 @@ async def health():
     }
 
 
+@app.get("/ready")
+async def ready():
+    return {
+        "status": "ready",
+        "service": "buy-bring-crm-assistant",
+        "version": APP_VERSION,
+    }
+
+
+@app.get("/version")
+async def version():
+    return {
+        "version": APP_VERSION,
+        "service": "buy-bring-crm-assistant",
+        "agent": "v5.0-digital-operations-director",
+    }
+
+
 @app.get("/")
 async def root():
     return {
         "service": "Buy & Bring Solutions CRM Assistant",
+        "version": APP_VERSION,
         "health": "/health",
+        "ready": "/ready",
         "docs_enabled": docs_enabled,
     }

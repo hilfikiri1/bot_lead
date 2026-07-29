@@ -10,7 +10,8 @@ from app.models import (  # noqa: F401
     action, agent_message, agent_session, ai_report, calendar_event, client,
     integration_check, integration_event, lead, pending_agent_action,
     spreadsheet_lead_mapping, voice_note, agent_user, agent_invite,
-    client_message_draft,
+    client_message_draft, project_link, project_artifact, project_event, agent_v5,
+    ai_usage_event,
 )
 
 config = context.config

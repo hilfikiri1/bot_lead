@@ -250,6 +250,13 @@ class Settings(BaseSettings):
     agent_monthly_ai_budget_usd: float = 0
     agent_cost_warning_percent: int = 80
 
+    # Agent v5 — Digital Operations Director
+    agent_stale_days_default: int = 7
+    agent_source_timeout_seconds: int = 8
+    google_drive_internal_folder_id: str = ""
+    google_drive_restricted_folder_id: str = ""
+    google_drive_external_folder_id: str = ""
+
     # New operational Notion Data Sources (Notion API 2025-09-03)
     notion_projects_data_source_id: str = ""
     notion_tasks_data_source_id: str = ""

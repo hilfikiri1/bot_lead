@@ -39,7 +39,7 @@ from app.services.telegram_service import (
 )
 
 settings = get_settings()
-APP_VERSION = "5.0.0"
+APP_VERSION = "5.1.0"
 install_runtime_extensions()
 if followup_service.enabled():
     install_followup_runtime_extensions()
@@ -49,7 +49,7 @@ install_whatsapp_cloud_runtime()
 install_lead_registry_runtime()
 install_operator_experience_runtime()
 install_operator_experience_phone_patch()
-# Install last so /diag wraps the final production behavior of the agent.
+# Install last so /diag and kaizen wrap the final production behavior of the agent.
 install_diagnostic_runtime()
 
 structlog.configure(
@@ -111,12 +111,22 @@ async def lifespan(app: FastAPI):
             "Lead status sync scheduler enabled (manual service; background loop exits)"
         )
 
-    if settings.agent_morning_digest_enabled or settings.agent_evening_digest_enabled:
-        digest_task = await start_periodic_digest_loop()
-        app_logger.info(
-            "Agent scheduled digest enabled (morning=%s, evening=%s)",
+    scheduled_agent_enabled = any(
+        (
             settings.agent_morning_digest_enabled,
             settings.agent_evening_digest_enabled,
+            settings.agent_evening_reflection_enabled,
+            settings.agent_weekly_review_enabled,
+        )
+    )
+    if scheduled_agent_enabled:
+        digest_task = await start_periodic_digest_loop()
+        app_logger.info(
+            "Agent scheduler enabled (morning=%s, evening_digest=%s, reflection=%s, weekly=%s)",
+            settings.agent_morning_digest_enabled,
+            settings.agent_evening_digest_enabled,
+            settings.agent_evening_reflection_enabled,
+            settings.agent_weekly_review_enabled,
         )
 
     if followup_service.enabled():
@@ -182,38 +192,5 @@ if settings.enable_google_oauth_routes:
 
 
 @app.get("/health")
-async def health():
-    return {
-        "status": "ok",
-        "service": "buy-bring-crm-assistant",
-        "version": APP_VERSION,
-    }
-
-
-@app.get("/ready")
-async def ready():
-    return {
-        "status": "ready",
-        "service": "buy-bring-crm-assistant",
-        "version": APP_VERSION,
-    }
-
-
-@app.get("/version")
-async def version():
-    return {
-        "version": APP_VERSION,
-        "service": "buy-bring-crm-assistant",
-        "agent": "v5.2-diagnostics",
-    }
-
-
-@app.get("/")
-async def root():
-    return {
-        "service": "Buy & Bring Solutions CRM Assistant",
-        "version": APP_VERSION,
-        "health": "/health",
-        "ready": "/ready",
-        "docs_enabled": docs_enabled,
-    }
+async def health_check():
+    return {"status": "ok", "service": "buybring-crm-assistant", "version": APP_VERSION}

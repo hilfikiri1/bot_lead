@@ -89,7 +89,11 @@ async def execute_action(
     if action.status == "rejected":
         return "ℹ️ Действие уже отменено."
     if action.status == "failed":
-        return "⚠️ Действие ранее завершилось ошибкой. Создай его заново после проверки данных."
+        if not (
+            action.action_type.endswith("_batch")
+            and _batch_has_partial_success(action)
+        ):
+            return "⚠️ Действие ранее завершилось ошибкой. Создай его заново после проверки данных."
     if _aware(action.expires_at) < datetime.now(timezone.utc):
         action.status = "expired"
         await db.commit()
@@ -102,16 +106,17 @@ async def execute_action(
     started = time.monotonic()
     try:
         result = await _execute(db, action)
-        action.status = "executed"
+        partial_failed = bool(result.get("partial_failed"))
+        action.status = "failed" if partial_failed else "executed"
         action.executed_at = datetime.now(timezone.utc)
         action.result = result.get("data") or {}
-        action.error_message = None
+        action.error_message = sanitize_text(result.get("error_message"), limit=4000) if partial_failed else None
         await db.commit()
         await audit.record_event(
             db,
             service="agent",
             operation=action.action_type,
-            status="ok",
+            status="error" if partial_failed else "ok",
             external_id=str(action.id),
             telegram_user_id=telegram_user_id,
             duration_ms=int((time.monotonic() - started) * 1000),
@@ -135,6 +140,71 @@ async def execute_action(
             error_message=str(exc),
         )
         raise
+
+
+def _batch_item_results(action: PendingAgentAction) -> dict[str, Any]:
+    payload = dict(action.payload or {})
+    stored = payload.get("item_results") or action.result or {}
+    return dict(stored) if isinstance(stored, dict) else {}
+
+
+def _batch_has_partial_success(action: PendingAgentAction) -> bool:
+    results = _batch_item_results(action)
+    statuses = [item.get("status") for item in results.values() if isinstance(item, dict)]
+    return any(status == "ok" for status in statuses) and any(
+        status == "failed" for status in statuses
+    )
+
+
+def _batch_label(item: dict[str, Any]) -> str:
+    internal = item.get("internal_lead_number")
+    name = str(item.get("name") or item.get("lead_id") or "—")
+    if internal:
+        return f"№{internal} — {name}"
+    return name
+
+
+async def _execute_batch(
+    action: PendingAgentAction,
+    items: list[dict[str, Any]],
+    handler,
+) -> dict[str, Any]:
+    payload = dict(action.payload or {})
+    item_results = dict(payload.get("item_results") or {})
+    lines = ["<b>Результат пакетной операции</b>", ""]
+    failures = 0
+    for item in items:
+        lead_id = int(item["lead_id"])
+        key = str(lead_id)
+        prior = item_results.get(key) or {}
+        if prior.get("status") == "ok":
+            lines.append(f"✅ {html.escape(_batch_label(item))} — уже выполнено")
+            continue
+        try:
+            result = await handler(item)
+            item_results[key] = {"status": "ok", "result": result}
+            lines.append(f"✅ {html.escape(_batch_label(item))} — выполнено")
+        except Exception as exc:
+            failures += 1
+            item_results[key] = {
+                "status": "failed",
+                "error": sanitize_text(str(exc), limit=500),
+            }
+            lines.append(
+                f"❌ {html.escape(_batch_label(item))} — "
+                f"{html.escape(sanitize_text(str(exc), limit=200) or 'ошибка')}"
+            )
+    payload["item_results"] = item_results
+    action.payload = payload
+    partial_failed = failures > 0
+    if failures == len(items):
+        raise RuntimeError("Пакетная операция не выполнена для всех сделок.")
+    return {
+        "text": "\n".join(lines),
+        "data": {"item_results": item_results, "items": items},
+        "partial_failed": partial_failed,
+        "error_message": "Часть элементов завершилась ошибкой." if partial_failed else None,
+    }
 
 
 async def _execute(db: AsyncSession, action: PendingAgentAction) -> dict[str, Any]:
@@ -355,6 +425,34 @@ async def _execute(db: AsyncSession, action: PendingAgentAction) -> dict[str, An
             "text": "✅ <b>Черновик сохранён в Notion</b>\n\n" + "\n".join(x for x in links if x),
             "data": result,
         }
+
+    if action_type == "create_kommo_tasks_batch":
+        items = list(payload.get("items") or [])
+        due_at = str(payload.get("due_at") or "")
+        task_text = str(payload.get("task_text") or "Связаться с клиентом")[:1000]
+        start_at, _ = calendar_event_builder.parse_natural_datetime(due_at, duration_minutes=30)
+
+        async def _task(item: dict[str, Any]) -> dict[str, Any]:
+            return await kommo_service.create_lead_task(
+                lead_id=int(item["lead_id"]),
+                text=task_text,
+                complete_till=int(start_at.timestamp()),
+            )
+
+        return await _execute_batch(action, items, _task)
+
+    if action_type == "add_kommo_notes_batch":
+        items = list(payload.get("items") or [])
+        note_text = str(payload.get("note_text") or "")
+
+        async def _note(item: dict[str, Any]) -> dict[str, Any]:
+            return await kommo_service.add_text_note(
+                int(item["lead_id"]),
+                note_text,
+                source="B&BS AI Agent",
+            )
+
+        return await _execute_batch(action, items, _note)
 
     if action_type == "create_gmail_draft":
         draft_id = await asyncio.to_thread(

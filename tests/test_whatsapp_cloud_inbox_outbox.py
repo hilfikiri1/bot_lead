@@ -208,7 +208,7 @@ async def test_send_text_request_uses_meta_messages_endpoint(monkeypatch):
 
 def test_model_and_migration_are_registered():
     assert WhatsAppCloudMessage.__tablename__ == "whatsapp_cloud_messages"
-    migration = Path("alembic/versions/013_whatsapp_cloud_messages.py").read_text(
+    migration = Path("migrations/versions/013_whatsapp_cloud_messages.py").read_text(
         encoding="utf-8"
     )
     assert 'revision = "013_whatsapp_cloud_messages"' in migration

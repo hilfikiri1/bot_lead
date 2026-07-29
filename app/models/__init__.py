@@ -20,6 +20,7 @@ from app.models.client_message_draft import ClientMessageDraft
 from app.models.project_artifact import ProjectArtifact
 from app.models.project_event import ProjectEvent
 from app.models.supplier_workspace import ProjectSupplier, SupplierInquiry, SupplierOffer
+from app.models.whatsapp_cloud_message import WhatsAppCloudMessage
 from app.models.agent_v5 import (
     DocumentExtraction,
     IntegrationOperation,
@@ -54,6 +55,7 @@ __all__ = [
     "ProjectSupplier",
     "SupplierInquiry",
     "SupplierOffer",
+    "WhatsAppCloudMessage",
     "ProjectMemory",
     "LeadAssessment",
     "NextActionState",

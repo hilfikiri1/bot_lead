@@ -365,10 +365,7 @@ async def _handle_client_message_callback(
             raise
         await telegram_service.send_message(
             chat_id,
-            (
-                "✅ <b>Сообщение отмечено как отправленное</b>\n\n"
-                "Результат и текст записаны в Kommo. Аудит отправителя сохранён."
-            ),
+            client_message_service.format_sent_confirmation(record),
         )
         return True
 

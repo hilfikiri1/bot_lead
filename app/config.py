@@ -182,6 +182,17 @@ class Settings(BaseSettings):
     notion_leads_database_id: str = ""
     notion_calls_database_id: str = ""
     notion_tasks_database_id: str = ""
+
+    # B&BS Operational Agent v2 (modern Notion Data Sources API)
+    notion_projects_data_source_id: str = "fcb024d7-ac9f-4948-a2e9-715fa011c712"
+    notion_tasks_data_source_id: str = "56d63b07-c16c-4077-a78f-0b44741d58f0"
+    notion_offers_data_source_id: str = "e463541b-a37f-4d9e-a669-34b00f29543d"
+    notion_catalogs_data_source_id: str = "c48bfbd8-3252-4d87-8bc0-e71486d5f012"
+    notion_communications_data_source_id: str = "f99276f0-f95d-4aeb-8a5b-71fda8195492"
+    notion_sync_enabled: bool = True
+    digest_max_items: int = 10
+    natural_command_router_enabled: bool = True
+
     voice_command_mode: bool = True
     morning_digest_enabled: bool = True
     morning_digest_hour: int = 8

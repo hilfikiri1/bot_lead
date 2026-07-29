@@ -261,3 +261,13 @@ buybring/
 Google Calendar (service account), неразобранные сделки Kommo с Google Sheets, редактирование сделок в Telegram, Notion auto-sync, голосовые команды менеджера, авто-миграции БД при старте.
 
 Подробности, env vars и чеклист после deployment: [`PHASE2_RELEASE_NOTES.md`](PHASE2_RELEASE_NOTES.md).
+
+## B&BS Operational Agent v2
+
+The repository now supports a separate modern Notion Data Sources integration
+for the B&BS operational workspace, Kommo-based daily digests, deduplicated
+Notion tasks, integration error logging, and review-only AI drafts. Existing
+legacy Notion call synchronization remains available for backward compatibility.
+
+See [OPERATIONAL_AGENT_V2.md](OPERATIONAL_AGENT_V2.md) for configuration and
+commands.

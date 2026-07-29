@@ -1,10 +1,12 @@
 """Telegram runtime integration for the unified communication timeline."""
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Awaitable, Callable
 
+from app.agent import service as agent_service
 from app.agent import tools as agent_tools
 from app.services import telegram_service, unified_communication_service
+from app.services.lead_registry_runtime import install_lead_registry_runtime
 
 _INSTALLED = False
 
@@ -41,6 +43,30 @@ def _add_timeline_button(markup: dict[str, Any], lead_id: int) -> dict[str, Any]
     )
     rows.insert(insert_at, [button])
     return result
+
+
+async def _delegate_agent_callback(
+    original_callback: Callable[..., Awaitable[Any]],
+    *,
+    db: Any,
+    callback_data: str,
+    telegram_user_id: int,
+    chat_id: int | None = None,
+) -> Any:
+    """Reserve ``agent:comms:*`` for the timeline manager callback.
+
+    Telegram invokes the generic agent callback before the manager callback.
+    Without this bypass the generic parser returns "Некорректная команда агента"
+    and the timeline handler never receives the button.
+    """
+    if callback_data.startswith("agent:comms:"):
+        return None
+    return await original_callback(
+        db,
+        callback_data=callback_data,
+        telegram_user_id=telegram_user_id,
+        chat_id=chat_id,
+    )
 
 
 async def _handle_timeline_callback(
@@ -94,6 +120,25 @@ def install_communication_timeline_runtime() -> None:
 
     agent_tools.lead_card_actions_markup = lead_card_actions_with_timeline
 
+    original_agent_callback = agent_service.handle_callback
+
+    async def agent_callback_with_timeline_bypass(
+        db: Any,
+        *,
+        callback_data: str,
+        telegram_user_id: int,
+        chat_id: int | None = None,
+    ) -> Any:
+        return await _delegate_agent_callback(
+            original_agent_callback,
+            db=db,
+            callback_data=callback_data,
+            telegram_user_id=telegram_user_id,
+            chat_id=chat_id,
+        )
+
+    agent_service.handle_callback = agent_callback_with_timeline_bypass
+
     from app.api import telegram as telegram_api
 
     original_manager_callback = telegram_api._handle_manager_callback
@@ -105,3 +150,4 @@ def install_communication_timeline_runtime() -> None:
         return await original_manager_callback(**kwargs)
 
     telegram_api._handle_manager_callback = manager_callback_with_timeline
+    install_lead_registry_runtime()

@@ -21,6 +21,7 @@ _TITLE_CACHE: dict[str, str] = {}
 _MAX_CHARS = 35
 
 _DETERMINISTIC_RULES: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"\bherbat", re.I), "Чай"),
     (re.compile(r"zabawk", re.I), "Игрушки"),
     (re.compile(r"minikopark", re.I), "Мини-экскаваторы"),
     (re.compile(r"pellet.*sosn|sosnowy.*pellet", re.I), "Сосновый пеллет"),

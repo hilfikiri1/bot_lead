@@ -281,13 +281,15 @@ vCard contact files and audited manual-send confirmation in Kommo.
 Automatic WhatsApp Cloud API sending remains disabled. Deployment and smoke
 tests: [`AGENT_V4_IDENTITY_LANGUAGE_WHATSAPP.md`](AGENT_V4_IDENTITY_LANGUAGE_WHATSAPP.md).
 
-## Kommo ↔ Google Sheets status sync
+## Kommo ↔ Google Sheets lead registry sync
 
-The existing Telegram bot can compare Kommo stages with the status column in
-the lead spreadsheet, report mismatches, duplicates, and missing records, and
-optionally update only the spreadsheet after a two-step Telegram confirmation.
-Kommo is never modified by this feature, and spreadsheet writes are disabled by
-default.
+The Telegram bot keeps the marketing spreadsheet and Kommo in their separate
+roles. Spreadsheet column W (SQL, MQL, Нецелевой, Игнор, and related labels)
+remains an independent marketing classification and is never copied from a
+Kommo pipeline stage. The sync prepares sequential IDs in Y, concise marketing
+history in X, and numbered Kommo lead names. Every write requires a fresh
+preview and explicit Telegram confirmation; writes remain disabled by default.
 
 See [STATUS_SYNC_SETUP.md](STATUS_SYNC_SETUP.md) for Railway variables and the
-safe rollout checklist.
+safe rollout checklist. The implementation contract and acceptance test are in
+[AGENT_V4_3_MARKETING_LEAD_SYNC.md](AGENT_V4_3_MARKETING_LEAD_SYNC.md).

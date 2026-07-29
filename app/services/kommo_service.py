@@ -669,6 +669,7 @@ async def get_all_leads_for_status_sync(
             "page": page,
             "limit": PAGE_SIZE,
             "order[updated_at]": "desc",
+            "with": "contacts",
         }
         if selected_pipeline is not None:
             params["filter[pipeline_id]"] = selected_pipeline
@@ -693,6 +694,8 @@ async def get_all_leads_for_status_sync(
     for lead in leads:
         current_pipeline_id = lead.get("pipeline_id")
         status_id = lead.get("status_id")
+        contact_refs = (lead.get("_embedded") or {}).get("contacts") or []
+        contact_id = contact_refs[0].get("id") if contact_refs else None
         normalized.append(
             {
                 "id": lead.get("id"),
@@ -708,6 +711,7 @@ async def get_all_leads_for_status_sync(
                 "updated_at": lead.get("updated_at"),
                 "created_at": lead.get("created_at"),
                 "closed_at": lead.get("closed_at"),
+                "contact_id": contact_id if isinstance(contact_id, int) else None,
                 "url": f"{_base_url()}/leads/detail/{lead.get('id')}",
             }
         )

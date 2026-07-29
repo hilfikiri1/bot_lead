@@ -69,6 +69,22 @@ def upgrade() -> None:
             "period_end",
             name="uq_kaizen_journal_user_type_period",
         ),
+        sa.CheckConstraint(
+            "entry_type IN ('daily', 'weekly')",
+            name="ck_kaizen_journal_entry_type",
+        ),
+        sa.CheckConstraint(
+            "status IN ('open', 'completed', 'skipped')",
+            name="ck_kaizen_journal_status",
+        ),
+        sa.CheckConstraint(
+            "source IN ('text', 'voice', 'scheduled', 'system')",
+            name="ck_kaizen_journal_source",
+        ),
+        sa.CheckConstraint(
+            "period_end >= period_start",
+            name="ck_kaizen_journal_period_order",
+        ),
     )
     for column in (
         "telegram_user_id",

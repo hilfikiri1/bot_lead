@@ -70,6 +70,55 @@ def _project_upload_lead_id(state: dict[str, Any] | None) -> int | None:
     return lead_id if lead_id > 0 else None
 
 
+async def _safe_get_state(telegram_user_id: int) -> dict[str, Any] | None:
+    try:
+        return await telegram_state_service.get_state(telegram_user_id)
+    except Exception as exc:
+        logger.warning(
+            "Could not read project upload Telegram state for user %s: %s",
+            telegram_user_id,
+            type(exc).__name__,
+        )
+        return None
+
+
+async def _safe_set_upload_state(
+    telegram_user_id: int,
+    *,
+    chat_id: int,
+    lead_id: int,
+) -> bool:
+    try:
+        await telegram_state_service.set_state(
+            telegram_user_id,
+            {
+                "mode": "awaiting_project_file",
+                "chat_id": chat_id,
+                "kommo_lead_id": lead_id,
+            },
+            ttl_seconds=settings.telegram_state_ttl_minutes * 60,
+        )
+        return True
+    except Exception as exc:
+        logger.warning(
+            "Could not persist project upload Telegram state for user %s: %s",
+            telegram_user_id,
+            type(exc).__name__,
+        )
+        return False
+
+
+async def _safe_clear_state(telegram_user_id: int) -> None:
+    try:
+        await telegram_state_service.clear_state(telegram_user_id)
+    except Exception as exc:
+        logger.warning(
+            "Could not clear project upload Telegram state for user %s: %s",
+            telegram_user_id,
+            type(exc).__name__,
+        )
+
+
 def install_critical_workflow_runtime() -> None:
     """Install production-safe wrappers exactly once."""
 
@@ -107,14 +156,10 @@ def install_critical_workflow_runtime() -> None:
         if lead_id <= 0:
             return reply
 
-        await telegram_state_service.set_state(
+        state_saved = await _safe_set_upload_state(
             telegram_user_id,
-            {
-                "mode": "awaiting_project_file",
-                "chat_id": int(chat_id or 0),
-                "kommo_lead_id": lead_id,
-            },
-            ttl_seconds=settings.telegram_state_ttl_minutes * 60,
+            chat_id=int(chat_id or 0),
+            lead_id=lead_id,
         )
         reply.text = (
             reply.text.rstrip()
@@ -122,6 +167,11 @@ def install_critical_workflow_runtime() -> None:
             + "Отправь файл до 20 МБ. PDF/Excel отправляй через «Файл/Документ», "
             + "а изображение — как фото."
         )
+        if not state_saved:
+            reply.text += (
+                "\n\n⚠️ Redis state недоступен, поэтому не меняй проект до отправки файла. "
+                "Бот использует текущий активный проект."
+            )
         return reply
 
     agent_service.handle_callback = handle_callback_with_project_upload_state
@@ -140,7 +190,7 @@ def install_critical_workflow_runtime() -> None:
         caption: str | None = None,
         kind: str | None = None,
     ) -> Any:
-        state = await telegram_state_service.get_state(telegram_user_id)
+        state = await _safe_get_state(telegram_user_id)
         bound_lead_id = _project_upload_lead_id(state)
         if bound_lead_id:
             session = await memory.get_or_create_session(
@@ -169,7 +219,7 @@ def install_critical_workflow_runtime() -> None:
             "file_upload_duplicate_pending",
             "file_upload_duplicate",
         }:
-            await telegram_state_service.clear_state(telegram_user_id)
+            await _safe_clear_state(telegram_user_id)
         return reply
 
     agent_service.handle_project_file_upload = (

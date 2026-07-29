@@ -244,7 +244,16 @@ def test_next_action_uses_persisted_waiting_state_and_due_date():
 
 @pytest.mark.asyncio
 async def test_whatsapp_incoming_reconciles_active_followup(monkeypatch):
-    close = AsyncMock(return_value=SimpleNamespace(metadata_json={"followup": {"closed_reason": "incoming_whatsapp"}}))
+    close = AsyncMock(
+        return_value=SimpleNamespace(
+            metadata_json={
+                "followup": {
+                    "closed_reason": "incoming_whatsapp",
+                    "incoming_message_id": "wamid-2",
+                }
+            }
+        )
+    )
     monkeypatch.setattr(whatsapp_webhook_service.followup_service, "enabled", lambda: True)
     monkeypatch.setattr(whatsapp_webhook_service.followup_service, "close_followup", close)
 

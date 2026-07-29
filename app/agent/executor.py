@@ -10,7 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.agent import audit, notion_gateway
+from app.agent import audit, notion_gateway, project_drive, project_linking
 from app.agent.security import sanitize_text
 from app.models.pending_agent_action import PendingAgentAction
 from app.models.ai_report import AIReport
@@ -21,8 +21,11 @@ from app.services import (
     calendar_scheduling_service,
     crm_service,
     gmail_service,
+    google_drive_service,
     kommo_service,
     notion_service,
+    project_link_service,
+    storage_service,
 )
 from app.services.calendar_event_builder import ScheduledEventDraft
 
@@ -467,6 +470,76 @@ async def _execute(db: AsyncSession, action: PendingAgentAction) -> dict[str, An
                 "✅ <b>Черновик создан в Gmail</b>\n\n"
                 f"Получатель: <code>{html.escape(str(payload['to']))}</code>\n"
                 f"Draft ID: <code>{html.escape(str(draft_id))}</code>"
+            ),
+            "data": result,
+        }
+
+    if action_type == "create_drive_project":
+        result = await project_drive.execute_drive_project(db, payload=payload)
+        lines = [
+            "✅ <b>Проект создан в Google Drive</b>",
+            "",
+            f"Project key: <code>{html.escape(str(result.get('project_key') or '—'))}</code>",
+            f"Подпапок: <b>{int(result.get('subfolder_count') or 0)}</b>",
+        ]
+        link = _result_link("Открыть папку", result.get("drive_folder_url"))
+        if link:
+            lines.append(link)
+        return {"text": "\n".join(lines), "data": result}
+
+    if action_type == "link_project_systems":
+        lead = await kommo_service.get_lead_details(int(payload["kommo_lead_id"]))
+        result = await project_linking.execute_link_systems(db, lead=lead, payload=payload)
+        links = [
+            _result_link("Kommo", result.get("kommo_url")),
+            _result_link("Notion", result.get("notion_url")),
+            _result_link("Drive", result.get("drive_folder_url")),
+        ]
+        return {
+            "text": (
+                "✅ <b>Системы проекта связаны</b>\n\n"
+                f"Project key: <code>{html.escape(str(result.get('project_key') or '—'))}</code>\n"
+                + "\n".join(x for x in links if x)
+            ),
+            "data": result,
+        }
+
+    if action_type == "save_file_to_drive_project":
+        kommo_id = int(payload["kommo_lead_id"])
+        link = await project_link_service.get_by_kommo_lead_id(db, kommo_id)
+        if not link or not link.drive_folder_id:
+            raise ValueError("Сначала создайте проект в Google Drive для этой сделки.")
+        parent_id = str(link.drive_folder_id)
+        subfolder = str(payload.get("subfolder_name") or "").strip()
+        if subfolder:
+            children = await google_drive_service.list_project_files(parent_id, limit=100)
+            match = next(
+                (item for item in children if str(item.get("name") or "") == subfolder),
+                None,
+            )
+            if match and match.get("id"):
+                parent_id = str(match["id"])
+        content = await asyncio.to_thread(
+            storage_service.read_project_file_bytes, str(payload["storage_path"])
+        )
+        uploaded = await google_drive_service.upload_file(
+            parent_folder_id=parent_id,
+            filename=str(payload.get("filename") or "file"),
+            content=content,
+            mime_type=str(payload.get("mime_type") or "application/octet-stream"),
+        )
+        result = {
+            "file_id": uploaded.get("id"),
+            "file_url": uploaded.get("webViewLink"),
+            "filename": uploaded.get("name"),
+            "project_key": link.project_key,
+        }
+        return {
+            "text": (
+                "✅ <b>Файл загружен в Google Drive</b>\n\n"
+                f"Проект: <code>{html.escape(str(link.project_key))}</code>\n"
+                f"Файл: {html.escape(str(uploaded.get('name') or payload.get('filename') or '—'))}\n"
+                + _result_link("Открыть файл", uploaded.get("webViewLink"))
             ),
             "data": result,
         }

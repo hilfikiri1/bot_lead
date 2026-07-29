@@ -586,8 +586,10 @@ async def set_bot_commands() -> dict:
     commands = [
         {"command": "menu", "description": "Главное меню"},
         {"command": "jobs", "description": "Статус обработки аудио"},
-        {"command": "digest", "description": "Утренний дайджест Notion"},
-        {"command": "notion_test", "description": "Проверить Notion"},
+        {"command": "digest", "description": "Приоритеты Kommo и задачи дня"},
+        {"command": "notion_test", "description": "Проверить новую структуру Notion"},
+        {"command": "sync_leads", "description": "Синхронизировать Kommo → Notion"},
+        {"command": "errors", "description": "Последние ошибки интеграций"},
         {"command": "kommo_test", "description": "Проверить Kommo"},
         {"command": "calendar_test", "description": "Проверить Google Calendar"},
         {"command": "calendar_test_write", "description": "Тест записи в Google Calendar"},

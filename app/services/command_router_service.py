@@ -20,6 +20,8 @@ from app.services import (
     crm_service,
     kommo_service,
     notion_service,
+    operational_command_router,
+    operational_command_service,
     telegram_service,
 )
 
@@ -135,6 +137,15 @@ async def classify_message(
     transcript = text.strip()
     if not transcript:
         return CommandPlan("unknown", 0.0, {})
+
+    if settings.natural_command_router_enabled:
+        operational = operational_command_router.route(transcript)
+        if operational is not None:
+            return CommandPlan(
+                intent=f"operational:{operational.intent}",
+                confidence=1.0,
+                raw={"operational_args": operational.args},
+            )
 
     if command_only:
         if not _looks_like_command(transcript, strict=True):
@@ -414,6 +425,27 @@ async def _execute_plan_body(
 ) -> str | None:
     if plan.intent == "analyze_conversation":
         return None
+
+    if plan.intent.startswith("operational:"):
+        intent = plan.intent.split(":", 1)[1]
+        command = operational_command_router.RoutedCommand(
+            intent=intent,
+            args=dict(plan.raw.get("operational_args") or {}),
+        )
+        reply = await operational_command_service.execute(
+            db,
+            command=command,
+            telegram_user_id=telegram_user_id,
+        )
+        if reply.reply_markup:
+            await telegram_service.send_message(
+                chat_id,
+                reply.text,
+                reply_markup=reply.reply_markup,
+            )
+            return ""
+        return reply.text
+
     if plan.confidence < 0.65 and plan.intent not in {"morning_digest"}:
         question = plan.raw.get("clarification_question")
         if question:

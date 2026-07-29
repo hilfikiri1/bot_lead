@@ -17,6 +17,9 @@ from app.config import get_settings
 from app.db_migrations import upgrade_database
 from app.services import followup_service, lead_status_sync_service
 from app.services.agent_scheduled_digest_service import start_periodic_digest_loop
+from app.services.communication_timeline_runtime import (
+    install_communication_timeline_runtime,
+)
 from app.services.followup_runtime import install_followup_runtime_extensions
 from app.services.runtime_extensions import install_runtime_extensions
 from app.services.telegram_service import (
@@ -30,6 +33,7 @@ APP_VERSION = "5.0.0"
 install_runtime_extensions()
 if followup_service.enabled():
     install_followup_runtime_extensions()
+install_communication_timeline_runtime()
 
 structlog.configure(
     processors=[
@@ -179,7 +183,7 @@ async def version():
     return {
         "version": APP_VERSION,
         "service": "buy-bring-crm-assistant",
-        "agent": "v5.0-automatic-followup",
+        "agent": "v5.0-unified-communications",
     }
 
 

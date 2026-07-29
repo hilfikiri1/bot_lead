@@ -12,10 +12,12 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.admin import router as admin_router
 from app.api.telegram import router as telegram_router
+from app.api.whatsapp import router as whatsapp_router
 from app.config import get_settings
 from app.db_migrations import upgrade_database
 from app.services import lead_status_sync_service
 from app.services.agent_scheduled_digest_service import start_periodic_digest_loop
+from app.services.runtime_extensions import install_runtime_extensions
 from app.services.telegram_service import (
     delete_webhook,
     register_webhook,
@@ -24,6 +26,7 @@ from app.services.telegram_service import (
 
 settings = get_settings()
 APP_VERSION = "5.0.0"
+install_runtime_extensions()
 
 structlog.configure(
     processors=[
@@ -32,7 +35,7 @@ structlog.configure(
         structlog.dev.ConsoleRenderer(),
     ],
     wrapper_class=structlog.BoundLogger,
-    logger_factory=structlog.PrintLoggerFactory(),
+    logger_factory=structlog.PrintLoggerFactory,
 )
 logging.basicConfig(level=settings.log_level)
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -80,8 +83,7 @@ async def lifespan(app: FastAPI):
             name="lead-status-sync",
         )
         app_logger.info(
-            "Lead status sync scheduler enabled (report-only, interval=%s min)",
-            settings.lead_status_sync_interval_minutes,
+            "Lead status sync scheduler enabled (manual service; background loop exits)"
         )
 
     if settings.agent_morning_digest_enabled or settings.agent_evening_digest_enabled:
@@ -127,11 +129,13 @@ if cors_origins:
             "Content-Type",
             "X-Admin-Key",
             "X-Telegram-Bot-Api-Secret-Token",
+            "X-Hub-Signature-256",
         ],
         allow_credentials=False,
     )
 
 app.include_router(telegram_router)
+app.include_router(whatsapp_router)
 app.include_router(admin_router)
 
 if settings.enable_google_oauth_routes:

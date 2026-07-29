@@ -84,3 +84,52 @@ def test_resolver_reads_phone_from_flattened_custom_fields():
     contact = resolve_contact(lead)
     assert contact.phone_normalized == "48501407028"
     assert contact.name == "Anna Mosińska"
+
+
+def test_resolver_reads_polish_lead_form_phone_when_contact_empty():
+    """Lead 143-like: Messenger contact empty, phone in form custom field."""
+    lead = {
+        "id": 12886003,
+        "name": "143 - Запчасти",
+        "pipeline_name": "Польша (1 этап)",
+        "status_name": "Получен ответ",
+        "contacts": [
+            {
+                "id": 42,
+                "name": "Tomasz Żagan",
+                "phones": [],
+                "emails": [],
+                "custom_fields": [],
+            }
+        ],
+        "custom_fields": [
+            {"name": "E-mail", "code": "", "value": ""},
+            {"name": "Номер телефона", "code": "PHONE", "value": ""},
+            {
+                "name": "Proszę podać swój numer telefonu",
+                "code": "",
+                "value": "512380755",
+            },
+            {"name": "Jaką wartość zamówienia rozważasz?", "code": "", "value": ""},
+        ],
+    }
+    contact = resolve_contact(lead)
+    assert contact.name == "Tomasz Żagan"
+    assert contact.phone_normalized == "48512380755"
+    assert contact.phone_display == "+48 512 380 755"
+    assert contact.source == "kommo_contact_lead_phone"
+
+
+def test_kommo_phone_extracted_from_polish_telefon_label():
+    contact = {
+        "custom_fields_values": [
+            {
+                "field_name": "Numer telefonu",
+                "field_code": None,
+                "field_type": "text",
+                "values": [{"value": "512380755"}],
+            }
+        ]
+    }
+    phones, _ = _contact_channels(contact)
+    assert phones == ["512380755"]

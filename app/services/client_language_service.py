@@ -179,9 +179,12 @@ def infer_direction_language(lead: dict[str, Any]) -> tuple[str, float] | None:
             field_values,
         )
     ).casefold()
-    if re.search(r"\b(polsk|poland|polska|warszaw|krak[oó]w|pozna[nń])", haystack):
+    if re.search(
+        r"(polsk|poland|polska|польш|польск|warszaw|krak[oó]w|pozna[nń])",
+        haystack,
+    ):
         return "pl", 0.82
-    if re.search(r"\b(ukrain|україн|украин|київ|киев|львів|одес)", haystack):
+    if re.search(r"(ukrain|україн|украин|київ|киев|львів|одес)", haystack):
         return "uk", 0.82
     return None
 

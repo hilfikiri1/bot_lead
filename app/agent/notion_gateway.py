@@ -820,19 +820,24 @@ async def create_project_communication(
     communication_type: str = "Входящее",
     status: str = "Зафиксировано",
     occurred_at: datetime | None = None,
+    title: str | None = None,
+    topic: str | None = None,
 ) -> dict[str, Any] | None:
     """Persist a confirmed project update as a Notion communication."""
     occurred_at = occurred_at or datetime.now(timezone.utc)
     properties: dict[str, Any] = {
         "Название": _title(
-            f"Переговоры — {lead.get('name') or lead.get('id')} — "
-            f"{occurred_at.date().isoformat()}"
+            title
+            or (
+                f"Переговоры — {lead.get('name') or lead.get('id')} — "
+                f"{occurred_at.date().isoformat()}"
+            )
         ),
         "Канал": {"select": {"name": channel}},
         "Тип": {"select": {"name": communication_type}},
         "Статус": {"select": {"name": status}},
         "Дата и время": {"date": {"start": occurred_at.isoformat()}},
-        "Тема": _rich_text("Обновление проекта"),
+        "Тема": _rich_text(topic or "Обновление проекта"),
         "Краткое содержание": _rich_text(summary[:1500]),
         "Полный текст": _rich_text(full_text),
         "Kommo ID": {"number": int(lead["id"])},
@@ -843,6 +848,132 @@ async def create_project_communication(
         source_id=settings.notion_communications_data_source_id,
         properties=properties,
     )
+
+
+async def resolve_project_page_id(
+    kommo_lead_id: int,
+    *,
+    preferred_page_id: str | None = None,
+) -> str | None:
+    """Prefer an existing ProjectLink page id, else look up by Kommo ID."""
+    if preferred_page_id and str(preferred_page_id).strip():
+        return str(preferred_page_id).strip()
+    source_id = settings.notion_projects_data_source_id.strip()
+    if not source_id:
+        return None
+    matches = await query_by_number(source_id, "Kommo ID", int(kommo_lead_id))
+    if not matches:
+        return None
+    return str(matches[0].get("id") or "") or None
+
+
+async def touch_project_last_contact(
+    *,
+    project_page_id: str,
+    occurred_at: datetime | None = None,
+    next_step: str | None = None,
+) -> dict[str, Any]:
+    """Update Notion project «Последний контакт» after an outbound touch."""
+    occurred_at = occurred_at or datetime.now(timezone.utc)
+    properties: dict[str, Any] = {
+        "Последний контакт": {"date": {"start": occurred_at.isoformat()}},
+    }
+    if next_step:
+        properties["Следующий шаг"] = _rich_text(next_step)
+    data = await _request(
+        "PATCH",
+        f"/pages/{project_page_id}",
+        json={"properties": properties},
+    )
+    return {
+        "id": project_page_id,
+        "url": data.get("url") or notion_page_url(project_page_id),
+    }
+
+
+async def log_manual_whatsapp_send(
+    *,
+    lead: dict[str, Any],
+    body: str,
+    language: str,
+    sender_label: str,
+    delivery_marker: str,
+    project_page_id: str | None,
+    occurred_at: datetime | None = None,
+) -> dict[str, Any] | None:
+    """Write a confirmed manual WhatsApp send into Notion communications."""
+    if not settings.notion_api_token.strip():
+        return None
+    if not settings.notion_communications_data_source_id.strip():
+        return None
+    occurred_at = occurred_at or datetime.now(timezone.utc)
+    resolved_project_id = await resolve_project_page_id(
+        int(lead["id"]),
+        preferred_page_id=project_page_id,
+    )
+    summary = (
+        f"[{delivery_marker}] WhatsApp follow-up отправлен вручную "
+        f"({str(language or 'pl').upper()}, {sender_label})."
+    )
+    full_text = (
+        f"{summary}\n\n"
+        f"Клиент: {lead.get('name') or '—'}\n"
+        f"Язык: {str(language or 'pl').upper()}\n"
+        f"Отправил: {sender_label}\n\n"
+        f"Текст:\n{str(body or '')[:5000]}"
+    )
+    try:
+        record = await create_project_communication(
+            lead=lead,
+            summary=summary,
+            full_text=full_text,
+            project_page_id=resolved_project_id,
+            channel="WhatsApp",
+            communication_type="Исходящее",
+            status="Зафиксировано",
+            occurred_at=occurred_at,
+            title=(
+                f"WhatsApp — {lead.get('name') or lead.get('id')} — "
+                f"{occurred_at.date().isoformat()}"
+            ),
+            topic="WhatsApp follow-up",
+        )
+    except OperationalNotionError as exc:
+        # Some workspaces still lack a WhatsApp select option — fall back.
+        if "select" in str(exc).casefold() or (exc.status_code or 0) == 400:
+            record = await create_project_communication(
+                lead=lead,
+                summary=summary,
+                full_text=full_text,
+                project_page_id=resolved_project_id,
+                channel="Telegram",
+                communication_type="Исходящее",
+                status="Зафиксировано",
+                occurred_at=occurred_at,
+                title=(
+                    f"WhatsApp — {lead.get('name') or lead.get('id')} — "
+                    f"{occurred_at.date().isoformat()}"
+                ),
+                topic="WhatsApp follow-up",
+            )
+        else:
+            raise
+    if record and resolved_project_id:
+        try:
+            await touch_project_last_contact(
+                project_page_id=resolved_project_id,
+                occurred_at=occurred_at,
+                next_step="Дождаться ответа клиента в WhatsApp",
+            )
+        except Exception:
+            # Communication row is the primary write; project touch is best-effort.
+            pass
+    if record:
+        record = {
+            **record,
+            "project_page_id": resolved_project_id,
+        }
+    return record
 
 
 async def sync_projects_from_kommo(

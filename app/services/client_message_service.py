@@ -11,12 +11,14 @@ from uuid import uuid4
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import flag_modified
 
 from app.agent import audit
 from app.agent.security import sanitize_text
 from app.models.agent_user import AgentUser
 from app.models.client_message_draft import ClientMessageDraft
 from app.services import client_language_service, contact_resolver, identity_service, kommo_service
+from app.services import project_link_service
 
 
 def normalize_whatsapp_phone(phone: str | None, *, language: str | None = None) -> str:
@@ -271,7 +273,7 @@ def message_draft_markup(record: ClientMessageDraft) -> dict[str, Any]:
     rows.append(
         [
             {
-                "text": "✅ Да, отметить в Kommo",
+                "text": "✅ Да, отметить в Kommo и Notion",
                 "callback_data": f"clientmsg:sent:{record.id}",
             },
             {"text": "❌ Отмена", "callback_data": f"clientmsg:cancel:{record.id}"},
@@ -445,7 +447,14 @@ async def confirm_sent(
             await kommo_service.add_common_note(record.kommo_lead_id, note)
         record.status = "sent"
         record.delivery_error = None
+        await _sync_sent_to_notion(
+            db,
+            record=record,
+            actor_label=actor_label,
+            occurred_at=now,
+        )
         await db.commit()
+        meta = dict(record.metadata_json or {})
         await audit.record_event(
             db,
             service="client_message",
@@ -457,6 +466,9 @@ async def confirm_sent(
                 "kommo_lead_id": record.kommo_lead_id,
                 "kommo_note_logged": True,
                 "delivery_marker": record.delivery_marker,
+                "notion_logged": bool(meta.get("notion_communication_id")),
+                "notion_url": meta.get("notion_communication_url"),
+                "notion_error": meta.get("notion_sync_error"),
             },
         )
         return record
@@ -475,3 +487,105 @@ async def confirm_sent(
             error_message=str(exc),
         )
         raise
+
+
+async def _sync_sent_to_notion(
+    db: AsyncSession,
+    *,
+    record: ClientMessageDraft,
+    actor_label: str,
+    occurred_at: datetime,
+) -> None:
+    """Best-effort Notion communication + last-contact update after Kommo note."""
+    meta = dict(record.metadata_json or {})
+    if meta.get("notion_communication_id"):
+        return
+    try:
+        from app.agent import notion_gateway
+
+        link = await project_link_service.get_by_kommo_lead_id(
+            db, int(record.kommo_lead_id)
+        )
+        lead = {
+            "id": int(record.kommo_lead_id),
+            "name": record.client_name
+            or meta.get("lead_name")
+            or f"Kommo {record.kommo_lead_id}",
+            "url": meta.get("lead_url"),
+        }
+        notion_page = await notion_gateway.log_manual_whatsapp_send(
+            lead=lead,
+            body=record.body,
+            language=record.communication_language,
+            sender_label=actor_label,
+            delivery_marker=record.delivery_marker,
+            project_page_id=(
+                link.notion_project_page_id if link else None
+            ),
+            occurred_at=occurred_at,
+        )
+        if notion_page is None:
+            meta["notion_sync_error"] = (
+                "Notion communications data source не настроен "
+                "или токен отсутствует."
+            )
+        else:
+            meta["notion_communication_id"] = notion_page.get("id")
+            meta["notion_communication_url"] = notion_page.get("url")
+            meta.pop("notion_sync_error", None)
+            if notion_page.get("project_page_id") and link is not None:
+                if not link.notion_project_page_id:
+                    project_page_id = str(notion_page["project_page_id"])
+                    link.notion_project_page_id = project_page_id
+                    if not link.notion_project_url:
+                        from app.agent.notion_gateway import notion_page_url
+
+                        link.notion_project_url = notion_page_url(project_page_id)
+        record.metadata_json = meta
+        try:
+            flag_modified(record, "metadata_json")
+        except Exception:
+            pass
+    except Exception as exc:
+        meta["notion_sync_error"] = sanitize_text(str(exc), limit=500)
+        record.metadata_json = meta
+        try:
+            flag_modified(record, "metadata_json")
+        except Exception:
+            pass
+
+
+def format_sent_confirmation(record: ClientMessageDraft) -> str:
+    """User-facing confirmation after manual WhatsApp send was logged."""
+    lines = [
+        "✅ <b>Сообщение отмечено как отправленное</b>",
+        "",
+        "Результат и текст записаны в Kommo. Аудит отправителя сохранён.",
+    ]
+    meta = dict(record.metadata_json or {})
+    notion_url = meta.get("notion_communication_url")
+    notion_error = meta.get("notion_sync_error")
+    if notion_url:
+        lines.extend(
+            [
+                "",
+                "📓 Notion: коммуникация записана, «Последний контакт» обновлён.",
+                f'<a href="{html.escape(str(notion_url))}">Открыть запись в Notion</a>',
+            ]
+        )
+    elif notion_error:
+        lines.extend(
+            [
+                "",
+                "⚠️ Notion не обновлён: "
+                + html.escape(str(notion_error)[:300]),
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "",
+                "⚠️ Notion не обновлён: нет связи с проектом или база переписки не настроена.",
+            ]
+        )
+    return "\n".join(lines)

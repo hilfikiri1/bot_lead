@@ -1,5 +1,5 @@
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -132,7 +132,217 @@ def test_whatsapp_markup_has_open_edit_language_vcard_and_sent_controls():
     assert "✏️ Изменить текст" in labels
     assert "👤 Контакт .vcf" in labels
     assert {"PL", "UA", "RU"}.issubset(labels)
-    assert "✅ Да, отметить в Kommo" in labels
+    assert "✅ Да, отметить в Kommo и Notion" in labels
+
+
+@pytest.mark.asyncio
+async def test_confirm_sent_writes_notion_after_kommo():
+    from datetime import datetime, timezone
+    from unittest.mock import AsyncMock, MagicMock
+
+    record = SimpleNamespace(
+        id=11,
+        kommo_lead_id=117001,
+        client_name="Ewa Stokowska",
+        body="Szanowna Pani Ewo...",
+        communication_language="pl",
+        delivery_marker="BBS-MSG-test117",
+        prepared_by_user_id=1,
+        status="prepared",
+        metadata_json={"lead_name": "117", "lead_url": "https://kommo.example/117"},
+        sent_confirmed_at=None,
+        delivery_error=None,
+        metadata_json_set=None,
+    )
+
+    actor = SimpleNamespace(
+        id=1,
+        telegram_user_id=100,
+        telegram_username="mgr",
+        display_name="Manager",
+        status="active",
+        role="manager",
+    )
+
+    db = AsyncMock()
+    db.get = AsyncMock(return_value=actor)
+    db.commit = AsyncMock()
+    db.refresh = AsyncMock()
+
+    with (
+        patch.object(
+            client_message_service,
+            "_actor",
+            AsyncMock(return_value=actor),
+        ),
+        patch.object(
+            client_message_service,
+            "get_draft",
+            AsyncMock(return_value=record),
+        ),
+        patch.object(
+            client_message_service.kommo_service,
+            "get_recent_common_notes",
+            AsyncMock(return_value=[]),
+        ),
+        patch.object(
+            client_message_service.kommo_service,
+            "add_common_note",
+            AsyncMock(),
+        ) as add_note,
+        patch.object(
+            client_message_service.project_link_service,
+            "get_by_kommo_lead_id",
+            AsyncMock(
+                return_value=SimpleNamespace(
+                    notion_project_page_id="proj-117",
+                    notion_project_url="https://notion.so/proj-117",
+                )
+            ),
+        ),
+        patch(
+            "app.agent.notion_gateway.log_manual_whatsapp_send",
+            AsyncMock(
+                return_value={
+                    "id": "comm-1",
+                    "url": "https://notion.so/comm-1",
+                    "project_page_id": "proj-117",
+                }
+            ),
+        ) as notion_log,
+        patch.object(
+            client_message_service.audit,
+            "record_event",
+            AsyncMock(),
+        ),
+    ):
+        result = await client_message_service.confirm_sent(
+            db, draft_id=11, telegram_user_id=100
+        )
+
+    assert result.status == "sent"
+    add_note.assert_awaited_once()
+    notion_log.assert_awaited_once()
+    assert record.metadata_json["notion_communication_id"] == "comm-1"
+    text = client_message_service.format_sent_confirmation(record)
+    assert "Notion" in text
+    assert "comm-1" in text or "notion.so" in text
+
+
+@pytest.mark.asyncio
+async def test_confirm_sent_soft_fails_notion_without_failing_kommo():
+    record = SimpleNamespace(
+        id=12,
+        kommo_lead_id=117001,
+        client_name="Ewa Stokowska",
+        body="Szanowna Pani Ewo...",
+        communication_language="pl",
+        delivery_marker="BBS-MSG-test118",
+        prepared_by_user_id=1,
+        status="prepared",
+        metadata_json={"lead_name": "117"},
+        sent_confirmed_at=None,
+        delivery_error=None,
+    )
+    actor = SimpleNamespace(
+        id=1,
+        telegram_user_id=100,
+        telegram_username="mgr",
+        display_name="Manager",
+        status="active",
+        role="manager",
+    )
+    db = AsyncMock()
+    db.get = AsyncMock(return_value=actor)
+    db.commit = AsyncMock()
+
+    with (
+        patch.object(
+            client_message_service, "_actor", AsyncMock(return_value=actor)
+        ),
+        patch.object(
+            client_message_service, "get_draft", AsyncMock(return_value=record)
+        ),
+        patch.object(
+            client_message_service.kommo_service,
+            "get_recent_common_notes",
+            AsyncMock(return_value=[]),
+        ),
+        patch.object(
+            client_message_service.kommo_service,
+            "add_common_note",
+            AsyncMock(),
+        ),
+        patch.object(
+            client_message_service.project_link_service,
+            "get_by_kommo_lead_id",
+            AsyncMock(return_value=None),
+        ),
+        patch(
+            "app.agent.notion_gateway.log_manual_whatsapp_send",
+            AsyncMock(side_effect=RuntimeError("Notion HTTP 400: bad select")),
+        ),
+        patch.object(
+            client_message_service.audit, "record_event", AsyncMock()
+        ),
+    ):
+        result = await client_message_service.confirm_sent(
+            db, draft_id=12, telegram_user_id=100
+        )
+
+    assert result.status == "sent"
+    assert "Notion HTTP 400" in str(record.metadata_json.get("notion_sync_error"))
+    text = client_message_service.format_sent_confirmation(record)
+    assert "не обновлён" in text
+
+
+@pytest.mark.asyncio
+async def test_log_manual_whatsapp_send_builds_outbound_communication():
+    from datetime import datetime, timezone
+    from unittest.mock import AsyncMock, patch
+
+    from app.agent import notion_gateway
+
+    with (
+        patch.object(notion_gateway.settings, "notion_api_token", "secret"),
+        patch.object(
+            notion_gateway.settings,
+            "notion_communications_data_source_id",
+            "ds-comm",
+        ),
+        patch.object(
+            notion_gateway,
+            "resolve_project_page_id",
+            AsyncMock(return_value="proj-1"),
+        ),
+        patch.object(
+            notion_gateway,
+            "create_project_communication",
+            AsyncMock(return_value={"id": "c1", "url": "https://notion.so/c1"}),
+        ) as create_comm,
+        patch.object(
+            notion_gateway,
+            "touch_project_last_contact",
+            AsyncMock(return_value={"id": "proj-1"}),
+        ) as touch,
+    ):
+        result = await notion_gateway.log_manual_whatsapp_send(
+            lead={"id": 117001, "name": "117 — Ewa"},
+            body="Szanowna Pani Ewo",
+            language="pl",
+            sender_label="Manager",
+            delivery_marker="BBS-MSG-x",
+            project_page_id="proj-1",
+            occurred_at=datetime(2026, 7, 29, tzinfo=timezone.utc),
+        )
+
+    assert result["id"] == "c1"
+    assert result["project_page_id"] == "proj-1"
+    kwargs = create_comm.await_args.kwargs
+    assert kwargs["channel"] == "WhatsApp"
+    assert kwargs["communication_type"] == "Исходящее"
+    assert "BBS-MSG-x" in kwargs["summary"]
+    touch.assert_awaited_once()
 
 
 def test_owner_and_admin_can_manage_users_but_viewer_cannot():

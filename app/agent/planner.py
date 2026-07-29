@@ -34,6 +34,7 @@ _WRITE_INTENTS = {
     "create_drive_project",
     "save_file_to_drive_project",
     "link_project_systems",
+    "project_update_bundle",
 }
 
 _DRAFT_KINDS = {
@@ -62,7 +63,10 @@ Supported intents:
 - conversation_analysis: the message is a transcript/report of a client conversation that should enter the call-analysis pipeline
 - daily_digest: show what deserves attention today (read-only)
 - search_lead: find a Kommo lead by ID, number, client or product fragment (read-only)
+- search_project: find a project by internal number, client, phone, company or product (read-only)
 - lead_summary: load and explain one Kommo lead (read-only)
+- project_snapshot: unified project card from Kommo, Notion and Drive (read-only)
+- project_update_bundle: spoken/text project update split into separately confirmed writes
 - notion_diagnostics: test the operational Notion schema (read-only)
 - integration_errors: show recent integration failures (read-only)
 - generate_draft: generate a draft; draft_kind is commercial_offer, supplier_inquiry, followup_message, email, catalog_outline or technical_brief
@@ -239,6 +243,36 @@ def deterministic_plan(text: str, context: dict[str, Any]) -> AgentPlan | None:
         re.search(r"\b\d{1,4}\s*[,/и]\s*\d", normalized)
     )
 
+    if (
+        "проект" in normalized
+        and any(
+            token in normalized
+            for token in (
+                "поговорил",
+                "поговорили",
+                "обсудил",
+                "созвонил",
+                "договорились",
+                "обновление",
+                "обнови проект",
+            )
+        )
+    ):
+        return AgentPlan(
+            intent="project_update_bundle",
+            mode="write",
+            confidence=0.98,
+            lead_id=lead_id or context.get("active_kommo_lead_id"),
+            query=query,
+            lead_refs=lead_refs,
+            body=text,
+            clarification_question=(
+                None
+                if lead_id or query or lead_refs or context.get("active_kommo_lead_id")
+                else user_error_hint()
+            ),
+        )
+
     for kind, hints in _DRAFT_KINDS.items():
         if any(hint in normalized for hint in hints) and any(
             verb in normalized
@@ -358,6 +392,30 @@ def deterministic_plan(text: str, context: dict[str, Any]) -> AgentPlan | None:
             clarification_question=None if lead_id or query or lead_refs or context.get("active_kommo_lead_id") else user_error_hint(),
         )
 
+    if any(
+        phrase in normalized
+        for phrase in (
+            "найди проект",
+            "поиск проекта",
+            "найди клиента по телефону",
+            "найди по компании",
+            "найди по товару",
+        )
+    ):
+        project_query = re.sub(
+            r"^(?:найди|поиск)\s+(?:проект[а-я]*\s*)?(?:по\s+)?"
+            r"(?:телефон[ау]?\s*|компани[ияе]\s*|товар[ау]?\s*)?",
+            "",
+            text.strip(),
+            flags=re.I,
+        ).strip(" :—-")
+        return AgentPlan(
+            intent="search_project",
+            mode="read",
+            confidence=0.98,
+            query=project_query or query or text,
+        )
+
     if any(phrase in normalized for phrase in (
         "что происходит по проекту",
         "полную карточку",
@@ -374,6 +432,16 @@ def deterministic_plan(text: str, context: dict[str, Any]) -> AgentPlan | None:
             query=query,
             lead_refs=lead_refs,
             clarification_question=None if lead_id or query or lead_refs or context.get("active_kommo_lead_id") else user_error_hint(),
+        )
+
+    if normalized.startswith("что по ") and lead_refs:
+        return AgentPlan(
+            intent="project_snapshot",
+            mode="read",
+            confidence=0.90,
+            lead_id=lead_id or context.get("active_kommo_lead_id"),
+            query=query,
+            lead_refs=lead_refs,
         )
 
     if any(hint in normalized for hint in ("покажи сделку", "найди сделку", "найди лид", "открой сделку", "что по сделке", "расскажи по сделке")):

@@ -263,7 +263,7 @@ def _extract_digest_positions(text: str, normalized: str) -> list[int]:
 def _extract_internal_numbers(text: str, normalized: str) -> list[str]:
     numbers: list[str] = []
     for match in re.finditer(
-        r"(?:клиент|лид|сделк[аеуы]?|№|#)\s*(\d{1,4})\b",
+        r"(?:клиент|лид|сделк[аеуы]?|проект[аеуы]?|№|#)\s*(\d{1,4})\b",
         normalized,
         flags=re.I,
     ):
@@ -443,7 +443,7 @@ async def resolve_reference(
         )
 
     if ref.ref_type == LeadRefType.NAME_QUERY and ref.name_query:
-        search = await kommo_service.search_open_leads(ref.name_query, limit=8)
+        search = await kommo_service.search_projects(ref.name_query, limit=8)
         leads = [enrich_lead(item) for item in search.get("leads") or []]
         if len(leads) == 1:
             lead = enrich_lead(

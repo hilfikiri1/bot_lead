@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
@@ -14,6 +14,7 @@ from app.agent import digest
 from app.config import get_settings
 from app.database import AsyncSessionLocal
 from app.models.agent_session import AgentSession
+from app.services import identity_service
 from app.services.telegram_service import send_message
 
 logger = logging.getLogger(__name__)
@@ -55,7 +56,10 @@ async def send_scheduled_digest(*, kind: str, user_id: int, chat_id: int | None 
         if await _already_sent(db, user_id, key):
             logger.info("Scheduled digest skipped (duplicate): %s", key)
             return
-        result = await digest.build_digest()
+        identity_service.set_current_user(
+            await identity_service.get_user_by_telegram_id(db, user_id)
+        )
+        result = await digest.build_digest(db=db, telegram_user_id=user_id)
         title = "🌅 Утренний дайджест" if kind == "morning" else "🌆 Вечерний отчёт"
         text = f"<b>{title}</b>\n\n" + digest.format_digest(result)
         await send_message(target_chat, text, reply_markup=digest.digest_markup(result.get("digest_map") or []))

@@ -328,6 +328,55 @@ async def resolve_communication_language(
     return resolution
 
 
+async def read_communication_language(
+    db: AsyncSession,
+    *,
+    lead: dict[str, Any],
+) -> LanguageResolution:
+    """Read/infer language for a project card without changing the database."""
+    contact = _contact_snapshot(lead)
+    predicates = []
+    if isinstance(contact.get("id"), int):
+        predicates.append(Client.kommo_contact_id == int(contact["id"]))
+    phone = ((contact.get("phones") or [None])[0]) if contact else None
+    email = ((contact.get("emails") or [None])[0]) if contact else None
+    if phone:
+        predicates.append(Client.phone == str(phone))
+    if email:
+        predicates.append(Client.email == str(email))
+    client = None
+    if predicates:
+        client = (
+            await db.execute(select(Client).where(or_(*predicates)).limit(1))
+        ).scalar_one_or_none()
+    if client and normalize_language(client.communication_language):
+        return LanguageResolution(
+            normalize_language(client.communication_language) or "pl",
+            client.communication_language_source or "client_card",
+            float(client.communication_language_confidence or 0.95),
+            client.id,
+        )
+    card_language = _custom_field_language(
+        list(contact.get("custom_fields") or [])
+        + list(lead.get("custom_fields") or [])
+    )
+    if card_language:
+        return LanguageResolution(card_language, "kommo_client_card", 0.96)
+    inferred = infer_language_from_history(correspondence_history(lead))
+    if inferred:
+        return LanguageResolution(
+            inferred[0], "previous_correspondence", inferred[1]
+        )
+    direction = infer_direction_language(lead)
+    if direction:
+        return LanguageResolution(direction[0], "market_fallback", direction[1])
+    return LanguageResolution(
+        normalize_language(settings.agent_default_client_language) or "pl",
+        "system_fallback",
+        0.55,
+    )
+
+
 async def set_communication_language(
     db: AsyncSession,
     *,

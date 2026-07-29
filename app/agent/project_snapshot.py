@@ -1,4 +1,4 @@
-"""Unified read-only project snapshot across Kommo, Notion, Drive and agent memory."""
+"""Unified project card across Kommo, Notion, Drive and the agent audit."""
 
 from __future__ import annotations
 
@@ -7,11 +7,22 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
+from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agent import notion_gateway
 from app.agent.lead_refs import extract_internal_lead_number
 from app.config import get_settings
-from app.services import google_drive_service, kommo_service, project_link_service
+from app.models.integration_event import IntegrationEvent
+from app.models.pending_agent_action import PendingAgentAction
+from app.services import (
+    client_language_service,
+    google_drive_service,
+    identity_service,
+    kommo_service,
+    project_artifact_service,
+    project_link_service,
+)
 
 settings = get_settings()
 
@@ -21,10 +32,13 @@ class ProjectSnapshot:
     identity: dict[str, Any] = field(default_factory=dict)
     client: dict[str, Any] = field(default_factory=dict)
     kommo: dict[str, Any] = field(default_factory=dict)
+    responsible: dict[str, Any] = field(default_factory=dict)
     notion: dict[str, Any] = field(default_factory=dict)
     drive: dict[str, Any] = field(default_factory=dict)
     open_tasks: list[dict[str, Any]] = field(default_factory=list)
+    communications: list[dict[str, Any]] = field(default_factory=list)
     documents: list[dict[str, Any]] = field(default_factory=list)
+    pending_actions: list[dict[str, Any]] = field(default_factory=list)
     missing_information: list[str] = field(default_factory=list)
     blockers: list[str] = field(default_factory=list)
     recommended_next_action: str | None = None
@@ -32,6 +46,79 @@ class ProjectSnapshot:
     generated_at: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
+
+
+def _timestamp_label(value: Any) -> str:
+    if value in (None, ""):
+        return "—"
+    try:
+        if isinstance(value, (int, float)) or str(value).isdigit():
+            moment = datetime.fromtimestamp(int(value), tz=timezone.utc)
+        else:
+            moment = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return moment.astimezone().strftime("%d.%m.%Y %H:%M")
+    except Exception:
+        return str(value)[:40]
+
+
+def _company_from_contact(contact: dict[str, Any]) -> str | None:
+    for custom_field in contact.get("custom_fields") or []:
+        marker = (
+            f"{custom_field.get('name') or ''} "
+            f"{custom_field.get('code') or ''}"
+        ).casefold()
+        if any(token in marker for token in ("company", "компан", "firma")):
+            return str(custom_field.get("value") or "") or None
+    return None
+
+
+def _next_step_from(
+    *,
+    link: Any,
+    notion_project: dict[str, Any] | None,
+    kommo_tasks: list[dict[str, Any]],
+) -> str | None:
+    metadata = dict(getattr(link, "metadata_json", None) or {})
+    if metadata.get("next_step"):
+        return str(metadata["next_step"])
+    if notion_project and notion_project.get("Следующий шаг"):
+        return str(notion_project["Следующий шаг"])
+    if kommo_tasks:
+        return str(kommo_tasks[0].get("text") or "") or None
+    return None
+
+
+async def _pending_for_lead(
+    db: AsyncSession,
+    *,
+    kommo_lead_id: int,
+) -> list[dict[str, Any]]:
+    result = await db.execute(
+        select(PendingAgentAction)
+        .where(PendingAgentAction.status.in_(("pending", "approved", "executing")))
+        .order_by(desc(PendingAgentAction.created_at))
+        .limit(200)
+    )
+    rows: list[dict[str, Any]] = []
+    for action in result.scalars().all():
+        payload = dict(action.payload or {})
+        payload_lead_id = (
+            payload.get("kommo_lead_id")
+            or payload.get("lead_id")
+            or ((payload.get("lead") or {}).get("id") if isinstance(payload.get("lead"), dict) else None)
+        )
+        if int(payload_lead_id or 0) != int(kommo_lead_id):
+            continue
+        rows.append(
+            {
+                "id": int(action.id),
+                "type": action.action_type,
+                "status": action.status,
+                "created_at": action.created_at,
+                "telegram_user_id": action.telegram_user_id,
+            }
+        )
+    return rows[:10]
 
 
 async def build_snapshot(
@@ -42,6 +129,7 @@ async def build_snapshot(
 ) -> ProjectSnapshot:
     context = context or {}
     kommo_id = int(lead["id"])
+    identity_service.assert_current_user_can_access_lead(lead)
     internal = extract_internal_lead_number(lead)
     link = await project_link_service.get_by_kommo_lead_id(db, kommo_id)
     snapshot = ProjectSnapshot(
@@ -55,29 +143,54 @@ async def build_snapshot(
         kommo={
             "name": lead.get("name"),
             "status": lead.get("status_name"),
+            "status_id": lead.get("status_id"),
             "pipeline": lead.get("pipeline_name"),
+            "pipeline_id": lead.get("pipeline_id"),
             "price": lead.get("price"),
             "url": lead.get("url"),
             "updated_at": lead.get("updated_at"),
             "closest_task_at": lead.get("closest_task_at"),
-            "notes": (lead.get("notes") or [])[:3],
+            "notes": (lead.get("notes") or [])[:5],
             "source": "kommo",
         },
     )
     contacts = lead.get("contacts") or []
-    if contacts:
-        snapshot.client = {
-            "name": contacts[0].get("name"),
-            "phones": contacts[0].get("phones") or [],
-            "emails": contacts[0].get("emails") or [],
-            "source": "kommo",
-        }
+    contact = contacts[0] if contacts else {}
+    language = await client_language_service.read_communication_language(db, lead=lead)
+    snapshot.client = {
+        "id": contact.get("id"),
+        "name": contact.get("name"),
+        "company": lead.get("company_name") or _company_from_contact(contact),
+        "phones": contact.get("phones") or [],
+        "emails": contact.get("emails") or [],
+        "language": language.language,
+        "language_source": language.source,
+        "source": "kommo",
+    }
+
+    try:
+        owner = await kommo_service.get_user_summary(lead.get("responsible_user_id"))
+        snapshot.responsible = owner or {}
+    except Exception as exc:
+        snapshot.source_warnings.append(f"Kommo user: {exc.__class__.__name__}")
+
+    notion_workspace: dict[str, Any] = {
+        "project": None,
+        "tasks": [],
+        "communications": [],
+        "warnings": [],
+    }
+    if settings.notion_api_token.strip():
+        notion_workspace = await notion_gateway.read_project_workspace(kommo_id)
+        snapshot.source_warnings.extend(notion_workspace.get("warnings") or [])
 
     if link:
+        notion_project = notion_workspace.get("project") or {}
         snapshot.notion = {
-            "page_id": link.notion_project_page_id,
-            "url": link.notion_project_url,
-            "source": "project_link",
+            "page_id": link.notion_project_page_id or notion_project.get("id"),
+            "url": link.notion_project_url or notion_project.get("url"),
+            "project": notion_project,
+            "source": "notion",
         }
         snapshot.drive = {
             "folder_id": link.drive_folder_id,
@@ -86,85 +199,291 @@ async def build_snapshot(
             "source": "project_link",
         }
     else:
+        notion_project = notion_workspace.get("project") or {}
+        snapshot.notion = {
+            "page_id": notion_project.get("id"),
+            "url": notion_project.get("url"),
+            "project": notion_project,
+            "source": "notion",
+        }
         snapshot.missing_information.append("ProjectLink не создан")
-        snapshot.recommended_next_action = "Создать проект в Drive и связать системы"
+
+    kommo_tasks: list[dict[str, Any]] = []
+    try:
+        kommo_tasks = await kommo_service.get_open_lead_tasks(kommo_id, limit=20)
+    except Exception as exc:
+        snapshot.source_warnings.append(f"Kommo tasks: {exc.__class__.__name__}")
+    snapshot.open_tasks = kommo_tasks + list(notion_workspace.get("tasks") or [])
+    snapshot.communications = list(notion_workspace.get("communications") or [])
+
+    artifacts = await project_artifact_service.recent_for_project(db, kommo_id, limit=10)
+    seen_drive_ids: set[str] = set()
+    for artifact in artifacts:
+        if artifact.drive_file_id:
+            seen_drive_ids.add(str(artifact.drive_file_id))
+        snapshot.documents.append(
+            {
+                "name": artifact.final_filename or artifact.suggested_filename,
+                "url": artifact.drive_file_url,
+                "modified": artifact.uploaded_at or artifact.created_at,
+                "type": artifact.artifact_type_label,
+                "status": artifact.status,
+                "source": "artifact_audit",
+            }
+        )
 
     if link and link.drive_folder_id and settings.google_drive_enabled:
         try:
             files = await google_drive_service.list_project_files(
-                link.drive_folder_id, limit=10
+                link.drive_folder_id, limit=20
             )
-            snapshot.documents = [
-                {
-                    "name": item.get("name"),
-                    "url": item.get("webViewLink"),
-                    "modified": item.get("modifiedTime"),
-                    "source": "drive",
-                }
-                for item in files
-            ]
+            for item in files:
+                if item.get("mimeType") == "application/vnd.google-apps.folder":
+                    continue
+                if str(item.get("id") or "") in seen_drive_ids:
+                    continue
+                snapshot.documents.append(
+                    {
+                        "name": item.get("name"),
+                        "url": item.get("webViewLink"),
+                        "modified": item.get("modifiedTime"),
+                        "type": "Файл Drive",
+                        "status": "external",
+                        "source": "drive",
+                    }
+                )
         except Exception as exc:
             snapshot.source_warnings.append(f"Drive: {exc.__class__.__name__}")
 
-    pending = context.get("pending_clarification")
-    if pending:
+    snapshot.documents.sort(
+        key=lambda item: str(item.get("modified") or ""), reverse=True
+    )
+    snapshot.pending_actions = await _pending_for_lead(db, kommo_lead_id=kommo_id)
+
+    if context.get("pending_clarification"):
         snapshot.blockers.append("Есть незавершённое уточнение агента")
-
-    if context.get("last_draft"):
-        snapshot.open_tasks.append(
-            {"kind": "draft", "title": "Последний черновик", "source": "agent_memory"}
+    if snapshot.pending_actions:
+        snapshot.blockers.append(
+            f"Ожидают подтверждения действия: {len(snapshot.pending_actions)}"
         )
+    if not snapshot.client.get("phones") and not snapshot.client.get("emails"):
+        snapshot.missing_information.append("Нет телефона и email клиента")
+    if link and not link.notion_project_page_id and not snapshot.notion.get("page_id"):
+        snapshot.missing_information.append("Нет связанной карточки Notion")
+    if link and not link.drive_folder_id:
+        snapshot.missing_information.append("Нет связанной папки Drive")
 
+    next_step = _next_step_from(
+        link=link,
+        notion_project=notion_project,
+        kommo_tasks=kommo_tasks,
+    )
+    if next_step:
+        snapshot.recommended_next_action = next_step
+    elif not link:
+        snapshot.recommended_next_action = "Создать проект в Drive и связать системы"
+    elif not snapshot.open_tasks:
+        snapshot.recommended_next_action = (
+            "Определить следующий шаг и поставить задачу со сроком"
+        )
+    else:
+        snapshot.recommended_next_action = "Выполнить ближайшую активную задачу"
     return snapshot
 
 
 def format_snapshot(snapshot: ProjectSnapshot) -> str:
     identity = snapshot.identity
+    project_label = identity.get("project_key") or identity.get("name") or "—"
+    contacts = snapshot.client
+    phones = ", ".join(str(x) for x in contacts.get("phones") or []) or "—"
+    emails = ", ".join(str(x) for x in contacts.get("emails") or []) or "—"
     lines = [
-        f"<b>📂 Проект {html.escape(str(identity.get('project_key') or identity.get('name') or '—'))}</b>",
+        f"<b>📂 Проект {html.escape(str(project_label))}</b>",
         "",
     ]
     if identity.get("internal_lead_number"):
-        lines.append(f"Внутренний номер: №{html.escape(str(identity['internal_lead_number']))}")
+        lines.append(
+            f"Номер: <b>№{html.escape(str(identity['internal_lead_number']))}</b>"
+        )
     lines.extend(
         [
-            f"Клиент: {html.escape(str(snapshot.client.get('name') or '—'))}",
-            f"Товар/сделка: {html.escape(str(snapshot.kommo.get('name') or '—'))}",
-            f"Этап: {html.escape(str(snapshot.kommo.get('status') or '—'))}",
-            f"Бюджет: {html.escape(str(snapshot.kommo.get('price') or '—'))}",
+            f"Клиент: <b>{html.escape(str(contacts.get('name') or '—'))}</b>",
+            f"Компания: {html.escape(str(contacts.get('company') or '—'))}",
+            f"Телефон: {html.escape(phones)}",
+            f"Email: {html.escape(emails)}",
+            f"Язык общения: <b>{html.escape(str(contacts.get('language') or '—').upper())}</b>",
             "",
-            "<b>Документы</b>",
+            f"Товар/сделка: {html.escape(str(snapshot.kommo.get('name') or '—'))}",
+            f"Статус Kommo: <b>{html.escape(str(snapshot.kommo.get('status') or '—'))}</b>",
+            f"Ответственный: {html.escape(str(snapshot.responsible.get('name') or '—'))}",
+            f"Последнее обновление: {_timestamp_label(snapshot.kommo.get('updated_at'))}",
         ]
     )
-    if snapshot.documents:
-        for doc in snapshot.documents[:8]:
-            lines.append(f"• {html.escape(str(doc.get('name') or '—'))}")
+
+    notes = snapshot.kommo.get("notes") or []
+    lines.extend(["", "<b>Последние переговоры</b>"])
+    if notes:
+        for note in notes[:3]:
+            text = " ".join(str(note.get("text") or "").split())
+            lines.append(f"• {html.escape(text[:300])}")
+    elif snapshot.communications:
+        for item in snapshot.communications[:3]:
+            text = item.get("summary") or item.get("title") or "Касание"
+            lines.append(f"• {html.escape(str(text)[:300])}")
     else:
         lines.append("—")
+
+    lines.extend(["", "<b>Активные задачи</b>"])
+    if snapshot.open_tasks:
+        for task in snapshot.open_tasks[:5]:
+            title = task.get("text") or task.get("title") or "Задача"
+            due = task.get("complete_till") or task.get("due_at")
+            lines.append(
+                f"• {html.escape(str(title)[:180])} · {_timestamp_label(due)}"
+            )
+    else:
+        lines.append("—")
+
+    lines.extend(["", "<b>Последние файлы</b>"])
+    if snapshot.documents:
+        for doc in snapshot.documents[:5]:
+            label = f"{doc.get('type') or 'Файл'}: {doc.get('name') or '—'}"
+            if doc.get("url"):
+                lines.append(
+                    f'• <a href="{html.escape(str(doc["url"]), quote=True)}">'
+                    f"{html.escape(label[:220])}</a>"
+                )
+            else:
+                lines.append(f"• {html.escape(label[:220])}")
+    else:
+        lines.append("—")
+
+    if snapshot.blockers:
+        lines.extend(["", "<b>Требует внимания</b>"])
+        lines.extend(f"• {html.escape(x)}" for x in snapshot.blockers[:5])
     if snapshot.missing_information:
-        lines.extend(["", "<b>Нерешённые вопросы</b>"])
-        lines.extend(f"• {html.escape(x)}" for x in snapshot.missing_information[:8])
+        lines.extend(["", "<b>Не хватает данных</b>"])
+        lines.extend(
+            f"• {html.escape(x)}" for x in snapshot.missing_information[:5]
+        )
     if snapshot.recommended_next_action:
         lines.extend(
             [
                 "",
                 "<b>Рекомендуемый следующий шаг</b>",
-                html.escape(snapshot.recommended_next_action),
+                html.escape(snapshot.recommended_next_action[:500]),
+            ]
+        )
+    if snapshot.source_warnings:
+        lines.extend(
+            [
+                "",
+                "⚠️ Частично недоступно: "
+                + html.escape(", ".join(snapshot.source_warnings[:4])),
             ]
         )
     links: list[str] = []
-    if snapshot.kommo.get("url"):
-        links.append(f'<a href="{html.escape(str(snapshot.kommo["url"]), quote=True)}">Kommo</a>')
-    if snapshot.notion.get("url"):
-        links.append(
-            f'<a href="{html.escape(str(snapshot.notion["url"]), quote=True)}">Notion</a>'
-        )
-    if snapshot.drive.get("url"):
-        links.append(
-            f'<a href="{html.escape(str(snapshot.drive["url"]), quote=True)}">Drive</a>'
-        )
+    for label, source in (
+        ("Kommo", snapshot.kommo),
+        ("Notion", snapshot.notion),
+        ("Drive", snapshot.drive),
+    ):
+        if source.get("url"):
+            links.append(
+                f'<a href="{html.escape(str(source["url"]), quote=True)}">{label}</a>'
+            )
     if links:
         lines.extend(["", "Ссылки: " + " · ".join(links)])
-    for warning in snapshot.source_warnings:
-        lines.append(f"⚠️ {html.escape(warning)}")
-    return "\n".join(lines)
+    return "\n".join(lines)[:4000]
+
+
+def project_actions_markup(snapshot: ProjectSnapshot) -> dict[str, Any]:
+    lead_id = int(snapshot.identity.get("kommo_lead_id") or 0)
+    rows: list[list[dict[str, str]]] = [
+        [
+            {
+                "text": "🔄 Обновить статус",
+                "callback_data": f"agent:project:status:{lead_id}",
+            },
+            {
+                "text": "✅ Добавить задачу",
+                "callback_data": f"agent:prep:task:{lead_id}",
+            },
+        ],
+        [
+            {
+                "text": "📎 Загрузить файл",
+                "callback_data": f"agent:project:upload:{lead_id}",
+            },
+            {
+                "text": "✍️ Follow-up",
+                "callback_data": f"agent:prep:draft:{lead_id}",
+            },
+        ],
+        [
+            {
+                "text": "🕘 История",
+                "callback_data": f"agent:project:history:{lead_id}",
+            }
+        ],
+    ]
+    links: list[dict[str, str]] = []
+    if snapshot.drive.get("url"):
+        links.append({"text": "📁 Drive", "url": str(snapshot.drive["url"])})
+    if snapshot.kommo.get("url"):
+        links.append({"text": "🔗 Kommo", "url": str(snapshot.kommo["url"])})
+    if snapshot.notion.get("url"):
+        links.append({"text": "📝 Notion", "url": str(snapshot.notion["url"])})
+    if links:
+        rows.append(links[:3])
+    return {"inline_keyboard": rows}
+
+
+async def build_history(
+    db: AsyncSession,
+    *,
+    lead: dict[str, Any],
+    limit: int = 12,
+) -> str:
+    kommo_id = int(lead["id"])
+    artifacts = await project_artifact_service.recent_for_project(
+        db, kommo_id, limit=limit
+    )
+    events = (
+        await db.execute(
+            select(IntegrationEvent)
+            .order_by(desc(IntegrationEvent.created_at))
+            .limit(200)
+        )
+    ).scalars().all()
+    relevant: list[IntegrationEvent] = []
+    for event in events:
+        payload = dict(event.payload or {})
+        result = dict(event.result or {})
+        lead_id = (
+            payload.get("kommo_lead_id")
+            or payload.get("lead_id")
+            or result.get("kommo_lead_id")
+            or result.get("lead_id")
+        )
+        if int(lead_id or 0) == kommo_id:
+            relevant.append(event)
+    lines = [f"<b>🕘 История — {html.escape(str(lead.get('name') or kommo_id))}</b>", ""]
+    for note in (lead.get("notes") or [])[:5]:
+        lines.append(
+            f"• {_timestamp_label(note.get('created_at'))} · Kommo · "
+            f"{html.escape(' '.join(str(note.get('text') or '').split())[:220])}"
+        )
+    for artifact in artifacts[:5]:
+        lines.append(
+            f"• {_timestamp_label(artifact.created_at)} · Файл · "
+            f"{html.escape(str(artifact.final_filename or artifact.suggested_filename))}"
+        )
+    for event in relevant[:5]:
+        lines.append(
+            f"• {_timestamp_label(event.created_at)} · "
+            f"{html.escape(str(event.operation))} · {html.escape(str(event.status))}"
+        )
+    if len(lines) == 2:
+        lines.append("История пока пуста.")
+    return "\n".join(lines)[:4000]

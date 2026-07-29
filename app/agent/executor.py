@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import html
+import logging
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -19,15 +20,19 @@ from app.models.voice_note import VoiceNote
 from app.services import (
     calendar_event_builder,
     calendar_scheduling_service,
+    client_message_service,
     crm_service,
     gmail_service,
     google_drive_service,
     kommo_service,
     notion_service,
     project_link_service,
+    project_artifact_service,
     storage_service,
 )
 from app.services.calendar_event_builder import ScheduledEventDraft
+
+logger = logging.getLogger(__name__)
 
 # If a worker dies after marking the row `executing`, recover after this window so
 # the manager can stage a fresh confirmation instead of being stuck forever.
@@ -100,6 +105,31 @@ async def execute_action(
     if _aware(action.expires_at) < datetime.now(timezone.utc):
         action.status = "expired"
         await db.commit()
+        if action.action_type == "save_file_to_drive_project":
+            artifact_id = (action.payload or {}).get("artifact_id")
+            if artifact_id:
+                artifact = await project_artifact_service.get_artifact(
+                    db, int(artifact_id)
+                )
+                if artifact is not None and artifact.status == "pending":
+                    storage_path = artifact.storage_path
+                    await project_artifact_service.mark_cancelled(
+                        db, artifact=artifact, status="expired"
+                    )
+                    if storage_path:
+                        try:
+                            await asyncio.to_thread(
+                                storage_service.delete_project_file,
+                                str(storage_path),
+                            )
+                        except Exception as exc:
+                            # Expiry must remain final even if temporary storage
+                            # cleanup needs later operational attention.
+                            logger.warning(
+                                "Could not clean expired project artifact %s: %s",
+                                artifact.id,
+                                exc,
+                            )
         return "⌛ Подтверждение устарело. Повтори команду."
 
     action.status = "executing"
@@ -323,6 +353,177 @@ async def _execute(db: AsyncSession, action: PendingAgentAction) -> dict[str, An
             "data": result,
         }
 
+    if action_type == "create_notion_communication":
+        lead = await kommo_service.get_lead_details(
+            int(payload["kommo_lead_id"])
+        )
+        link = await project_link_service.get_by_kommo_lead_id(
+            db, int(lead["id"])
+        )
+        record = await notion_gateway.create_project_communication(
+            lead=lead,
+            summary=str(payload.get("summary") or ""),
+            full_text=str(payload.get("full_text") or payload.get("summary") or ""),
+            project_page_id=(
+                link.notion_project_page_id if link else None
+            ),
+            channel=str(payload.get("channel") or "Голос"),
+        )
+        if record is None:
+            raise ValueError(
+                "База Notion «Переписка и касания» не настроена."
+            )
+        return {
+            "text": (
+                "✅ <b>Переговоры сохранены в Notion</b>\n\n"
+                + _result_link("Открыть запись", record.get("url"))
+            ),
+            "data": {
+                "kommo_lead_id": int(lead["id"]),
+                "notion_page_id": record.get("id"),
+                "notion_url": record.get("url"),
+            },
+        }
+
+    if action_type == "create_project_task":
+        lead = await kommo_service.get_lead_details(
+            int(payload["kommo_lead_id"])
+        )
+        start_at, _ = calendar_event_builder.parse_natural_datetime(
+            str(payload["due_at"]),
+            duration_minutes=30,
+        )
+        task_text = str(payload.get("task_text") or "Следующее действие")[:1000]
+        kommo_task = await kommo_service.create_lead_task(
+            lead_id=int(lead["id"]),
+            text=task_text,
+            complete_till=int(start_at.timestamp()),
+        )
+        link = await project_link_service.get_by_kommo_lead_id(
+            db, int(lead["id"])
+        )
+        warnings: list[str] = []
+        notion_task: dict[str, Any] | None = None
+        try:
+            notion_task = await notion_gateway.create_task(
+                title=task_text,
+                lead_id=int(lead["id"]),
+                project_page_id=(
+                    link.notion_project_page_id if link else None
+                ),
+                priority="Высокий",
+                task_type="Следующий шаг",
+                due_at=start_at,
+                next_step=task_text,
+                source="Telegram",
+                external_id=f"agent-action:{int(action.id)}:project-task",
+                update_kommo=False,
+            )
+        except Exception as exc:
+            warnings.append(f"Notion: {sanitize_text(str(exc), limit=300)}")
+        lines = [
+            "✅ <b>Задача создана</b>",
+            "",
+            f"Kommo: {html.escape(task_text)}",
+            f"Срок: {html.escape(calendar_event_builder.format_date_ru(start_at))} "
+            f"{start_at.astimezone(calendar_event_builder.manager_timezone()).strftime('%H:%M')}",
+        ]
+        if notion_task:
+            lines.append(_result_link("Открыть задачу в Notion", notion_task.get("url")))
+        if warnings:
+            lines.append("⚠️ " + html.escape("; ".join(warnings)))
+        return {
+            "text": "\n".join(lines),
+            "data": {
+                "kommo_lead_id": int(lead["id"]),
+                "kommo_task": kommo_task,
+                "notion_task": notion_task,
+                "warnings": warnings,
+            },
+        }
+
+    if action_type == "update_project_next_step":
+        lead = await kommo_service.get_lead_details(
+            int(payload["kommo_lead_id"])
+        )
+        link = await project_link_service.get_by_kommo_lead_id(
+            db, int(lead["id"])
+        )
+        if link is None:
+            raise ValueError("ProjectLink не создан для этой сделки.")
+        metadata = dict(link.metadata_json or {})
+        metadata.update(
+            {
+                "next_step": str(payload.get("next_step") or "")[:2000],
+                "next_step_due_at": payload.get("due_at"),
+                "next_step_updated_by": int(action.telegram_user_id),
+                "next_step_updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        link.metadata_json = metadata
+        await db.commit()
+        notion_project: dict[str, Any] | None = None
+        warnings: list[str] = []
+        try:
+            due_at = None
+            if payload.get("due_at"):
+                due_at, _ = calendar_event_builder.parse_natural_datetime(
+                    str(payload["due_at"]), duration_minutes=30
+                )
+            notion_project = await notion_gateway.upsert_project_from_kommo(
+                lead,
+                next_step=str(payload.get("next_step") or ""),
+                next_action_at=due_at,
+            )
+            if notion_project.get("id") and not link.notion_project_page_id:
+                link.notion_project_page_id = str(notion_project["id"])
+                link.notion_project_url = notion_project.get("url")
+                await db.commit()
+        except Exception as exc:
+            warnings.append(f"Notion: {sanitize_text(str(exc), limit=300)}")
+        return {
+            "text": (
+                "✅ <b>Следующий шаг обновлён</b>\n\n"
+                f"{html.escape(str(payload.get('next_step') or '—'))}"
+                + (
+                    "\n⚠️ " + html.escape("; ".join(warnings))
+                    if warnings
+                    else ""
+                )
+            ),
+            "data": {
+                "kommo_lead_id": int(lead["id"]),
+                "project_key": link.project_key,
+                "next_step": payload.get("next_step"),
+                "notion_project": notion_project,
+                "warnings": warnings,
+            },
+        }
+
+    if action_type == "prepare_client_followup":
+        lead = await kommo_service.get_lead_details(
+            int(payload["kommo_lead_id"])
+        )
+        record = await client_message_service.create_client_message_draft(
+            db,
+            telegram_user_id=int(action.telegram_user_id),
+            lead=lead,
+            draft=dict(payload.get("draft") or {}),
+            language_source=str(payload.get("language_source") or "project_update"),
+            client_id=(
+                int(payload["client_id"]) if payload.get("client_id") else None
+            ),
+            channel="whatsapp",
+        )
+        return {
+            "text": client_message_service.format_client_message_draft(record),
+            "data": {
+                "kommo_lead_id": int(lead["id"]),
+                "client_message_draft_id": int(record.id),
+                "communication_language": record.communication_language,
+            },
+        }
+
     if action_type == "update_kommo_lead":
         lead_id = int(payload["lead_id"])
         fields = dict(payload.get("fields") or {})
@@ -508,9 +709,20 @@ async def _execute(db: AsyncSession, action: PendingAgentAction) -> dict[str, An
 
     if action_type == "save_file_to_drive_project":
         kommo_id = int(payload["kommo_lead_id"])
+        # Revalidate Manager assignment at confirmation time.
+        await kommo_service.get_lead_details(kommo_id)
         link = await project_link_service.get_by_kommo_lead_id(db, kommo_id)
         if not link or not link.drive_folder_id:
             raise ValueError("Сначала создайте проект в Google Drive для этой сделки.")
+        artifact = None
+        if payload.get("artifact_id"):
+            artifact = await project_artifact_service.get_artifact(
+                db, int(payload["artifact_id"]), lock=True
+            )
+            if artifact is None:
+                raise ValueError("Аудит-запись файла не найдена.")
+            if int(artifact.kommo_lead_id) != kommo_id:
+                raise PermissionError("Файл привязан к другому проекту.")
         parent_id = str(link.drive_folder_id)
         subfolder = str(payload.get("subfolder_name") or "").strip()
         if subfolder:
@@ -521,27 +733,127 @@ async def _execute(db: AsyncSession, action: PendingAgentAction) -> dict[str, An
             )
             if match and match.get("id"):
                 parent_id = str(match["id"])
+            else:
+                raise ValueError(
+                    f"Подпапка Drive «{subfolder}» не найдена. "
+                    "Восстановите структуру проекта и повторите загрузку."
+                )
         content = await asyncio.to_thread(
             storage_service.read_project_file_bytes, str(payload["storage_path"])
         )
-        uploaded = await google_drive_service.upload_file(
-            parent_folder_id=parent_id,
-            filename=str(payload.get("filename") or "file"),
-            content=content,
-            mime_type=str(payload.get("mime_type") or "application/octet-stream"),
-        )
+        try:
+            uploaded = await google_drive_service.upload_file(
+                parent_folder_id=parent_id,
+                filename=str(payload.get("filename") or "file"),
+                content=content,
+                mime_type=str(payload.get("mime_type") or "application/octet-stream"),
+            )
+        except Exception as exc:
+            cleanup_error = None
+            try:
+                await asyncio.to_thread(
+                    storage_service.delete_project_file,
+                    str(payload["storage_path"]),
+                )
+            except Exception as cleanup_exc:
+                cleanup_error = cleanup_exc
+            if artifact is not None:
+                await project_artifact_service.mark_failed(
+                    db,
+                    artifact=artifact,
+                    error=(
+                        str(exc)
+                        + (
+                            f"; cleanup: {cleanup_error}"
+                            if cleanup_error is not None
+                            else ""
+                        )
+                    ),
+                )
+            raise
+        warnings: list[str] = []
+        notion_record: dict[str, Any] | None = None
+        if link.notion_project_page_id:
+            try:
+                notion_record = await notion_gateway.append_project_file_record(
+                    project_page_id=str(link.notion_project_page_id),
+                    filename=str(uploaded.get("name") or payload.get("filename") or "file"),
+                    artifact_type=str(
+                        payload.get("artifact_type_label")
+                        or payload.get("artifact_type")
+                        or "Документ"
+                    ),
+                    drive_url=uploaded.get("webViewLink"),
+                    uploaded_by=int(action.telegram_user_id),
+                )
+            except Exception as exc:
+                warnings.append(f"Notion: {sanitize_text(str(exc), limit=300)}")
+        else:
+            warnings.append("Notion: проект не связан")
+
+        kommo_note_created = False
+        try:
+            marker = (
+                f"BBS-FILE-{int(artifact.id)}"
+                if artifact is not None
+                else f"BBS-FILE-ACTION-{int(action.id)}"
+            )
+            await kommo_service.add_common_note(
+                kommo_id,
+                (
+                    f"[{marker}]\n"
+                    "Файл проекта загружен через B&BS Telegram Agent.\n"
+                    f"Тип: {payload.get('artifact_type_label') or payload.get('artifact_type') or 'Документ'}\n"
+                    f"Имя: {uploaded.get('name') or payload.get('filename')}\n"
+                    f"Папка: {subfolder or 'корень проекта'}\n"
+                    f"Drive: {uploaded.get('webViewLink') or '—'}\n"
+                    f"Пользователь Telegram: {action.telegram_user_id}"
+                ),
+            )
+            kommo_note_created = True
+        except Exception as exc:
+            warnings.append(f"Kommo: {sanitize_text(str(exc), limit=300)}")
+
+        try:
+            await asyncio.to_thread(
+                storage_service.delete_project_file,
+                str(payload["storage_path"]),
+            )
+        except Exception as exc:
+            warnings.append(
+                f"Временное хранилище: {sanitize_text(str(exc), limit=300)}"
+            )
+        if artifact is not None:
+            artifact = await project_artifact_service.mark_uploaded(
+                db,
+                artifact=artifact,
+                uploaded_by_telegram_user_id=int(action.telegram_user_id),
+                uploaded=uploaded,
+                notion=notion_record,
+                kommo_note_created=kommo_note_created,
+                warnings=warnings,
+            )
         result = {
+            "artifact_id": int(artifact.id) if artifact is not None else None,
+            "kommo_lead_id": kommo_id,
             "file_id": uploaded.get("id"),
             "file_url": uploaded.get("webViewLink"),
             "filename": uploaded.get("name"),
             "project_key": link.project_key,
+            "notion": notion_record,
+            "kommo_note_created": kommo_note_created,
+            "warnings": warnings,
         }
+        warning_line = (
+            "\n⚠️ " + html.escape("; ".join(warnings)) if warnings else ""
+        )
         return {
             "text": (
                 "✅ <b>Файл загружен в Google Drive</b>\n\n"
                 f"Проект: <code>{html.escape(str(link.project_key))}</code>\n"
                 f"Файл: {html.escape(str(uploaded.get('name') or payload.get('filename') or '—'))}\n"
                 + _result_link("Открыть файл", uploaded.get("webViewLink"))
+                + warning_line
             ),
             "data": result,
         }

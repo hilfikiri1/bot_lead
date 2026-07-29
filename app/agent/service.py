@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import html
 import logging
 import re
@@ -8,7 +9,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agent import actions, audit, clarification, digest, generation, memory, notion_gateway, planner, project_drive, project_linking, project_snapshot, security, tools
+from app.agent import actions, audit, clarification, digest, generation, memory, notion_gateway, planner, project_drive, project_linking, project_snapshot, project_updates, security, tools
 from app.agent.contracts import AgentPlan, AgentReply
 from app.agent.executor import execute_action
 from app.agent.lead_refs import extract_internal_lead_number, user_error_hint
@@ -21,10 +22,11 @@ from app.services import (
     client_message_service,
     identity_service,
     kommo_service,
+    project_artifact_service,
     storage_service,
     telegram_service,
 )
-from app.services.google_drive_service import PROJECT_SUBFOLDERS, sanitize_filename
+from app.services.google_drive_service import sanitize_filename
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -40,12 +42,16 @@ def _help_text() -> str:
         "Можно писать или говорить обычными словами:\n"
         "• <i>Что мне делать сегодня?</i>\n"
         "• <i>Покажи сделку 135 кормушки</i>\n"
+        "• <i>Покажи проект 134</i> или <i>что по Maciej Walasek?</i>\n"
+        "• <i>Найди проект по телефону, компании или товару</i>\n"
         "• <i>Сделай КП по #123456 на польском</i>\n"
         "• <i>Подготовь запрос поставщику по этой сделке</i>\n"
         "• <i>Добавь примечание в #123456: клиент ждёт цену</i>\n"
         "• <i>Поставь задачу по #123456 завтра в 10:00</i>\n"
         "• <i>Запланируй созвон по этой сделке в пятницу в 15:00</i>\n"
         "• <i>Проверь Notion</i>\n\n"
+        "Файл можно отправить с подписью: <i>предложение производителя для проекта 134</i>.\n"
+        "Голосом можно дать пакетное обновление проекта — каждое изменение подтверждается отдельно.\n\n"
         "Чтение и подготовка черновиков выполняются сразу. Любая запись в Kommo, "
         "Notion, Gmail или Calendar — только после кнопки подтверждения."
     )
@@ -328,7 +334,13 @@ async def handle_message(
         if exc.candidates:
             next_intent = (
                 plan.intent
-                if plan and plan.intent in {"create_drive_project"}
+                if plan
+                and plan.intent
+                in {
+                    "create_drive_project",
+                    "project_snapshot",
+                    "project_update_bundle",
+                }
                 else None
             )
             reply = AgentReply(
@@ -423,7 +435,9 @@ async def _execute_plan(
         )
 
     if plan.intent == "daily_digest":
-        result = await digest.build_digest()
+        result = await digest.build_digest(
+            db=db, telegram_user_id=telegram_user_id
+        )
         last_digest = digest.build_last_digest_context(result)
         await memory.update_context(db, session=session, values={"last_digest": last_digest})
         context["last_digest"] = last_digest
@@ -444,7 +458,101 @@ async def _execute_plan(
             db, plan=plan, context=context, session=session
         )
         snap = await project_snapshot.build_snapshot(db, lead=lead, context=context)
-        return AgentReply(project_snapshot.format_snapshot(snap), intent=plan.intent)
+        return AgentReply(
+            project_snapshot.format_snapshot(snap),
+            reply_markup=project_snapshot.project_actions_markup(snap),
+            intent=plan.intent,
+            metadata={"lead_id": int(lead["id"]), "project_key": snap.identity.get("project_key")},
+        )
+
+    if plan.intent == "search_project":
+        search = await kommo_service.search_projects(str(plan.query or ""), limit=8)
+        candidates = list(search.get("leads") or [])
+        if not candidates:
+            return AgentReply(
+                "❓ Проект не найден. Укажи внутренний номер, имя, телефон, "
+                "компанию или товар точнее.",
+                intent=plan.intent,
+            )
+        if len(candidates) > 1:
+            return AgentReply(
+                tools.format_candidates(candidates),
+                reply_markup=tools.candidates_markup(
+                    candidates, next_intent="project_snapshot"
+                ),
+                intent="project_search_candidates",
+                metadata={"query": plan.query, "count": len(candidates)},
+            )
+        lead = await kommo_service.get_lead_details(int(candidates[0]["id"]))
+        await memory.set_active_lead(
+            db,
+            session=session,
+            kommo_lead_id=int(lead["id"]),
+            lead_name=str(lead.get("name") or ""),
+        )
+        snap = await project_snapshot.build_snapshot(db, lead=lead, context=context)
+        return AgentReply(
+            project_snapshot.format_snapshot(snap),
+            reply_markup=project_snapshot.project_actions_markup(snap),
+            intent="project_snapshot",
+            metadata={"lead_id": int(lead["id"]), "query": plan.query},
+        )
+
+    if plan.intent == "project_update_bundle":
+        lead = await _resolve_lead_for_plan(
+            db, plan=plan, context=context, session=session
+        )
+        proposal = project_updates.analyse_update(text)
+        followup_draft = None
+        language_source = None
+        client_id = None
+        if proposal.should_prepare_followup:
+            try:
+                language = await client_language_service.resolve_communication_language(
+                    db,
+                    lead=lead,
+                    explicit_language=(
+                        plan.language if plan.language and plan.language != "auto" else None
+                    ),
+                )
+                followup_draft = await generation.generate_draft(
+                    kind="followup_message",
+                    lead=tools.lead_summary_for_ai(lead),
+                    language=language.language,
+                    manager_request=(
+                        "Подготовь короткий follow-up по этому обновлению проекта:\n"
+                        + proposal.summary
+                    ),
+                )
+                language_source = language.source
+                client_id = language.client_id
+            except Exception as exc:
+                logger.info("Project update follow-up draft skipped: %s", exc)
+        staged, group_id = await project_updates.stage_bundle(
+            db,
+            chat_id=chat_id,
+            telegram_user_id=telegram_user_id,
+            lead=lead,
+            proposal=proposal,
+            followup_draft=followup_draft,
+            language_source=language_source,
+            client_id=client_id,
+        )
+        return AgentReply(
+            project_updates.format_bundle(
+                lead=lead,
+                proposal=proposal,
+                actions_list=staged,
+                followup_draft=followup_draft,
+            ),
+            reply_markup=project_updates.bundle_markup(staged, group_id),
+            intent=plan.intent,
+            metadata={
+                "lead_id": int(lead["id"]),
+                "batch_group_id": group_id,
+                "action_ids": [int(action.id) for action in staged],
+            },
+        )
 
     if plan.intent == "create_drive_project":
         lead = await _resolve_lead_for_plan(
@@ -1084,6 +1192,23 @@ async def handle_callback(
                     context=context,
                     session=session,
                 )
+            if next_intent == "project_snapshot":
+                snap = await project_snapshot.build_snapshot(
+                    db, lead=lead, context=context
+                )
+                return AgentReply(
+                    project_snapshot.format_snapshot(snap),
+                    reply_markup=project_snapshot.project_actions_markup(snap),
+                    intent="project_snapshot",
+                    metadata={"lead_id": lead_id},
+                )
+            if next_intent == "project_update_bundle":
+                return AgentReply(
+                    "✅ Проект выбран. Повтори голосовое или текстовое обновление — "
+                    "теперь бот применит его к этой карточке.",
+                    intent="project_update_target_selected",
+                    metadata={"lead_id": lead_id},
+                )
             return AgentReply(
                 tools.format_lead_summary(lead),
                 reply_markup=tools.lead_card_actions_markup(lead),
@@ -1164,6 +1289,195 @@ async def handle_callback(
                 session=session,
             )
 
+    if command == "project" and len(parts) >= 4 and parts[3].isdigit():
+        project_command = parts[2]
+        lead_id = int(parts[3])
+        lead = await kommo_service.get_lead_details(lead_id)
+        await memory.set_active_lead(
+            db,
+            session=session,
+            kommo_lead_id=lead_id,
+            lead_name=str(lead.get("name") or ""),
+        )
+        if project_command == "upload":
+            return AgentReply(
+                "📎 Отправь PDF, Excel, документ или фотографии одним сообщением.\n\n"
+                "В подписи можно написать, например: "
+                "<i>предложение производителя для проекта 134</i>. "
+                "Бот предложит тип, имя и папку перед загрузкой.",
+                intent="project_upload_prompt",
+                metadata={"lead_id": lead_id},
+            )
+        if project_command == "history":
+            return AgentReply(
+                await project_snapshot.build_history(db, lead=lead),
+                intent="project_history",
+                metadata={"lead_id": lead_id},
+            )
+        if project_command == "status":
+            statuses = await kommo_service.get_pipeline_statuses(
+                int(lead.get("pipeline_id") or 0)
+            )
+            rows: list[list[dict[str, str]]] = []
+            for status in statuses[:20]:
+                status_id = status.get("id")
+                if not isinstance(status_id, int):
+                    continue
+                name = str(status.get("name") or status_id)
+                rows.append(
+                    [
+                        {
+                            "text": name[:64],
+                            "callback_data": f"agent:projectstatus:{lead_id}:{status_id}",
+                        }
+                    ]
+                )
+            if not rows:
+                return AgentReply(
+                    "❌ Не удалось получить этапы этой воронки.",
+                    intent="project_status_unavailable",
+                )
+            return AgentReply(
+                f"<b>Обновить статус проекта</b>\n\n"
+                f"Сделка: {html.escape(str(lead.get('name') or lead_id))}\n"
+                f"Текущий этап: {html.escape(str(lead.get('status_name') or '—'))}",
+                reply_markup={"inline_keyboard": rows},
+                intent="project_status_select",
+                metadata={"lead_id": lead_id},
+            )
+
+    if (
+        command == "projectstatus"
+        and len(parts) >= 4
+        and parts[2].isdigit()
+        and parts[3].isdigit()
+    ):
+        lead_id = int(parts[2])
+        status_id = int(parts[3])
+        lead = await kommo_service.get_lead_details(lead_id)
+        statuses = await kommo_service.get_pipeline_statuses(
+            int(lead.get("pipeline_id") or 0)
+        )
+        target = next(
+            (item for item in statuses if int(item.get("id") or 0) == status_id),
+            None,
+        )
+        if target is None:
+            return AgentReply(
+                "❌ Такой этап не найден в воронке сделки.",
+                intent="project_status_invalid",
+            )
+        preview = (
+            "<b>Подтвердить новый статус?</b>\n\n"
+            f"Сделка: {html.escape(str(lead.get('name') or lead_id))}\n"
+            f"Было: {html.escape(str(lead.get('status_name') or '—'))}\n"
+            f"Станет: <b>{html.escape(str(target.get('name') or status_id))}</b>"
+        )
+        action = await actions.stage_action(
+            db,
+            telegram_user_id=telegram_user_id,
+            chat_id=int(chat_id or 0),
+            action_type="update_kommo_lead",
+            payload={
+                "lead_id": lead_id,
+                "kommo_lead_id": lead_id,
+                "fields": {"status_id": status_id},
+            },
+            preview_text=preview,
+        )
+        return AgentReply(
+            preview,
+            reply_markup=actions.approval_markup(action.id),
+            intent="project_status_confirmation",
+            metadata={"lead_id": lead_id, "action_id": int(action.id)},
+        )
+
+    if command == "bundle" and len(parts) >= 4:
+        group_id = parts[2]
+        choice = parts[3]
+        actor = identity_service.current_user()
+        if actor is not None and not identity_service.can_write(actor):
+            return AgentReply(
+                "🔒 Роль Viewer не позволяет подтверждать изменения.",
+                intent="permission_denied",
+            )
+        batch = await actions.get_batch_actions(
+            db,
+            batch_group_id=group_id,
+            telegram_user_id=telegram_user_id,
+        )
+        if not batch:
+            return AgentReply(
+                "⌛ Пакет не найден или принадлежит другому пользователю.",
+                intent="bundle_missing",
+            )
+        if choice == "no":
+            for action in batch:
+                await actions.reject_action(
+                    db,
+                    action=action,
+                    telegram_user_id=telegram_user_id,
+                )
+            return AgentReply(
+                "❌ Пакет отменён. Внешние сервисы не изменены.",
+                intent="bundle_rejected",
+            )
+        if choice == "all":
+            lines = ["<b>Результат пакетного обновления</b>", ""]
+            success = 0
+            failed = 0
+            for action in batch:
+                try:
+                    result_text = await execute_action(
+                        db,
+                        action=action,
+                        telegram_user_id=telegram_user_id,
+                    )
+                    if result_text.startswith("❌"):
+                        failed += 1
+                    else:
+                        success += 1
+                    lines.append(
+                        f"{'✅' if not result_text.startswith('❌') else '❌'} "
+                        f"{html.escape(action.action_type)}"
+                    )
+                except Exception as exc:
+                    failed += 1
+                    lines.append(
+                        f"❌ {html.escape(action.action_type)} — "
+                        f"{html.escape(str(exc)[:180])}"
+                    )
+            lines.extend(["", f"Выполнено: {success} · Ошибок: {failed}"])
+            reply_markup = None
+            followup_action = next(
+                (
+                    item
+                    for item in batch
+                    if item.action_type == "prepare_client_followup"
+                    and isinstance(item.result, dict)
+                    and item.result.get("client_message_draft_id")
+                ),
+                None,
+            )
+            if followup_action is not None:
+                record = await client_message_service.get_draft(
+                    db, int(followup_action.result["client_message_draft_id"])
+                )
+                if record is not None:
+                    lines.extend(
+                        [
+                            "",
+                            "Follow-up подготовлен. Открой WhatsApp кнопкой ниже.",
+                        ]
+                    )
+                    reply_markup = client_message_service.message_draft_markup(record)
+            return AgentReply(
+                "\n".join(lines),
+                reply_markup=reply_markup,
+                intent="bundle_executed" if not failed else "bundle_partial",
+                metadata={"batch_group_id": group_id, "success": success, "failed": failed},
+            )
+
     if command in {"ok", "no"} and parts[2].isdigit():
         action_id = int(parts[2])
         action = await actions.get_action(db, action_id)
@@ -1173,6 +1487,29 @@ async def handle_callback(
             await actions.reject_action(
                 db, action=action, telegram_user_id=telegram_user_id
             )
+            if action.action_type == "save_file_to_drive_project":
+                artifact_id = (action.payload or {}).get("artifact_id")
+                if artifact_id:
+                    artifact = await project_artifact_service.get_artifact(
+                        db, int(artifact_id)
+                    )
+                    if artifact is not None and artifact.status == "pending":
+                        storage_path = artifact.storage_path
+                        await project_artifact_service.mark_cancelled(
+                            db, artifact=artifact
+                        )
+                        if storage_path:
+                            try:
+                                await asyncio.to_thread(
+                                    storage_service.delete_project_file,
+                                    str(storage_path),
+                                )
+                            except Exception as exc:
+                                logger.warning(
+                                    "Could not clean rejected project file %s: %s",
+                                    artifact.id,
+                                    exc,
+                                )
             return AgentReply("❌ Действие отменено. Внешние сервисы не изменены.", intent="action_rejected")
         actor = identity_service.current_user()
         if actor is not None and not identity_service.can_write(actor):
@@ -1184,6 +1521,20 @@ async def handle_callback(
             text = await execute_action(
                 db, action=action, telegram_user_id=telegram_user_id
             )
+            if (
+                action.action_type == "prepare_client_followup"
+                and isinstance(action.result, dict)
+                and action.result.get("client_message_draft_id")
+            ):
+                record = await client_message_service.get_draft(
+                    db, int(action.result["client_message_draft_id"])
+                )
+                if record is not None:
+                    return AgentReply(
+                        client_message_service.format_client_message_draft(record),
+                        reply_markup=client_message_service.message_draft_markup(record),
+                        intent="action_executed",
+                    )
             return AgentReply(text, intent="action_executed")
         except Exception as exc:
             logger.exception("Confirmed agent action failed")
@@ -1192,31 +1543,108 @@ async def handle_callback(
     return AgentReply("❌ Некорректная команда агента.", intent="callback_error")
 
 
-def _infer_subfolder(caption: str | None) -> str:
-    if not caption:
-        return PROJECT_SUBFOLDERS[0]
-    normalized = caption.casefold()
-    for name in PROJECT_SUBFOLDERS:
-        if name.casefold() in normalized or name.split(" ", 1)[0] in normalized:
-            return name
-    return PROJECT_SUBFOLDERS[0]
-
-
 async def handle_project_file_upload(
     db: AsyncSession,
     *,
     chat_id: int,
     telegram_user_id: int,
+    telegram_message_id: int | None = None,
     filename: str,
     mime_type: str,
     content: bytes,
     caption: str | None = None,
+    kind: str | None = None,
 ) -> AgentReply:
+    if telegram_message_id is not None:
+        existing = await project_artifact_service.get_by_telegram_message(
+            db,
+            telegram_user_id=telegram_user_id,
+            telegram_message_id=telegram_message_id,
+        )
+        if existing is not None:
+            if existing.status in {"uploaded", "uploaded_with_warnings"}:
+                link = (
+                    f'\n<a href="{html.escape(str(existing.drive_file_url), quote=True)}">'
+                    "Открыть файл</a>"
+                    if existing.drive_file_url
+                    else ""
+                )
+                return AgentReply(
+                    "ℹ️ Этот Telegram-файл уже обработан.\n\n"
+                    f"Статус: <b>{html.escape(existing.status)}</b>"
+                    + link,
+                    intent="file_upload_duplicate",
+                    metadata={"artifact_id": int(existing.id)},
+                )
+            if existing.status != "pending" or not existing.storage_path:
+                return AgentReply(
+                    "ℹ️ Этот Telegram-файл уже был обработан со статусом "
+                    f"<b>{html.escape(existing.status)}</b>. "
+                    "Если нужен новый запуск, отправь файл ещё раз.",
+                    intent="file_upload_duplicate",
+                    metadata={"artifact_id": int(existing.id)},
+                )
+            payload = {
+                "kommo_lead_id": int(existing.kommo_lead_id),
+                "project_key": (
+                    existing.metadata_json or {}
+                ).get("project_key"),
+                "artifact_id": int(existing.id),
+                "filename": existing.suggested_filename,
+                "mime_type": existing.mime_type,
+                "storage_path": existing.storage_path,
+                "subfolder_name": existing.subfolder_name,
+                "artifact_type": existing.artifact_type,
+                "artifact_type_label": existing.artifact_type_label,
+            }
+            action = await actions.stage_action(
+                db,
+                telegram_user_id=telegram_user_id,
+                chat_id=chat_id,
+                action_type="save_file_to_drive_project",
+                payload=payload,
+                preview_text=existing.preview_text or "Подтвердить загрузку файла?",
+            )
+            return AgentReply(
+                existing.preview_text or "Подтвердить загрузку файла?",
+                reply_markup=actions.approval_markup(action.id),
+                intent="file_upload_duplicate_pending",
+                metadata={
+                    "action_id": int(action.id),
+                    "artifact_id": int(existing.id),
+                },
+            )
+
     session = await memory.get_or_create_session(db, telegram_user_id=telegram_user_id)
     context = await memory.build_context(
         db, telegram_user_id=telegram_user_id, session=session
     )
     active_id = context.get("active_kommo_lead_id")
+    explicit_project = re.search(
+        r"\bпроект[ауе]?\s*[№#]?\s*(\d{1,4})\b",
+        caption or "",
+        flags=re.I,
+    )
+    if explicit_project:
+        try:
+            resolved = await tools.resolve_lead(
+                lead_id=None,
+                query=explicit_project.group(1),
+                context=context,
+            )
+            active_id = int(resolved["id"])
+        except tools.LeadResolutionError as exc:
+            return AgentReply(
+                f"❓ Не удалось определить проект из подписи: {html.escape(str(exc))}",
+                reply_markup=(
+                    tools.candidates_markup(
+                        exc.candidates, next_intent="project_snapshot"
+                    )
+                    if exc.candidates
+                    else None
+                ),
+                intent="file_upload_project_clarification",
+            )
     if not active_id:
         return AgentReply(
             f"❓ Для какого проекта сохранить файл? {user_error_hint()}",
@@ -1232,23 +1660,70 @@ async def handle_project_file_upload(
             "Например: <i>создай проект в drive по этой сделке</i>",
             intent="file_upload_missing_project",
         )
-    safe_name = sanitize_filename(filename)
-    storage_path = await storage_service.save_project_file(content, safe_name)
-    subfolder = _infer_subfolder(caption)
+    classification = project_artifact_service.classify_artifact(
+        filename=filename,
+        mime_type=mime_type,
+        caption=caption,
+        kind=kind,
+    )
+    safe_name = project_artifact_service.suggested_filename(
+        project_key=str(link.project_key),
+        classification=classification,
+        original_filename=filename,
+    )
+    storage_path = await storage_service.save_project_file(
+        content, safe_name, mime_type
+    )
     preview = (
-        "<b>Загрузить файл в Google Drive?</b>\n\n"
+        "<b>📎 Умная загрузка файла</b>\n\n"
         f"Проект: <code>{html.escape(str(link.project_key))}</code>\n"
         f"Сделка: <b>{html.escape(str(lead.get('name') or '—'))}</b>\n"
-        f"Файл: {html.escape(safe_name)}\n"
-        f"Папка: {html.escape(subfolder)}"
+        f"Определённый тип: <b>{html.escape(classification.label)}</b>\n"
+        f"Исходное имя: {html.escape(sanitize_filename(filename))}\n"
+        f"Новое имя: <b>{html.escape(safe_name)}</b>\n"
+        f"Папка: {html.escape(classification.subfolder_name)}\n"
+        f"Размер: {len(content) / 1024:.1f} КБ\n\n"
+        "После подтверждения бот загрузит файл, добавит запись в Notion, "
+        "заметку в Kommo и сохранит аудит."
     )
+    try:
+        artifact = await project_artifact_service.create_pending(
+            db,
+            link=link,
+            telegram_user_id=telegram_user_id,
+            telegram_message_id=telegram_message_id,
+            original_filename=filename,
+            suggested_name=safe_name,
+            mime_type=mime_type,
+            file_size=len(content),
+            classification=classification,
+            caption=caption,
+            preview_text=preview,
+            storage_path=storage_path,
+            metadata={"telegram_kind": kind, "project_key": link.project_key},
+        )
+    except Exception:
+        try:
+            await asyncio.to_thread(
+                storage_service.delete_project_file,
+                str(storage_path),
+            )
+        except Exception as cleanup_exc:
+            logger.warning(
+                "Could not clean project file after audit staging failure: %s",
+                cleanup_exc,
+            )
+        raise
     payload = {
         "kommo_lead_id": int(active_id),
         "project_key": link.project_key,
+        "artifact_id": int(artifact.id),
         "filename": safe_name,
         "mime_type": mime_type,
         "storage_path": storage_path,
-        "subfolder_name": subfolder,
+        "subfolder_name": classification.subfolder_name,
+        "artifact_type": classification.artifact_type,
+        "artifact_type_label": classification.label,
     }
     action = await actions.stage_action(
         db,
@@ -1262,5 +1737,5 @@ async def handle_project_file_upload(
         preview,
         reply_markup=actions.approval_markup(action.id),
         intent="save_file_to_drive_project",
-        metadata={"action_id": action.id},
+        metadata={"action_id": action.id, "artifact_id": int(artifact.id)},
     )

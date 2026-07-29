@@ -29,6 +29,9 @@ from app.services.followup_runtime import install_followup_runtime_extensions
 from app.services.kaizen_diagnostics_runtime import (
     install_kaizen_diagnostics_runtime,
 )
+from app.services.kaizen_notion_guard_runtime import (
+    install_kaizen_notion_guard_runtime,
+)
 from app.services.lead_registry_runtime import install_lead_registry_runtime
 from app.services.operator_experience_phone_patch import (
     install_operator_experience_phone_patch,
@@ -56,6 +59,7 @@ install_operator_experience_phone_patch()
 install_diagnostic_runtime()
 install_kaizen_diagnostics_runtime()
 install_context_intelligence_runtime()
+install_kaizen_notion_guard_runtime()
 
 structlog.configure(
     processors=[

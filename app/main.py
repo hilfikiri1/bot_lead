@@ -21,6 +21,9 @@ from app.services.agent_scheduled_digest_service import start_periodic_digest_lo
 from app.services.communication_timeline_runtime import (
     install_communication_timeline_runtime,
 )
+from app.services.context_intelligence_runtime import (
+    install_context_intelligence_runtime,
+)
 from app.services.diagnostic_runtime import install_diagnostic_runtime
 from app.services.followup_runtime import install_followup_runtime_extensions
 from app.services.lead_registry_runtime import install_lead_registry_runtime
@@ -51,6 +54,7 @@ install_operator_experience_runtime()
 install_operator_experience_phone_patch()
 # Install last so /diag and kaizen wrap the final production behavior of the agent.
 install_diagnostic_runtime()
+install_context_intelligence_runtime()
 
 structlog.configure(
     processors=[

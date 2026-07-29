@@ -2,7 +2,17 @@ from __future__ import annotations
 
 from datetime import date, datetime
 
-from sqlalchemy import BigInteger, Date, DateTime, JSON, String, Text, UniqueConstraint, func
+from sqlalchemy import (
+    BigInteger,
+    CheckConstraint,
+    Date,
+    DateTime,
+    JSON,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -23,6 +33,22 @@ class KaizenJournalEntry(Base):
             "period_start",
             "period_end",
             name="uq_kaizen_journal_user_type_period",
+        ),
+        CheckConstraint(
+            "entry_type IN ('daily', 'weekly')",
+            name="ck_kaizen_journal_entry_type",
+        ),
+        CheckConstraint(
+            "status IN ('open', 'completed', 'skipped')",
+            name="ck_kaizen_journal_status",
+        ),
+        CheckConstraint(
+            "source IN ('text', 'voice', 'scheduled', 'system')",
+            name="ck_kaizen_journal_source",
+        ),
+        CheckConstraint(
+            "period_end >= period_start",
+            name="ck_kaizen_journal_period_order",
         ),
     )
 

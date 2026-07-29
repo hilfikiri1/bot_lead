@@ -72,6 +72,17 @@ Migration `013_whatsapp_cloud_messages` adds `whatsapp_cloud_messages` with:
 - sent/delivered/read/failed timestamps;
 - provider payload and error information.
 
+## Validation checklist
+
+1. Send a message from another phone to the Cloud API number.
+2. Confirm a `POST /webhook/whatsapp` request in Railway.
+3. Confirm one Telegram notification and one Kommo note.
+4. Prepare a reply in Telegram.
+5. Press `📤 Отправить через WhatsApp API`.
+6. Confirm the Meta message ID and follow-up prompt.
+7. Confirm `sent`, `delivered` and `read` callbacks in the database/logs.
+8. Repeat the same webhook and send action to confirm deduplication.
+
 ## Deliberately deferred
 
 A following PR should add:

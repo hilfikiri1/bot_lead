@@ -4,11 +4,20 @@ import hashlib
 import hmac
 from unittest.mock import patch
 
-from app.services import kommo_chat_service, lead_status_sync_service, whatsapp_webhook_service
+from app.services import (
+    kommo_chat_service,
+    lead_status_sync_service,
+    whatsapp_webhook_service,
+)
 
 
 def test_parse_internal_number_accepts_historical_title_without_dash():
-    assert lead_status_sync_service.parse_internal_number("68 Пилы, алмазные головки") == "68"
+    assert (
+        lead_status_sync_service.parse_internal_number(
+            "68 Пилы, алмазные головки"
+        )
+        == "68"
+    )
     assert lead_status_sync_service.parse_internal_number("68 - Пилы") == "68"
     assert lead_status_sync_service.parse_internal_number("Просьба о контакте") is None
 
@@ -16,10 +25,17 @@ def test_parse_internal_number_accepts_historical_title_without_dash():
 def test_whatsapp_signature_verification():
     body = b'{"entry":[]}'
     secret = "test-secret"
-    signature = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
-    with patch.object(whatsapp_webhook_service.settings, "whatsapp_app_secret", secret):
+    signature = "sha256=" + hmac.new(
+        secret.encode(), body, hashlib.sha256
+    ).hexdigest()
+    with patch.dict("os.environ", {"WHATSAPP_APP_SECRET": secret}):
         assert whatsapp_webhook_service.verify_meta_signature(body, signature) is True
-        assert whatsapp_webhook_service.verify_meta_signature(body, "sha256=bad") is False
+        assert (
+            whatsapp_webhook_service.verify_meta_signature(body, "sha256=bad")
+            is False
+        )
+    with patch.dict("os.environ", {}, clear=True):
+        assert whatsapp_webhook_service.verify_meta_signature(body, signature) is False
 
 
 def test_extract_whatsapp_text_message():
@@ -31,7 +47,10 @@ def test_extract_whatsapp_text_message():
                         "value": {
                             "metadata": {"phone_number_id": "123"},
                             "contacts": [
-                                {"wa_id": "48600100200", "profile": {"name": "Jan Kowalski"}}
+                                {
+                                    "wa_id": "48600100200",
+                                    "profile": {"name": "Jan Kowalski"},
+                                }
                             ],
                             "messages": [
                                 {

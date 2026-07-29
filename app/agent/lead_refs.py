@@ -431,7 +431,10 @@ async def resolve_reference(
         search = await kommo_service.search_open_leads(ref.internal_lead_number, limit=8)
         leads = [enrich_lead(item) for item in search.get("leads") or []]
         if len(leads) == 1:
-            return LeadResolutionResult(resolved=[leads[0]])
+            lead = enrich_lead(
+                await kommo_service.get_lead_details(int(leads[0]["id"]))
+            )
+            return LeadResolutionResult(resolved=[lead])
         if len(leads) > 1:
             return LeadResolutionResult(unresolved=[ref], candidates=leads)
         return LeadResolutionResult(
@@ -443,7 +446,10 @@ async def resolve_reference(
         search = await kommo_service.search_open_leads(ref.name_query, limit=8)
         leads = [enrich_lead(item) for item in search.get("leads") or []]
         if len(leads) == 1:
-            return LeadResolutionResult(resolved=[leads[0]])
+            lead = enrich_lead(
+                await kommo_service.get_lead_details(int(leads[0]["id"]))
+            )
+            return LeadResolutionResult(resolved=[lead])
         if len(leads) > 1:
             return LeadResolutionResult(unresolved=[ref], candidates=leads)
         return LeadResolutionResult(

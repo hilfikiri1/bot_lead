@@ -29,15 +29,50 @@ class LeadResolutionError(ValueError):
         self.unresolved = unresolved or []
 
 
+def _stem_search_token(token: str) -> str:
+    """Reduce common Russian noun endings for tolerant Kommo title search."""
+    if len(token) < 6 or not re.fullmatch(r"[а-яё]+", token, flags=re.I):
+        return token
+    for ending in (
+        "иями",
+        "ями",
+        "ами",
+        "ого",
+        "ему",
+        "ому",
+        "ыми",
+        "ими",
+        "ах",
+        "ях",
+        "ам",
+        "ям",
+        "ов",
+        "ев",
+        "ом",
+        "ем",
+        "у",
+        "ю",
+        "а",
+        "я",
+        "ы",
+        "и",
+        "е",
+    ):
+        if token.casefold().endswith(ending) and len(token) - len(ending) >= 4:
+            return token[: -len(ending)]
+    return token
+
+
 def _clean_search_query(value: str) -> str:
     text = " ".join((value or "").strip().split())
     text = re.sub(
-        r"\b(?:покажи|найди|открой|расскажи|что|по|сделке?|лид[ауе]?|коммо|kommo)\b",
+        r"\b(?:покажи|найди|открой|расскажи|что|по|сделк[аеуы]?|лид[ауе]?|коммо|kommo)\b",
         " ",
         text,
         flags=re.I,
     )
-    return " ".join(text.split()).strip(" #№:—-")
+    cleaned = " ".join(text.split()).strip(" #№:—-")
+    return " ".join(_stem_search_token(token) for token in cleaned.split())
 
 
 def lead_refs_from_plan(plan: Any) -> list[LeadReference]:
@@ -74,9 +109,10 @@ async def resolve_lead(
     refs = list(lead_refs or [])
     if plan is not None:
         refs = refs or lead_refs_from_plan(plan)
+    cleaned_query = _clean_search_query(str(query or "")) if query else None
     result = await resolve_lead_for_plan(
         lead_id=lead_id,
-        query=query,
+        query=cleaned_query,
         lead_refs=refs,
         context=context,
     )
@@ -108,9 +144,10 @@ async def resolve_leads(
     refs = list(lead_refs or [])
     if plan is not None:
         refs = refs or lead_refs_from_plan(plan)
+    cleaned_query = _clean_search_query(str(query or "")) if query else None
     return await resolve_lead_for_plan(
         lead_id=lead_id,
-        query=query,
+        query=cleaned_query,
         lead_refs=refs,
         context=context,
     )

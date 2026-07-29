@@ -143,6 +143,8 @@ async def build_context(
         "last_draft": (session.context or {}).get("last_draft"),
         "last_draft_lead": (session.context or {}).get("last_draft_lead"),
         "last_draft_created_at": (session.context or {}).get("last_draft_created_at"),
+        "last_digest": (session.context or {}).get("last_digest"),
+        "pending_clarification": (session.context or {}).get("pending_clarification"),
     }
 
 

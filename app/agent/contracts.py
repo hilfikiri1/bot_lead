@@ -17,6 +17,8 @@ class AgentPlan(BaseModel):
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     lead_id: int | None = None
     query: str | None = None
+    lead_refs: list[dict[str, Any]] = Field(default_factory=list)
+    resolved_lead_ids: list[int] = Field(default_factory=list)
     draft_kind: str | None = None
     title: str | None = None
     body: str | None = None

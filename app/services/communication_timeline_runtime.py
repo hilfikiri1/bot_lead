@@ -8,15 +8,37 @@ from app.services import telegram_service, unified_communication_service
 
 _INSTALLED = False
 
+# Keep language-specific business phrases extensible without changing the
+# timeline algorithm. These forms are common in Polish client communication.
+_PROMISE_MARKER_EXTENSIONS = (
+    "prześlę",
+    "prześlemy",
+    "odeślę",
+    "dam znać",
+)
+unified_communication_service._PROMISE_MARKERS = tuple(
+    dict.fromkeys(
+        (*unified_communication_service._PROMISE_MARKERS, *_PROMISE_MARKER_EXTENSIONS)
+    )
+)
+
 
 def _add_timeline_button(markup: dict[str, Any], lead_id: int) -> dict[str, Any]:
-    result = {"inline_keyboard": [list(row) for row in (markup.get("inline_keyboard") or [])]}
+    result = {
+        "inline_keyboard": [
+            list(row) for row in (markup.get("inline_keyboard") or [])
+        ]
+    }
     button = {
         "text": "💬 Вся переписка",
         "callback_data": f"agent:comms:{int(lead_id)}:0",
     }
     rows = result["inline_keyboard"]
-    insert_at = max(0, len(rows) - 1) if rows and any("url" in item for item in rows[-1]) else len(rows)
+    insert_at = (
+        max(0, len(rows) - 1)
+        if rows and any("url" in item for item in rows[-1])
+        else len(rows)
+    )
     rows.insert(insert_at, [button])
     return result
 

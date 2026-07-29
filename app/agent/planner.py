@@ -11,6 +11,11 @@ from openai import AsyncOpenAI
 from app.agent.retrying import retry, stop_after_attempt, wait_exponential
 
 from app.agent.contracts import AgentPlan
+from app.agent.lead_refs import (
+    extract_explicit_kommo_id,
+    parse_lead_references,
+    user_error_hint,
+)
 from app.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -18,7 +23,9 @@ settings = get_settings()
 
 _WRITE_INTENTS = {
     "add_kommo_note",
+    "add_kommo_notes_batch",
     "create_kommo_task",
+    "create_kommo_tasks_batch",
     "create_calendar_event",
     "update_kommo_lead",
     "save_draft_to_notion",
@@ -100,22 +107,8 @@ def _normalize(text: str) -> str:
     return " ".join(text.strip().casefold().replace("ё", "е").split())
 
 
-def _explicit_lead_id(text: str) -> int | None:
-    patterns = (
-        r"#\s*(\d{4,12})\b",
-        r"\bkommo\s*(?:id)?\s*[:#]?\s*(\d{4,12})\b",
-        r"\bкоммо\s*(?:id|ид)?\s*[:#]?\s*(\d{4,12})\b",
-        r"\bid\s*[:#]?\s*(\d{4,12})\b",
-    )
-    for pattern in patterns:
-        match = re.search(pattern, text, flags=re.I)
-        if match:
-            return int(match.group(1))
-    return None
-
-
 def _lead_reference(text: str, context: dict[str, Any]) -> tuple[int | None, str | None]:
-    explicit = _explicit_lead_id(text)
+    explicit = extract_explicit_kommo_id(text)
     if explicit:
         return explicit, None
     normalized = _normalize(text)
@@ -130,6 +123,23 @@ def _lead_reference(text: str, context: dict[str, Any]) -> tuple[int | None, str
             return int(value), None
         return None, value
     return None, None
+
+
+def _plan_lead_refs(text: str, context: dict[str, Any]) -> list[dict[str, Any]]:
+    refs = parse_lead_references(text, context)
+    return [
+        {
+            "raw": ref.raw,
+            "ref_type": ref.ref_type.value,
+            "internal_lead_number": ref.internal_lead_number,
+            "kommo_lead_id": ref.kommo_lead_id,
+            "digest_position": ref.digest_position,
+            "name_query": ref.name_query,
+            "resolved_kommo_lead_id": ref.resolved_kommo_lead_id,
+            "confidence": ref.confidence,
+        }
+        for ref in refs
+    ]
 
 
 def _language_hint(normalized: str) -> str:
@@ -153,6 +163,8 @@ def deterministic_plan(text: str, context: dict[str, Any]) -> AgentPlan | None:
 
     if normalized in {"/help", "/agent", "help", "помощь", "что ты умеешь", "команды"}:
         return AgentPlan(intent="help", mode="read", confidence=1.0)
+    if normalized in {"/cancel", "отмена", "отмени", "отменить"}:
+        return AgentPlan(intent="cancel_clarification", mode="read", confidence=1.0)
     if normalized in {"забудь контекст", "сбрось память", "reset memory", "/reset_memory"}:
         return AgentPlan(intent="reset_memory", mode="write", confidence=1.0)
     if normalized in {"дайджест", "digest", "что делать сегодня", "задачи дня", "/digest", "/morning"}:
@@ -196,7 +208,11 @@ def deterministic_plan(text: str, context: dict[str, Any]) -> AgentPlan | None:
         )
 
     lead_id, query = _lead_reference(text, context)
+    lead_refs = _plan_lead_refs(text, context)
     language = _language_hint(normalized)
+    multi_lead = len(lead_refs) > 1 or bool(
+        re.search(r"\b\d{1,4}\s*[,/и]\s*\d", normalized)
+    )
 
     for kind, hints in _DRAFT_KINDS.items():
         if any(hint in normalized for hint in hints) and any(
@@ -216,8 +232,9 @@ def deterministic_plan(text: str, context: dict[str, Any]) -> AgentPlan | None:
                 language=language,
                 clarification_question=(
                     None
-                    if lead_id or query
-                    else "Для какой сделки подготовить черновик? Укажи Kommo ID или часть названия."
+                    if lead_id or query or lead_refs
+                    else "Для какой сделки подготовить черновик? "
+                    + user_error_hint()
                 ),
             )
 
@@ -233,33 +250,37 @@ def deterministic_plan(text: str, context: dict[str, Any]) -> AgentPlan | None:
                 note_text,
                 flags=re.I,
             ).strip()
+        intent = "add_kommo_notes_batch" if multi_lead else "add_kommo_note"
         return AgentPlan(
-            intent="add_kommo_note",
-            mode="write" if (lead_id or context.get("active_kommo_lead_id")) and note_text else "clarify",
+            intent=intent,
+            mode="write" if (lead_id or lead_refs or context.get("active_kommo_lead_id")) and note_text else "clarify",
             confidence=0.96,
             lead_id=lead_id or context.get("active_kommo_lead_id"),
             query=query,
+            lead_refs=lead_refs,
             note_text=note_text or None,
             clarification_question=(
-                "Что именно записать и в какую сделку?"
-                if not note_text or not (lead_id or query or context.get("active_kommo_lead_id"))
+                "Что именно записать и для каких клиентов?"
+                if not note_text or not (lead_id or query or lead_refs or context.get("active_kommo_lead_id"))
                 else None
             ),
         )
 
-    if any(hint in normalized for hint in ("поставь задачу", "создай задачу", "напомни", "задачу по")):
+    if any(hint in normalized for hint in ("поставь задачу", "создай задачу", "поставь задачи", "создай задачи", "напомни", "задачу по", "задачи по")):
+        intent = "create_kommo_tasks_batch" if multi_lead else "create_kommo_task"
         return AgentPlan(
-            intent="create_kommo_task",
-            mode="write" if (lead_id or query or context.get("active_kommo_lead_id")) else "clarify",
+            intent=intent,
+            mode="write" if (lead_id or query or lead_refs or context.get("active_kommo_lead_id")) else "clarify",
             confidence=0.9,
             lead_id=lead_id or context.get("active_kommo_lead_id"),
             query=query,
+            lead_refs=lead_refs,
             title=text.strip(),
             due_at=text.strip(),
             clarification_question=(
                 None
-                if lead_id or query or context.get("active_kommo_lead_id")
-                else "К какой сделке привязать задачу?"
+                if lead_id or query or lead_refs or context.get("active_kommo_lead_id")
+                else user_error_hint()
             ),
         )
 
@@ -286,10 +307,11 @@ def deterministic_plan(text: str, context: dict[str, Any]) -> AgentPlan | None:
             confidence=0.94,
             lead_id=lead_id,
             query=search_query,
+            lead_refs=lead_refs,
             clarification_question=(
                 None
-                if lead_id or search_query.strip()
-                else "Какой ID, номер, клиент или товар искать?"
+                if lead_id or search_query.strip() or lead_refs
+                else user_error_hint()
             ),
         )
 

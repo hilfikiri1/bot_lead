@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -143,9 +144,33 @@ class TestProductTitle:
         title = await product_title_service.short_product_title("minikoparki 5-8 sztuk")
         assert title == "Мини-экскаваторы"
 
+    @pytest.mark.asyncio
+    async def test_latin_product_without_ai_does_not_crash(self, monkeypatch):
+        product_title_service.clear_title_cache()
+
+        async def _boom(_product: str) -> str:
+            raise ValueError("OPENAI_API_KEY не задан для перевода товара.")
+
+        monkeypatch.setattr(product_title_service, "_ai_short_title", _boom)
+        title = await product_title_service.short_product_title("urny ogrodowe premium")
+        assert title == "Товар"
+
+    @pytest.mark.asyncio
+    async def test_ai_latin_output_falls_back_safely(self, monkeypatch):
+        product_title_service.clear_title_cache()
+
+        async def _latin(_product: str) -> str:
+            return "Garden urns"
+
+        monkeypatch.setattr(product_title_service, "_ai_short_title", _latin)
+        title = await product_title_service.short_product_title("garden urns black")
+        assert title == "Товар"
+        assert not re.search(r"[A-Za-z]", title)
+
     def test_build_proposed_name(self):
         name = unreviewed_leads_service.build_proposed_name("110", "Игрушки")
         assert name == "110 - Игрушки"
+
 
 
 class TestInternalLeadPattern:

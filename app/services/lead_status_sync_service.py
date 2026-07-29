@@ -371,7 +371,18 @@ async def build_status_sync_report() -> dict[str, Any]:
             )
 
         if pair.get("matched_by") != "number":
-            short_product = await product_title_service.short_product_title(row.product)
+            try:
+                short_product = await product_title_service.short_product_title(
+                    row.product
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Product title failed for sheet row %s (%s): %s",
+                    row.row_number,
+                    (row.product or "")[:80],
+                    exc,
+                )
+                short_product = "Товар"
             proposed_name = build_proposed_name(lead_number, short_product)
             current_name = _clean(lead.get("name"))
             if current_name != proposed_name:

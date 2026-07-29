@@ -3,17 +3,20 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import flag_modified
 
 from app.agent import digest, memory
+from app.agent.contracts import AgentReply
 from app.config import get_settings
 from app.database import AsyncSessionLocal
 from app.models.agent_session import AgentSession
 from app.services import identity_service, kaizen_journal_service
+from app.services.kaizen_notion_guard_runtime import guard_weekly_reply
 from app.services.telegram_service import send_message
 
 logger = logging.getLogger(__name__)
@@ -121,6 +124,24 @@ async def send_evening_reflection(
             raise
 
 
+async def _rearm_failed_reminder(db: AsyncSession, entry) -> None:
+    """Retry transient Telegram delivery at most three times without duplicates."""
+    meta = dict(entry.analysis or {})
+    scheduler = dict(meta.get("scheduler") or {})
+    failures = int(scheduler.get("reminder_delivery_failures") or 0) + 1
+    scheduler["reminder_delivery_failures"] = failures
+    scheduler.pop("reminder_sent_at", None)
+    if failures < 3:
+        entry.remind_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+    else:
+        entry.remind_at = None
+        scheduler["reminder_abandoned_at"] = datetime.now(timezone.utc).isoformat()
+    meta["scheduler"] = scheduler
+    entry.analysis = meta
+    flag_modified(entry, "analysis")
+    await db.commit()
+
+
 async def send_due_reflection_reminders() -> None:
     async with AsyncSessionLocal() as db:
         entries = await kaizen_journal_service.claim_due_reminders(db)
@@ -150,6 +171,16 @@ async def send_due_reflection_reminders() -> None:
                     entry.telegram_user_id,
                     exc.__class__.__name__,
                 )
+                try:
+                    await db.rollback()
+                    await _rearm_failed_reminder(db, entry)
+                except Exception as retry_exc:
+                    await db.rollback()
+                    logger.warning(
+                        "Could not re-arm Kaizen reminder for user %s: %s",
+                        entry.telegram_user_id,
+                        retry_exc.__class__.__name__,
+                    )
 
 
 async def send_weekly_review(*, user_id: int, chat_id: int | None = None) -> None:
@@ -169,21 +200,19 @@ async def send_weekly_review(*, user_id: int, chat_id: int | None = None) -> Non
             week_start=period[0],
             force_rebuild=True,
         )
-        text = kaizen_journal_service.format_weekly_review(
-            entry, analysis_ok=analysis_ok
+        reply = AgentReply(
+            kaizen_journal_service.format_weekly_review(
+                entry, analysis_ok=analysis_ok
+            ),
+            reply_markup=kaizen_journal_service.weekly_review_markup(entry),
+            intent="weekly_review",
+            metadata={"entry_id": int(entry.id), "scheduled": True},
         )
-        if (
-            (entry.analysis or {}).get("improvement_candidates")
-            and not kaizen_journal_service.notion_improvements_available()
-        ):
-            text += (
-                "\n\nℹ️ Создание карточек скрыто: проверь базу Tasks командой "
-                "<code>/notion_test</code>."
-            )
+        guarded = await guard_weekly_reply(reply)
         await send_message(
             target_chat,
-            text,
-            reply_markup=kaizen_journal_service.weekly_review_markup(entry),
+            guarded.text,
+            reply_markup=guarded.reply_markup,
         )
 
 

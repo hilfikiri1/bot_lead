@@ -18,13 +18,22 @@ from app.services import (
     ai_analysis_service,
     ai_usage_service,
     calendar_event_builder,
+    calendar_policy,
     client_language_service,
     client_message_service,
+    conversation_analysis_service,
+    drive_diagnostics,
     identity_service,
     kommo_service,
+    lead_assessment_service,
+    next_action_service,
+    outbox_service,
     project_artifact_service,
+    project_timeline_service,
+    sheets_analytics_service,
     storage_service,
     telegram_service,
+    unified_project_service,
 )
 from app.services.google_drive_service import sanitize_filename
 
@@ -453,16 +462,136 @@ async def _execute_plan(
         summary = await ai_usage_service.usage_summary(db)
         return AgentReply(ai_usage_service.format_costs_report(summary), intent=plan.intent)
 
+    if plan.intent == "drive_status":
+        status = await drive_diagnostics.run_drive_status()
+        return AgentReply(drive_diagnostics.format_drive_status(status), intent=plan.intent)
+
+    if plan.intent in {
+        "daily_plan",
+        "project_inbox",
+        "overdue_actions",
+        "without_next_action",
+        "waiting_client",
+        "waiting_us",
+        "stale_projects",
+    }:
+        inbox = await next_action_service.build_inbox(db)
+        if plan.intent == "daily_plan":
+            return AgentReply(
+                next_action_service.format_plan(inbox),
+                reply_markup=next_action_service.inbox_markup(inbox),
+                intent=plan.intent,
+            )
+        if plan.intent == "project_inbox":
+            return AgentReply(
+                next_action_service.format_inbox(inbox),
+                reply_markup=next_action_service.inbox_markup(inbox),
+                intent=plan.intent,
+            )
+        section_map = {
+            "overdue_actions": inbox.overdue,
+            "without_next_action": inbox.without_next,
+            "waiting_client": inbox.waiting_client,
+            "waiting_us": inbox.waiting_us,
+            "stale_projects": inbox.stale,
+        }
+        section = section_map[plan.intent]
+        mini = next_action_service.InboxResult()
+        setattr(
+            mini,
+            {
+                "overdue_actions": "overdue",
+                "without_next_action": "without_next",
+                "waiting_client": "waiting_client",
+                "waiting_us": "waiting_us",
+                "stale_projects": "stale",
+            }[plan.intent],
+            section,
+        )
+        return AgentReply(
+            next_action_service.format_inbox(mini),
+            reply_markup=next_action_service.inbox_markup(mini),
+            intent=plan.intent,
+        )
+
+    if plan.intent in {"integration_status", "failed_actions"}:
+        ops = await outbox_service.list_failed(db)
+        return AgentReply(outbox_service.format_integration_status(ops), intent=plan.intent)
+
+    if plan.intent == "sheets_sync_preview":
+        open_result = await kommo_service.get_all_open_leads()
+        leads = (open_result.get("leads") or [])[:50]
+        sheet_rows: list[dict] = []
+        try:
+            from app.services import google_sheets_service
+
+            if hasattr(google_sheets_service, "list_registry_rows"):
+                sheet_rows = await google_sheets_service.list_registry_rows()  # type: ignore[attr-defined]
+            elif hasattr(google_sheets_service, "get_cached_rows"):
+                sheet_rows = list(google_sheets_service.get_cached_rows() or [])
+        except Exception as exc:
+            logger.info("Sheets preview without live rows: %s", exc.__class__.__name__)
+        preview = sheets_analytics_service.build_sheets_sync_preview(
+            leads=leads, sheet_rows=sheet_rows
+        )
+        return AgentReply(
+            sheets_analytics_service.format_sheets_preview(preview),
+            intent=plan.intent,
+            metadata={"assignments": len(preview.number_assignments)},
+        )
+
     if plan.intent == "project_snapshot":
         lead = await _resolve_lead_for_plan(
             db, plan=plan, context=context, session=session
         )
+        unified = await unified_project_service.build_unified_project(db, lead=lead)
+        # Keep v4.2 snapshot markup compatibility for Notion/Drive buttons.
         snap = await project_snapshot.build_snapshot(db, lead=lead, context=context)
         return AgentReply(
-            project_snapshot.format_snapshot(snap),
+            unified_project_service.format_unified_project(unified),
             reply_markup=project_snapshot.project_actions_markup(snap),
             intent=plan.intent,
-            metadata={"lead_id": int(lead["id"]), "project_key": snap.identity.get("project_key")},
+            metadata={
+                "lead_id": int(lead["id"]),
+                "contact_source": (unified.primary_contact.source if unified.primary_contact else None),
+                "phone_normalized": (
+                    unified.primary_contact.phone_normalized if unified.primary_contact else None
+                ),
+            },
+        )
+
+    if plan.intent == "project_history":
+        lead = await _resolve_lead_for_plan(
+            db, plan=plan, context=context, session=session
+        )
+        events = await project_timeline_service.list_events(
+            db, kommo_lead_id=int(lead["id"]), limit=5
+        )
+        internal = extract_internal_lead_number(lead)
+        return AgentReply(
+            project_timeline_service.format_history(
+                events,
+                kommo_lead_id=int(lead["id"]),
+                internal_number=internal,
+            ),
+            reply_markup=project_timeline_service.history_markup(kommo_lead_id=int(lead["id"])),
+            intent=plan.intent,
+        )
+
+    if plan.intent == "lead_assessment":
+        lead = await _resolve_lead_for_plan(
+            db, plan=plan, context=context, session=session
+        )
+        result = lead_assessment_service.assess_lead(lead)
+        try:
+            await lead_assessment_service.save_assessment(
+                db, kommo_lead_id=int(lead["id"]), result=result
+            )
+        except Exception:
+            await db.rollback()
+        return AgentReply(
+            lead_assessment_service.format_assessment(result, title=str(lead.get("name") or "")),
+            intent=plan.intent,
         )
 
     if plan.intent == "search_project":
@@ -762,9 +891,11 @@ async def _execute_plan(
         )
 
     if plan.intent == "conversation_analysis":
+        structured = conversation_analysis_service.analyze_conversation_text(text)
         analysis = await ai_analysis_service.analyse_transcript(text)
         formatted = telegram_service.format_report(analysis, text)
-        return AgentReply(formatted, intent=plan.intent)
+        header = conversation_analysis_service.format_conversation_analysis(structured)
+        return AgentReply(header + "\n\n" + formatted, intent=plan.intent)
 
     if plan.intent == "sync_leads_to_notion":
         open_result = await kommo_service.get_all_open_leads()
@@ -928,31 +1059,66 @@ async def _stage_write(
     elif plan.intent == "create_calendar_event":
         if not plan.due_at:
             return AgentReply("❓ На какую дату и время запланировать событие?", intent=plan.intent)
-        try:
-            start_at, duration = calendar_event_builder.parse_natural_datetime(
-                plan.due_at, duration_minutes=plan.duration_minutes
+        if not calendar_policy.requires_calendar(
+            event_type=plan.event_type, due_at=plan.due_at, title=plan.title
+        ):
+            # Ordinary follow-up without precise time → Kommo task, not Calendar.
+            plan = AgentPlan(
+                intent="create_kommo_task",
+                mode="write",
+                lead_id=plan.lead_id or (int(lead["id"]) if lead else None),
+                query=plan.query,
+                title=plan.title or "Follow-up",
+                due_at=plan.due_at,
+                clarification_question=None,
             )
-        except ValueError as exc:
-            return AgentReply(f"❓ {html.escape(str(exc))}", intent=plan.intent)
-        title = plan.title or calendar_event_builder.build_event_title(
-            plan.event_type, str(lead.get("name") if lead else "") or None
-        )
-        preview = (
-            "<b>Добавить событие?</b>\n\n"
-            f"{html.escape(str(title)[:300])}\n"
-            f"Когда: <b>{html.escape(calendar_event_builder.format_time_range(start_at, start_at + timedelta(minutes=duration)))}</b>\n"
-            f"Длительность: {duration} мин.\n"
-            + (f"Сделка: {html.escape(str(lead.get('name')))}" if lead else "Без привязки к сделке")
-        )
-        action_type = "create_calendar_event"
-        payload = {
-            "lead_id": int(lead["id"]) if lead else None,
-            "title": title,
-            "due_at": plan.due_at,
-            "duration_minutes": duration,
-            "reminder_minutes": plan.reminder_minutes,
-            "event_type": plan.event_type,
-        }
+            if not plan.due_at:
+                return AgentReply("❓ Когда должна быть выполнена задача?", intent=plan.intent)
+            try:
+                start_at, _ = calendar_event_builder.parse_natural_datetime(plan.due_at)
+            except ValueError as exc:
+                return AgentReply(f"❓ {html.escape(str(exc))}", intent=plan.intent)
+            task_text = str(plan.title or text).strip()
+            preview = (
+                "<b>Создать задачу в Kommo?</b>\n\n"
+                f"Сделка: <b>{html.escape(str(lead.get('name') if lead else '—'))}</b>\n"
+                f"Срок: <b>{html.escape(calendar_event_builder.format_time_range(start_at, start_at + timedelta(minutes=1)).split('–')[0])}</b>\n"
+                f"Задача: {html.escape(task_text)}\n\n"
+                f"<i>{html.escape(calendar_policy.calendar_policy_reason(event_type=plan.event_type, due_at=plan.due_at))}</i>"
+            )
+            action_type = "create_kommo_task"
+            payload = {
+                "lead_id": int(lead["id"]),
+                "task_text": task_text,
+                "due_at": plan.due_at,
+            }
+        else:
+            try:
+                start_at, duration = calendar_event_builder.parse_natural_datetime(
+                    plan.due_at, duration_minutes=plan.duration_minutes
+                )
+            except ValueError as exc:
+                return AgentReply(f"❓ {html.escape(str(exc))}", intent=plan.intent)
+            title = plan.title or calendar_event_builder.build_event_title(
+                plan.event_type, str(lead.get("name") if lead else "") or None
+            )
+            preview = (
+                "<b>Добавить событие?</b>\n\n"
+                f"{html.escape(str(title)[:300])}\n"
+                f"Когда: <b>{html.escape(calendar_event_builder.format_time_range(start_at, start_at + timedelta(minutes=duration)))}</b>\n"
+                f"Длительность: {duration} мин.\n"
+                + (f"Сделка: {html.escape(str(lead.get('name')))}" if lead else "Без привязки к сделке")
+                + f"\n\n<i>{html.escape(calendar_policy.calendar_policy_reason(event_type=plan.event_type, due_at=plan.due_at))}</i>"
+            )
+            action_type = "create_calendar_event"
+            payload = {
+                "lead_id": int(lead["id"]) if lead else None,
+                "title": title,
+                "due_at": plan.due_at,
+                "duration_minutes": duration,
+                "reminder_minutes": plan.reminder_minutes,
+                "event_type": plan.event_type,
+            }
 
     elif plan.intent == "update_kommo_lead":
         fields = {key: value for key, value in plan.fields.items() if key in {"name", "price", "status_id"} and value is not None}
@@ -1193,11 +1359,12 @@ async def handle_callback(
                     session=session,
                 )
             if next_intent == "project_snapshot":
+                unified = await unified_project_service.build_unified_project(db, lead=lead)
                 snap = await project_snapshot.build_snapshot(
                     db, lead=lead, context=context
                 )
                 return AgentReply(
-                    project_snapshot.format_snapshot(snap),
+                    unified_project_service.format_unified_project(unified),
                     reply_markup=project_snapshot.project_actions_markup(snap),
                     intent="project_snapshot",
                     metadata={"lead_id": lead_id},
@@ -1218,6 +1385,56 @@ async def handle_callback(
         except Exception as exc:
             logger.exception("Could not select Kommo lead from agent callback")
             return AgentReply(_error_text(exc), intent="lead_selection_failed")
+
+    if command == "hist" and len(parts) >= 3 and parts[2].isdigit():
+        lead_id = int(parts[2])
+        event_filter = parts[3] if len(parts) >= 4 else "all"
+        offset = int(parts[4]) if len(parts) >= 5 and parts[4].isdigit() else 0
+        try:
+            lead = await kommo_service.get_lead_details(lead_id)
+            events = await project_timeline_service.list_events(
+                db,
+                kommo_lead_id=lead_id,
+                event_filter=event_filter,
+                limit=5,
+                offset=offset,
+            )
+            return AgentReply(
+                project_timeline_service.format_history(
+                    events,
+                    kommo_lead_id=lead_id,
+                    internal_number=extract_internal_lead_number(lead),
+                    event_filter=event_filter,
+                    offset=offset,
+                ),
+                reply_markup=project_timeline_service.history_markup(
+                    kommo_lead_id=lead_id, offset=offset
+                ),
+                intent="project_history",
+            )
+        except Exception as exc:
+            return AgentReply(_error_text(exc), intent="history_failed")
+
+    if command == "missing" and parts[2].isdigit():
+        lead = await kommo_service.get_lead_details(int(parts[2]))
+        unified = await unified_project_service.build_unified_project(db, lead=lead)
+        lines = ["<b>⚠️ Что отсутствует</b>", ""]
+        if unified.missing_information:
+            lines.extend(f"• {html.escape(x)}" for x in unified.missing_information[:12])
+        else:
+            lines.append("Критических пробелов не найдено.")
+        return AgentReply("\n".join(lines), intent="missing_information")
+
+    if command == "next" and len(parts) >= 4 and parts[2].isdigit():
+        lead_id = int(parts[2])
+        choice = parts[3]
+        label = dict(next_action_service.NEXT_ACTION_OPTIONS).get(choice, choice)
+        return AgentReply(
+            f"❓ Следующее действие: <b>{html.escape(label)}</b>\n"
+            "Напиши срок, например: <i>завтра в 10:00</i>",
+            intent="next_action_clarify",
+            metadata={"lead_id": lead_id, "next_choice": choice},
+        )
 
     if command == "digest" and parts[2].isdigit():
         position = int(parts[2])

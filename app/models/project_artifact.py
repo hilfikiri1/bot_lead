@@ -64,6 +64,7 @@ class ProjectArtifact(Base):
     kommo_note_created: Mapped[bool] = mapped_column(nullable=False, default=False)
     warnings_json: Mapped[list | None] = mapped_column(JSON, nullable=True)
     metadata_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     uploaded_by_telegram_user_id: Mapped[int | None] = mapped_column(
         BigInteger, nullable=True, index=True
     )

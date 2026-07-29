@@ -78,21 +78,17 @@ async def _run(func, *args, **kwargs):
 
 
 def _http_error(exc: HttpError) -> GoogleDriveError:
-    status = int(getattr(exc.resp, "status", 0) or 0)
-    retryable = status in _RETRYABLE_STATUS
-    if status == 403:
-        return GoogleDriveError(
-            "Нет доступа к Google Drive. Проверьте права service account на корневую папку.",
-            status_code=403,
-            retryable=False,
-        )
-    if status == 404:
-        return GoogleDriveError("Папка Google Drive не найдена.", status_code=404, retryable=False)
-    return GoogleDriveError(
-        f"Ошибка Google Drive HTTP {status}.",
-        status_code=status,
-        retryable=retryable,
+    from app.services.drive_diagnostics import classify_http_error
+
+    info = classify_http_error(exc)
+    err = GoogleDriveError(
+        info.message,
+        status_code=info.status_code,
+        retryable=info.retryable,
     )
+    err.category = info.category  # type: ignore[attr-defined]
+    err.user_hint = info.user_hint  # type: ignore[attr-defined]
+    return err
 
 
 def get_drive_status() -> dict[str, Any]:

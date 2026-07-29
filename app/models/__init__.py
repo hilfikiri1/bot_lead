@@ -18,6 +18,17 @@ from app.models.agent_user import AgentUser
 from app.models.agent_invite import AgentInvite
 from app.models.client_message_draft import ClientMessageDraft
 from app.models.project_artifact import ProjectArtifact
+from app.models.project_event import ProjectEvent
+from app.models.agent_v5 import (
+    DocumentExtraction,
+    IntegrationOperation,
+    LeadAssessment,
+    NextActionState,
+    ProjectMemory,
+    SheetsLeadLink,
+    UndoOperation,
+    UserNotificationPreference,
+)
 
 __all__ = [
     "Client",
@@ -38,4 +49,13 @@ __all__ = [
     "AgentInvite",
     "ClientMessageDraft",
     "ProjectArtifact",
+    "ProjectEvent",
+    "ProjectMemory",
+    "LeadAssessment",
+    "NextActionState",
+    "IntegrationOperation",
+    "UserNotificationPreference",
+    "SheetsLeadLink",
+    "DocumentExtraction",
+    "UndoOperation",
 ]

@@ -17,6 +17,7 @@ from app.models.integration_event import IntegrationEvent
 from app.models.pending_agent_action import PendingAgentAction
 from app.services import (
     client_language_service,
+    contact_resolver,
     google_drive_service,
     identity_service,
     kommo_service,
@@ -155,17 +156,20 @@ async def build_snapshot(
         },
     )
     contacts = lead.get("contacts") or []
+    resolved = contact_resolver.resolve_contact(lead)
     contact = contacts[0] if contacts else {}
     language = await client_language_service.read_communication_language(db, lead=lead)
     snapshot.client = {
-        "id": contact.get("id"),
-        "name": contact.get("name"),
+        "id": resolved.contact_id or contact.get("id"),
+        "name": resolved.name or contact.get("name"),
         "company": lead.get("company_name") or _company_from_contact(contact),
-        "phones": contact.get("phones") or [],
-        "emails": contact.get("emails") or [],
+        "phones": [resolved.phone_display] if resolved.phone_display else (contact.get("phones") or []),
+        "phone_normalized": resolved.phone_normalized,
+        "emails": [resolved.email] if resolved.email else (contact.get("emails") or []),
         "language": language.language,
         "language_source": language.source,
-        "source": "kommo",
+        "source": resolved.source,
+        "whatsapp_url": contact_resolver.whatsapp_url(resolved.phone_normalized),
     }
 
     try:
@@ -266,7 +270,11 @@ async def build_snapshot(
         snapshot.blockers.append(
             f"Ожидают подтверждения действия: {len(snapshot.pending_actions)}"
         )
-    if not snapshot.client.get("phones") and not snapshot.client.get("emails"):
+    if (
+        not snapshot.client.get("phone_normalized")
+        and not snapshot.client.get("phones")
+        and not snapshot.client.get("emails")
+    ):
         snapshot.missing_information.append("Нет телефона и email клиента")
     if link and not link.notion_project_page_id and not snapshot.notion.get("page_id"):
         snapshot.missing_information.append("Нет связанной карточки Notion")

@@ -96,9 +96,28 @@ def resolve_contact(lead: dict[str, Any]) -> ResolvedContact:
     """Pick the best contact for WhatsApp/email from linked contacts, then lead fields."""
     contacts = list(lead.get("contacts") or [])
 
+    def _phones_from_contact(contact: dict[str, Any]) -> list[str]:
+        phones = list(contact.get("phones") or [])
+        # Flattened custom fields from get_lead_details may still hold the number
+        # when field_code was missing at hydration time.
+        custom = contact.get("custom_fields")
+        if isinstance(custom, dict):
+            for key, value in custom.items():
+                marker = str(key).casefold()
+                if any(token in marker for token in ("phone", "телефон", "tel", "mobile")):
+                    if value:
+                        phones.append(str(value))
+        elif isinstance(custom, list):
+            for field in custom:
+                marker = f"{field.get('name') or ''} {field.get('code') or ''}".casefold()
+                if any(token in marker for token in ("phone", "телефон", "tel", "mobile")):
+                    if field.get("value"):
+                        phones.append(str(field["value"]))
+        return phones
+
     # 1) Primary linked contact with a usable phone or email.
     for contact in contacts:
-        phone = _first_phone(contact.get("phones"))
+        phone = _first_phone(_phones_from_contact(contact))
         email = _first_email(contact.get("emails"))
         if phone or email:
             return ResolvedContact(

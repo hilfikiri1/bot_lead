@@ -111,11 +111,22 @@ async def create_client_message_draft(
     actor = await _actor(db, telegram_user_id)
     resolved = contact_resolver.resolve_contact(lead)
     contact = ((lead.get("contacts") or [{}])[0]) or {}
-    recipient = (
-        resolved.phone_display or resolved.phone_normalized
-        if channel == "whatsapp"
-        else resolved.email
-    )
+    # Prefer E.164 digits for WhatsApp deep links; keep display in metadata.
+    if channel == "whatsapp":
+        recipient = resolved.phone_normalized or resolved.phone_display
+    else:
+        recipient = resolved.email
+    if channel == "whatsapp" and not recipient:
+        # Last-chance: scan raw contact phones again (display forms).
+        for phone in contact.get("phones") or []:
+            try:
+                recipient = normalize_whatsapp_phone(
+                    str(phone),
+                    language=str(draft.get("language") or None),
+                )
+                break
+            except ValueError:
+                continue
     record = ClientMessageDraft(
         kommo_lead_id=int(lead["id"]),
         kommo_contact_id=resolved.contact_id,
@@ -184,21 +195,29 @@ def format_client_message_draft(record: ClientMessageDraft) -> str:
         record.communication_language, record.communication_language.upper()
     )
     channel = "WhatsApp" if record.channel == "whatsapp" else record.channel.upper()
+    display_phone = None
+    meta = record.metadata_json or {}
+    if record.recipient:
+        display_phone = contact_resolver.format_phone_display(record.recipient) or record.recipient
+    elif meta.get("phone_normalized"):
+        display_phone = contact_resolver.format_phone_display(str(meta["phone_normalized"]))
     lines = [
         (
             f"<b>{html.escape(str(record.client_name or 'Клиент'))} — "
             f"{html.escape(channel)} — язык: {html.escape(language)}</b>"
         ),
-        "",
-        html.escape(record.body[:3200]),
     ]
+    if display_phone:
+        lines.append(f"Телефон: {html.escape(str(display_phone))}")
+    lines.extend(["", html.escape(record.body[:3200])])
     if len(record.body) > 3200:
         lines.extend(["", "…текст сокращён в предпросмотре"])
     if not record.recipient:
         lines.extend(
             [
                 "",
-                "⚠️ В Kommo не найден номер телефона. Добавьте его перед открытием WhatsApp.",
+                "⚠️ В Kommo не найден номер телефона связанного контакта. "
+                "Откройте контакт в Kommo и добавьте PHONE, затем повторите follow-up.",
             ]
         )
     lines.extend(

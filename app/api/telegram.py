@@ -1062,10 +1062,17 @@ async def _run_status_sync(chat_id: int, user_id: int) -> None:
         return
     except Exception as exc:
         logger.exception("Lead registry sync preview failed")
+        from app.agent.security import sanitize_text
+
+        detail = sanitize_text(str(exc), limit=400) or type(exc).__name__
         await telegram_service.send_message(
             chat_id,
             "❌ <b>Синхронизация не выполнена</b>\n\n"
-            f"{html.escape(type(exc).__name__)}: проверьте Kommo и Google Sheets.",
+            f"<code>{html.escape(type(exc).__name__)}</code>\n"
+            f"{html.escape(detail)}\n\n"
+            "Смотрите Railway logs по строке "
+            "<code>Lead registry sync preview failed</code>. "
+            "Проверьте Kommo token и доступ service account к Google Sheets.",
         )
         return
 
@@ -3281,7 +3288,34 @@ async def telegram_webhook(
             await _handle_calendar_test(chat_id, user_id, include_write_probe=False)
             return {"ok": True}
 
-        if text.startswith(("/digest", "/morning", "/agent", "/help", "/errors", "/reset_memory", "/sync_leads")):
+        if text.startswith(
+            (
+                "/digest",
+                "/morning",
+                "/evening",
+                "/today",
+                "/plan",
+                "/inbox",
+                "/overdue",
+                "/without_next",
+                "/waiting_client",
+                "/waiting_us",
+                "/stale",
+                "/drive_status",
+                "/integration_status",
+                "/failed_actions",
+                "/sheets_sync_preview",
+                "/history",
+                "/assess",
+                "/costs",
+                "/cost",
+                "/agent",
+                "/help",
+                "/errors",
+                "/reset_memory",
+                "/sync_leads",
+            )
+        ):
             reply = await agent_service.handle_message(
                 db,
                 chat_id=chat_id,
@@ -3295,6 +3329,44 @@ async def telegram_webhook(
                     chat_id, reply.text, reply_markup=reply.reply_markup
                 )
             return {"ok": True}
+
+        # Unknown slash commands: try the agent first instead of silently
+        # falling through to the main menu (v5 ops commands depend on this).
+        if (
+            settings.agent_enabled
+            and text.startswith("/")
+            and not text.startswith(
+                (
+                    "/start",
+                    "/menu",
+                    "/invite",
+                    "/team",
+                    "/bind_kommo",
+                    "/kommo_test",
+                    "/status_sync",
+                    "/calendar_test",
+                    "/notion_test",
+                    "/jobs",
+                    "/kommo_leads",
+                    "/open_deals",
+                    "/deals",
+                    "/lead",
+                )
+            )
+        ):
+            reply = await agent_service.handle_message(
+                db,
+                chat_id=chat_id,
+                telegram_user_id=user_id,
+                text=text,
+                source="text",
+                allow_conversation_passthrough=False,
+            )
+            if reply.handled and reply.text:
+                await telegram_service.send_message(
+                    chat_id, reply.text, reply_markup=reply.reply_markup
+                )
+                return {"ok": True}
 
         if text.startswith("/notion_test") and settings.agent_enabled:
             reply = await agent_service.handle_message(

@@ -268,15 +268,23 @@ async def test_handle_project_file_upload_stages_action():
     from app.agent import service as agent_service
 
     link = SimpleNamespace(
+        id=3,
+        kommo_lead_id=42,
         project_key="BBS-PL-0120",
         drive_folder_id="folder123",
     )
+    artifact = SimpleNamespace(id=9)
     with (
         patch.object(agent_service.memory, "get_or_create_session", new=AsyncMock(return_value=SimpleNamespace())),
         patch.object(agent_service.memory, "build_context", new=AsyncMock(return_value={"active_kommo_lead_id": 42})),
         patch.object(agent_service.kommo_service, "get_lead_details", new=AsyncMock(return_value={"id": 42, "name": "Тест"})),
         patch("app.services.project_link_service.get_by_kommo_lead_id", new=AsyncMock(return_value=link)),
         patch.object(agent_service.storage_service, "save_project_file", new=AsyncMock(return_value="/tmp/file.pdf")),
+        patch.object(
+            agent_service.project_artifact_service,
+            "create_pending",
+            new=AsyncMock(return_value=artifact),
+        ),
         patch.object(agent_service.actions, "stage_action", new=AsyncMock(return_value=SimpleNamespace(id=7))),
     ):
         reply = await agent_service.handle_project_file_upload(
@@ -287,7 +295,7 @@ async def test_handle_project_file_upload_stages_action():
             mime_type="application/pdf",
             content=b"%PDF-1.4",
         )
-    assert "Загрузить файл" in reply.text
+    assert "Умная загрузка файла" in reply.text
     assert reply.reply_markup is not None
 
 

@@ -8,12 +8,11 @@ from app.agent.lead_refs import (
     LeadReference,
     LeadRefType,
     LeadResolutionResult,
-    enrich_lead,
     extract_internal_lead_number,
     resolve_lead_for_plan,
     user_error_hint,
 )
-from app.services import kommo_service
+from app.services import kommo_service  # noqa: F401
 
 
 class LeadResolutionError(ValueError):
@@ -66,7 +65,8 @@ def _stem_search_token(token: str) -> str:
 def _clean_search_query(value: str) -> str:
     text = " ".join((value or "").strip().split())
     text = re.sub(
-        r"\b(?:покажи|найди|открой|расскажи|что|по|сделк[аеуы]?|лид[ауе]?|коммо|kommo)\b",
+        r"\b(?:покажи|найди|открой|расскажи|что|по|сделк[аеуы]?|лид[ауе]?|"
+        r"проект[ауе]?|телефон[ау]?|компани[ияе]|товар[ау]?|коммо|kommo)\b",
         " ",
         text,
         flags=re.I,

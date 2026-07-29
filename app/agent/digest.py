@@ -4,9 +4,14 @@ import html
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.agent.lead_refs import enrich_lead, extract_internal_lead_number
 from app.config import get_settings
-from app.services import kommo_service
+from app.models.pending_agent_action import PendingAgentAction
+from app.models.project_link import ProjectLink
+from app.services import kommo_service, project_artifact_service
 
 settings = get_settings()
 
@@ -53,7 +58,12 @@ def rank_lead(lead: dict[str, Any], *, now_ts: int) -> dict[str, Any]:
     }
 
 
-async def build_digest(*, limit: int | None = None) -> dict[str, Any]:
+async def build_digest(
+    *,
+    db: AsyncSession | None = None,
+    telegram_user_id: int | None = None,
+    limit: int | None = None,
+) -> dict[str, Any]:
     result = await kommo_service.get_all_open_leads()
     leads = result.get("leads") or []
     now_ts = int(datetime.now(timezone.utc).timestamp())
@@ -88,6 +98,83 @@ async def build_digest(*, limit: int | None = None) -> dict[str, Any]:
             }
         )
     now = datetime.now(timezone.utc)
+    health = {
+        "overdue_tasks": sum(
+            1
+            for lead in leads
+            if isinstance(lead.get("closest_task_at"), (int, float))
+            and int(lead["closest_task_at"]) < now_ts
+        ),
+        "without_next_step": 0,
+        "stale_clients": sum(
+            1
+            for lead in leads
+            if int(lead.get("updated_at") or 0)
+            and now_ts - int(lead.get("updated_at") or 0) >= 5 * 86_400
+        ),
+        "new_files": 0,
+        "pending_actions": 0,
+        "sync_discrepancies": 0,
+        "discrepancy_examples": [],
+    }
+    if db is not None:
+        visible_ids = [
+            int(lead["id"])
+            for lead in leads
+            if isinstance(lead.get("id"), int)
+        ]
+        links = []
+        if visible_ids:
+            links = list(
+                (
+                    await db.execute(
+                        select(ProjectLink).where(
+                            ProjectLink.kommo_lead_id.in_(visible_ids),
+                            ProjectLink.status == "active",
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        by_lead = {int(link.kommo_lead_id): link for link in links}
+        without_next = 0
+        discrepancies: list[str] = []
+        for lead in leads:
+            lead_id = int(lead.get("id") or 0)
+            link = by_lead.get(lead_id)
+            metadata = dict(link.metadata_json or {}) if link else {}
+            if lead.get("closest_task_at") is None and not metadata.get("next_step"):
+                without_next += 1
+            if link is None:
+                discrepancies.append(
+                    f"№{extract_internal_lead_number(lead) or lead_id}: нет ProjectLink"
+                )
+            elif not link.drive_folder_id or not link.notion_project_page_id:
+                missing = []
+                if not link.drive_folder_id:
+                    missing.append("Drive")
+                if not link.notion_project_page_id:
+                    missing.append("Notion")
+                discrepancies.append(
+                    f"{link.project_key}: нет {'/'.join(missing)}"
+                )
+        health["without_next_step"] = without_next
+        health["sync_discrepancies"] = len(discrepancies)
+        health["discrepancy_examples"] = discrepancies[:5]
+        health["new_files"] = await project_artifact_service.count_recent_for_leads(
+            db, visible_ids, hours=24
+        )
+        pending_query = select(PendingAgentAction).where(
+            PendingAgentAction.status.in_(("pending", "approved", "executing"))
+        )
+        if telegram_user_id is not None:
+            pending_query = pending_query.where(
+                PendingAgentAction.telegram_user_id == int(telegram_user_id)
+            )
+        health["pending_actions"] = len(
+            list((await db.execute(pending_query.limit(500))).scalars().all())
+        )
     sections = group_digest_sections(digest_items)
     return {
         "items": items,
@@ -98,22 +185,53 @@ async def build_digest(*, limit: int | None = None) -> dict[str, Any]:
         "scanned_count": result.get("scanned_count"),
         "generated_at": now.isoformat(),
         "expires_at": (now + timedelta(minutes=settings.agent_action_ttl_minutes)).isoformat(),
+        "health": health,
+        "top_actions": digest_items[:5],
     }
 
 
 def format_digest(result: dict[str, Any]) -> str:
     lines = [
-        "<b>🧠 Приоритеты на сегодня</b>",
+        "<b>🧠 Рабочий дайджест B&BS</b>",
         "",
         f"Открытых сделок: <b>{int(result.get('open_count') or 0)}</b>",
         "",
     ]
+    health = result.get("health") or {}
+    if health:
+        lines.extend(
+            [
+                "<b>Контроль системы</b>",
+                f"🔴 Просроченные задачи: <b>{int(health.get('overdue_tasks') or 0)}</b>",
+                f"➡️ Без следующего шага: <b>{int(health.get('without_next_step') or 0)}</b>",
+                f"💬 Без обновлений 5+ дней: <b>{int(health.get('stale_clients') or 0)}</b>",
+                f"📎 Новые файлы за 24 часа: <b>{int(health.get('new_files') or 0)}</b>",
+                f"⏳ Неподтверждённые действия: <b>{int(health.get('pending_actions') or 0)}</b>",
+                f"🔄 Расхождения Kommo/Notion/Drive: <b>{int(health.get('sync_discrepancies') or 0)}</b>",
+                "",
+            ]
+        )
+        examples = list(health.get("discrepancy_examples") or [])
+        if examples:
+            lines.append("<b>Примеры расхождений</b>")
+            lines.extend(f"• {html.escape(str(item))}" for item in examples[:5])
+            lines.append("")
+    lines.extend(["<b>Пять главных действий на сегодня</b>", ""])
     digest_map = result.get("digest_map") or []
     sections = result.get("sections") or group_digest_sections(digest_map)
     if not digest_map:
         lines.append("Активных сделок не найдено.")
+    allowed_positions = {
+        int(item.get("position") or 0)
+        for item in (result.get("top_actions") or digest_map[:5])
+    }
     for section_key in ("urgent", "attention", "planned"):
         section_items = sections.get(section_key) or []
+        section_items = [
+            item
+            for item in section_items
+            if int(item.get("position") or 0) in allowed_positions
+        ]
         if not section_items:
             continue
         lines.append(f"<b>{_SECTION_TITLES[section_key]}</b>")

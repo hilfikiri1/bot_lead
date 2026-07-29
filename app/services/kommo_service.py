@@ -526,6 +526,10 @@ async def update_kommo_lead(
     if len(payload) == 1:
         raise ValueError("Нет полей для обновления.")
 
+    # Re-check the current assignee immediately before the mutating request.
+    # A Manager may have prepared the preview while the deal was assigned to
+    # them and then lose access before pressing the confirmation button.
+    await get_lead_details(lead_id)
     data = await _request("PATCH", "/api/v4/leads", json_body=[payload])
     updated_items = _extract_embedded_items(data, "leads")
     updated = updated_items[0] if updated_items else {"id": lead_id, **payload}
@@ -1140,6 +1144,139 @@ async def get_lead_details(lead_id: int) -> dict[str, Any]:
     }
 
 
+async def get_open_lead_tasks(lead_id: int, limit: int = 20) -> list[dict[str, Any]]:
+    """Return incomplete Kommo tasks for the project card."""
+    data = await _request(
+        "GET",
+        "/api/v4/tasks",
+        params={
+            "filter[entity_type]": "leads",
+            "filter[entity_id]": int(lead_id),
+            "filter[is_completed]": 0,
+            "limit": max(1, min(limit, 50)),
+            "order[complete_till]": "asc",
+        },
+    )
+    tasks = ((data or {}).get("_embedded") or {}).get("tasks") or []
+    return [
+        {
+            "id": task.get("id"),
+            "text": task.get("text"),
+            "complete_till": task.get("complete_till"),
+            "responsible_user_id": task.get("responsible_user_id"),
+            "task_type_id": task.get("task_type_id"),
+            "is_completed": bool(task.get("is_completed")),
+            "source": "kommo",
+        }
+        for task in tasks
+        if not task.get("is_completed")
+    ]
+
+
+async def get_user_summary(user_id: int | None) -> dict[str, Any] | None:
+    if not user_id:
+        return None
+    try:
+        user = await _request("GET", f"/api/v4/users/{int(user_id)}")
+    except KommoAPIError as exc:
+        if exc.status_code == 404:
+            return {"id": int(user_id), "name": f"Kommo user {user_id}"}
+        raise
+    return {
+        "id": user.get("id") or int(user_id),
+        "name": user.get("name") or f"Kommo user {user_id}",
+        "email": user.get("email"),
+        "language": user.get("lang"),
+    }
+
+
+async def search_projects(query: str, limit: int = 8) -> dict[str, Any]:
+    """Search projects by lead/product title and linked contact/company/phone."""
+    clean_query = " ".join(str(query or "").strip().split())
+    if not clean_query:
+        return {"leads": [], "query": clean_query}
+    limit = max(1, min(limit, 20))
+    title_result = await search_open_leads(clean_query, limit=limit)
+    matches: dict[int, dict[str, Any]] = {
+        int(item["id"]): item
+        for item in title_result.get("leads") or []
+        if isinstance(item.get("id"), int)
+    }
+    if not matches:
+        try:
+            data = await _request(
+                "GET",
+                "/api/v4/contacts",
+                params={
+                    "query": clean_query,
+                    "with": "leads",
+                    "limit": min(50, limit * 5),
+                },
+            )
+            contacts = ((data or {}).get("_embedded") or {}).get("contacts") or []
+            for contact in contacts:
+                linked = ((contact.get("_embedded") or {}).get("leads") or [])
+                for ref in linked:
+                    lead_id = ref.get("id")
+                    if not isinstance(lead_id, int) or lead_id in matches:
+                        continue
+                    try:
+                        details = await get_lead_details(lead_id)
+                    except (KommoAPIError, PermissionError):
+                        continue
+                    if details.get("closed_at"):
+                        continue
+                    matches[lead_id] = details
+                    if len(matches) >= limit:
+                        break
+                if len(matches) >= limit:
+                    break
+        except KommoAPIError as exc:
+            logger.info("Contact project search fallback skipped: %s", exc)
+
+    if not matches:
+        try:
+            data = await _request(
+                "GET",
+                "/api/v4/companies",
+                params={
+                    "query": clean_query,
+                    "with": "leads",
+                    "limit": min(50, limit * 5),
+                },
+            )
+            companies = ((data or {}).get("_embedded") or {}).get("companies") or []
+            for company in companies:
+                linked = ((company.get("_embedded") or {}).get("leads") or [])
+                for ref in linked:
+                    lead_id = ref.get("id")
+                    if not isinstance(lead_id, int) or lead_id in matches:
+                        continue
+                    try:
+                        details = await get_lead_details(lead_id)
+                    except (KommoAPIError, PermissionError):
+                        continue
+                    if details.get("closed_at"):
+                        continue
+                    details["company_name"] = company.get("name")
+                    matches[lead_id] = details
+                    if len(matches) >= limit:
+                        break
+                if len(matches) >= limit:
+                    break
+        except KommoAPIError as exc:
+            logger.info("Company project search fallback skipped: %s", exc)
+
+    leads = list(matches.values())[:limit]
+    leads.sort(key=lambda item: int(item.get("updated_at") or 0), reverse=True)
+    return {
+        "leads": leads,
+        "open_count": len(leads),
+        "query": clean_query,
+        "search_kind": "project_title_contact_company_phone",
+    }
+
+
 async def get_open_leads_page(
     page: int = 1, page_size: int | None = None
 ) -> dict[str, Any]:
@@ -1214,7 +1351,12 @@ async def search_open_leads(query: str, limit: int = 20) -> dict[str, Any]:
                 and isinstance(exact.get("id"), int)
                 and _lead_belongs_to_pipeline(exact, selected_pipeline)
             ):
-                matches[int(exact["id"])] = (-1, exact)
+                from app.services import identity_service
+
+                if identity_service.current_user_can_access_responsible_id(
+                    exact.get("responsible_user_id")
+                ):
+                    matches[int(exact["id"])] = (-1, exact)
         except KommoAPIError as exc:
             if exc.status_code != 404:
                 raise

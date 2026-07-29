@@ -3539,10 +3539,12 @@ async def telegram_webhook(
                     db,
                     chat_id=chat_id,
                     telegram_user_id=user_id,
+                    telegram_message_id=message_id,
                     filename=str(project_file.get("file_name") or "file"),
                     mime_type=str(project_file.get("mime_type") or "application/octet-stream"),
                     content=content,
                     caption=(message.get("caption") or "").strip() or None,
+                    kind=str(project_file.get("kind") or "document"),
                 )
                 await telegram_service.send_message(
                     chat_id, reply.text, reply_markup=reply.reply_markup

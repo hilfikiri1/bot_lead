@@ -183,6 +183,40 @@ def _title(value: str | None) -> dict[str, Any]:
     }
 
 
+def _plain_property(prop: dict[str, Any] | None) -> Any:
+    prop = prop or {}
+    prop_type = str(prop.get("type") or "")
+    value = prop.get(prop_type)
+    if prop_type in {"title", "rich_text"}:
+        return "".join(
+            str(item.get("plain_text") or ((item.get("text") or {}).get("content") or ""))
+            for item in (value or [])
+        )
+    if prop_type == "select":
+        return (value or {}).get("name")
+    if prop_type == "status":
+        return (value or {}).get("name")
+    if prop_type == "date":
+        return (value or {}).get("start")
+    if prop_type in {"number", "checkbox", "url", "email", "phone_number"}:
+        return value
+    if prop_type == "people":
+        return [
+            item.get("name") or ((item.get("person") or {}).get("email"))
+            for item in (value or [])
+        ]
+    if prop_type == "relation":
+        return [item.get("id") for item in (value or []) if item.get("id")]
+    return None
+
+
+def _page_properties(page: dict[str, Any]) -> dict[str, Any]:
+    return {
+        str(name): _plain_property(prop)
+        for name, prop in (page.get("properties") or {}).items()
+    }
+
+
 async def retrieve_data_source(data_source_id: str) -> dict[str, Any]:
     return await _request("GET", f"/data_sources/{_data_source_id(data_source_id)}")
 
@@ -315,6 +349,147 @@ async def query_by_text(
         json=payload,
     )
     return data.get("results") or []
+
+
+async def read_project_workspace(kommo_lead_id: int) -> dict[str, Any]:
+    """Read the linked Notion project, active tasks and recent communications."""
+    result: dict[str, Any] = {
+        "project": None,
+        "tasks": [],
+        "communications": [],
+        "warnings": [],
+    }
+    if not settings.notion_projects_data_source_id.strip():
+        result["warnings"].append("Notion Projects не настроен")
+        return result
+    try:
+        projects = await query_by_number(
+            settings.notion_projects_data_source_id,
+            "Kommo ID",
+            int(kommo_lead_id),
+        )
+        if projects:
+            project = projects[0]
+            result["project"] = {
+                "id": project.get("id"),
+                "url": project.get("url") or notion_page_url(str(project.get("id") or "")),
+                **_page_properties(project),
+            }
+    except Exception as exc:
+        result["warnings"].append(f"Notion project: {exc.__class__.__name__}")
+
+    if settings.notion_tasks_data_source_id.strip():
+        try:
+            pages = await query_by_number(
+                settings.notion_tasks_data_source_id,
+                "Kommo ID",
+                int(kommo_lead_id),
+            )
+            tasks: list[dict[str, Any]] = []
+            for page in pages:
+                props = _page_properties(page)
+                status = str(props.get("Статус") or "")
+                if status.casefold() in {
+                    "выполнено",
+                    "готово",
+                    "done",
+                    "completed",
+                    "отменено",
+                    "cancelled",
+                }:
+                    continue
+                tasks.append(
+                    {
+                        "id": page.get("id"),
+                        "url": page.get("url")
+                        or notion_page_url(str(page.get("id") or "")),
+                        "title": props.get("Задача") or props.get("Название"),
+                        "status": status or None,
+                        "priority": props.get("Приоритет"),
+                        "due_at": props.get("Срок"),
+                        "next_step": props.get("Следующий шаг"),
+                        "source": "notion",
+                    }
+                )
+            tasks.sort(key=lambda item: (str(item.get("due_at") or "9999"), str(item.get("title") or "")))
+            result["tasks"] = tasks[:20]
+        except Exception as exc:
+            result["warnings"].append(f"Notion tasks: {exc.__class__.__name__}")
+
+    if settings.notion_communications_data_source_id.strip():
+        try:
+            pages = await query_by_number(
+                settings.notion_communications_data_source_id,
+                "Kommo ID",
+                int(kommo_lead_id),
+            )
+            communications: list[dict[str, Any]] = []
+            for page in pages:
+                props = _page_properties(page)
+                communications.append(
+                    {
+                        "id": page.get("id"),
+                        "url": page.get("url")
+                        or notion_page_url(str(page.get("id") or "")),
+                        "title": props.get("Название"),
+                        "channel": props.get("Канал"),
+                        "status": props.get("Статус"),
+                        "summary": props.get("Краткое содержание"),
+                        "occurred_at": props.get("Дата и время"),
+                        "source": "notion",
+                    }
+                )
+            communications.sort(
+                key=lambda item: str(item.get("occurred_at") or ""),
+                reverse=True,
+            )
+            result["communications"] = communications[:10]
+        except Exception as exc:
+            result["warnings"].append(
+                f"Notion communications: {exc.__class__.__name__}"
+            )
+    return result
+
+
+async def append_project_file_record(
+    *,
+    project_page_id: str,
+    filename: str,
+    artifact_type: str,
+    drive_url: str | None,
+    uploaded_by: int,
+) -> dict[str, Any]:
+    text = f"Файл: {filename} · Тип: {artifact_type} · Telegram user: {uploaded_by}"
+    rich_text: list[dict[str, Any]] = [
+        {"type": "text", "text": {"content": text[:1800]}}
+    ]
+    if drive_url:
+        rich_text.append(
+            {
+                "type": "text",
+                "text": {
+                    "content": " · Открыть в Drive",
+                    "link": {"url": str(drive_url)},
+                },
+            }
+        )
+    await _request(
+        "PATCH",
+        f"/blocks/{_page_id(project_page_id)}/children",
+        json={
+            "children": [
+                {
+                    "object": "block",
+                    "type": "bulleted_list_item",
+                    "bulleted_list_item": {"rich_text": rich_text},
+                }
+            ]
+        },
+    )
+    return {
+        "id": project_page_id,
+        "url": notion_page_url(project_page_id),
+    }
 
 
 async def upsert_project_from_kommo(
@@ -625,6 +800,41 @@ async def create_communication_draft(
         "Тема": _rich_text(str(draft.get("title") or "Follow-up")),
         "Краткое содержание": _rich_text(body[:1500]),
         "Полный текст": _rich_text(body),
+        "Kommo ID": {"number": int(lead["id"])},
+    }
+    if project_page_id:
+        properties["Проект"] = {"relation": [{"id": project_page_id}]}
+    return await _create_related_draft_page(
+        source_id=settings.notion_communications_data_source_id,
+        properties=properties,
+    )
+
+
+async def create_project_communication(
+    *,
+    lead: dict[str, Any],
+    summary: str,
+    full_text: str,
+    project_page_id: str | None,
+    channel: str = "Телефон",
+    communication_type: str = "Входящее",
+    status: str = "Зафиксировано",
+    occurred_at: datetime | None = None,
+) -> dict[str, Any] | None:
+    """Persist a confirmed project update as a Notion communication."""
+    occurred_at = occurred_at or datetime.now(timezone.utc)
+    properties: dict[str, Any] = {
+        "Название": _title(
+            f"Переговоры — {lead.get('name') or lead.get('id')} — "
+            f"{occurred_at.date().isoformat()}"
+        ),
+        "Канал": {"select": {"name": channel}},
+        "Тип": {"select": {"name": communication_type}},
+        "Статус": {"select": {"name": status}},
+        "Дата и время": {"date": {"start": occurred_at.isoformat()}},
+        "Тема": _rich_text("Обновление проекта"),
+        "Краткое содержание": _rich_text(summary[:1500]),
+        "Полный текст": _rich_text(full_text),
         "Kommo ID": {"number": int(lead["id"])},
     }
     if project_page_id:

@@ -8,8 +8,8 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agent.action_utils import action_key, approval_markup  # noqa: F401
 from app.config import get_settings
-from app.agent.action_utils import action_key, approval_markup
 from app.models.pending_agent_action import PendingAgentAction
 
 settings = get_settings()
@@ -23,11 +23,16 @@ async def stage_action(
     action_type: str,
     payload: dict[str, Any],
     preview_text: str,
+    batch_group_id: str | None = None,
 ) -> PendingAgentAction:
     key = action_key(
         telegram_user_id=telegram_user_id,
         action_type=action_type,
-        payload=payload,
+        payload=(
+            {**payload, "_batch_group_id": batch_group_id}
+            if batch_group_id
+            else payload
+        ),
     )
     existing = (
         await db.execute(
@@ -72,6 +77,7 @@ async def stage_action(
         action_type=action_type[:100],
         status="pending",
         payload=payload,
+        batch_group_id=(batch_group_id or None),
         preview_text=preview_text[:20_000],
         idempotency_key=key,
         expires_at=now + timedelta(minutes=ttl),
@@ -102,6 +108,23 @@ async def get_action(db: AsyncSession, action_id: int) -> PendingAgentAction | N
     return await db.get(PendingAgentAction, int(action_id))
 
 
+async def get_batch_actions(
+    db: AsyncSession,
+    *,
+    batch_group_id: str,
+    telegram_user_id: int,
+) -> list[PendingAgentAction]:
+    result = await db.execute(
+        select(PendingAgentAction)
+        .where(
+            PendingAgentAction.batch_group_id == str(batch_group_id),
+            PendingAgentAction.telegram_user_id == int(telegram_user_id),
+        )
+        .order_by(PendingAgentAction.id.asc())
+    )
+    return list(result.scalars().all())
+
+
 async def reject_action(
     db: AsyncSession,
     *,
@@ -126,4 +149,3 @@ async def reject_action(
     await db.commit()
     await db.refresh(action)
     return action
-

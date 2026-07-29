@@ -17,6 +17,7 @@ from app.models.integration_event import IntegrationEvent
 from app.models.agent_user import AgentUser
 from app.models.agent_invite import AgentInvite
 from app.models.client_message_draft import ClientMessageDraft
+from app.models.project_artifact import ProjectArtifact
 
 __all__ = [
     "Client",
@@ -36,4 +37,5 @@ __all__ = [
     "AgentUser",
     "AgentInvite",
     "ClientMessageDraft",
+    "ProjectArtifact",
 ]

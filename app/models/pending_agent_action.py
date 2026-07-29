@@ -23,6 +23,9 @@ class PendingAgentAction(Base):
     )
     chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
     action_type: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    batch_group_id: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, index=True
+    )
     status: Mapped[str] = mapped_column(
         String(24), nullable=False, default="pending", server_default="pending", index=True
     )

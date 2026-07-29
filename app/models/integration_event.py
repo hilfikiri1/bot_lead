@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from datetime import datetime
 
 from sqlalchemy import BigInteger, DateTime, Integer, JSON, String, Text, func
@@ -7,7 +9,7 @@ from app.database import Base
 
 
 class IntegrationEvent(Base):
-    """Audit trail for external integrations and operational commands."""
+    """Sanitised audit trail for external integrations and agent tools."""
 
     __tablename__ = "integration_events"
 

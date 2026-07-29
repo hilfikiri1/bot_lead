@@ -1,0 +1,33 @@
+B&BS AI Agent v3 — changed/new files relative to main commit 95749d1
+
+Modified:
+.env.example
+README.md
+app/api/telegram.py
+app/config.py
+app/database.py
+app/main.py
+app/models/__init__.py
+app/services/telegram_service.py
+app/tasks/voice_note_tasks.py
+migrations/env.py
+
+New:
+AGENT_V3.md
+INSTALL_AGENT_V3.md
+RAILWAY_AGENT_V3.md
+VALIDATION_AGENT_V3.md
+AGENT_V3_CHANGED_FILES.txt
+app/agent/*
+app/models/agent_message.py
+app/models/agent_session.py
+app/models/integration_event.py
+app/models/pending_agent_action.py
+migrations/versions/007_unified_agent_v3.py
+scripts/validate_agent_v3.sh
+tests/test_agent_*.py
+
+Remove from Git if they are still tracked:
+all __pycache__/ directories
+all *.pyc and *.pyo files
+.pytest_cache/

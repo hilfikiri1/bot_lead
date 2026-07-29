@@ -262,12 +262,12 @@ Google Calendar (service account), неразобранные сделки Kommo
 
 Подробности, env vars и чеклист после deployment: [`PHASE2_RELEASE_NOTES.md`](PHASE2_RELEASE_NOTES.md).
 
-## B&BS Operational Agent v2
+## B&BS AI Agent v3 (2026-07-29)
 
-The repository now supports a separate modern Notion Data Sources integration
-for the B&BS operational workspace, Kommo-based daily digests, deduplicated
-Notion tasks, integration error logging, and review-only AI drafts. Existing
-legacy Notion call synchronization remains available for backward compatibility.
+Telegram стал единым AI-интерфейсом для текста и голоса: рабочая память, контекст активной сделки, приоритетный дайджест Kommo, генерация КП/писем/follow-up/запросов поставщикам, современная синхронизация Notion и безопасные подтверждения внешних действий.
 
-See [OPERATIONAL_AGENT_V2.md](OPERATIONAL_AGENT_V2.md) for configuration and
-commands.
+Любая запись в Kommo, Notion, Gmail или Google Calendar требует отдельного подтверждения в Telegram. Подробности:
+
+- [`AGENT_V3.md`](AGENT_V3.md) — архитектура и возможности;
+- [`INSTALL_AGENT_V3.md`](INSTALL_AGENT_V3.md) — установка и Git workflow;
+- [`RAILWAY_AGENT_V3.md`](RAILWAY_AGENT_V3.md) — переменные и deployment.

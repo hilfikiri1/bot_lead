@@ -76,7 +76,7 @@ docs_enabled = settings.expose_api_docs and not settings.is_production
 app = FastAPI(
     title="Buy & Bring Solutions — CRM Assistant API",
     description="Telegram CRM assistant for Kommo lead workflows",
-    version="2.1.0-operational",
+    version="3.0.0-agent",
     lifespan=lifespan,
     docs_url="/docs" if docs_enabled else None,
     redoc_url="/redoc" if docs_enabled else None,
@@ -111,7 +111,7 @@ async def health():
     return {
         "status": "ok",
         "service": "buy-bring-crm-assistant",
-        "version": "2.1.0-operational",
+        "version": "3.0.0-agent",
     }
 
 

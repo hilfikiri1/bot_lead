@@ -479,6 +479,7 @@ async def send_report(
     lead_id: int,
     voice_note_id: int,
     target_kommo_lead_id: int | None = None,
+    notion_action_id: int | None = None,
 ) -> dict:
     if target_kommo_lead_id:
         primary = {
@@ -493,31 +494,35 @@ async def send_report(
             "callback_data": f"leadcreate:preview:{lead_id}:{voice_note_id}",
         }
 
-    keyboard = {
-        "inline_keyboard": [
-            [primary],
-            [
-                {
-                    "text": "💬 Текст клиенту",
-                    "callback_data": f"action:whatsapp:{lead_id}:{voice_note_id}",
-                },
-                {
-                    "text": "📅 Следующий контакт",
-                    "callback_data": f"action:calendar:{lead_id}:{voice_note_id}",
-                },
-            ],
-            [
-                {
-                    "text": "✉️ Черновик email",
-                    "callback_data": f"action:gmail:{lead_id}:{voice_note_id}",
-                },
-                {
-                    "text": "❌ Закрыть",
-                    "callback_data": f"action:cancel:{lead_id}:{voice_note_id}",
-                },
-            ],
-        ]
-    }
+    rows = [
+        [primary],
+        [
+            {
+                "text": "💬 Текст клиенту",
+                "callback_data": f"action:whatsapp:{lead_id}:{voice_note_id}",
+            },
+            {
+                "text": "📅 Следующий контакт",
+                "callback_data": f"action:calendar:{lead_id}:{voice_note_id}",
+            },
+        ],
+        [
+            {
+                "text": "✉️ Черновик email",
+                "callback_data": f"action:gmail:{lead_id}:{voice_note_id}",
+            },
+            {
+                "text": "❌ Закрыть",
+                "callback_data": f"action:cancel:{lead_id}:{voice_note_id}",
+            },
+        ],
+    ]
+    if notion_action_id:
+        rows.insert(1, [{
+            "text": "📓 Сохранить анализ в Notion",
+            "callback_data": f"agent:ok:{notion_action_id}",
+        }])
+    keyboard = {"inline_keyboard": rows}
     return await send_message(chat_id, report_text, reply_markup=keyboard)
 
 
@@ -584,15 +589,16 @@ async def register_webhook(url: str) -> dict:
 
 async def set_bot_commands() -> dict:
     commands = [
+        {"command": "agent", "description": "Что умеет AI-агент"},
         {"command": "menu", "description": "Главное меню"},
-        {"command": "jobs", "description": "Статус обработки аудио"},
-        {"command": "digest", "description": "Приоритеты Kommo и задачи дня"},
-        {"command": "notion_test", "description": "Проверить новую структуру Notion"},
-        {"command": "sync_leads", "description": "Синхронизировать Kommo → Notion"},
+        {"command": "digest", "description": "Приоритеты по сделкам на сегодня"},
         {"command": "errors", "description": "Последние ошибки интеграций"},
+        {"command": "sync_leads", "description": "Синхронизировать Kommo с Notion"},
+        {"command": "reset_memory", "description": "Очистить контекст агента"},
+        {"command": "jobs", "description": "Статус обработки аудио"},
+        {"command": "notion_test", "description": "Проверить рабочие базы Notion"},
         {"command": "kommo_test", "description": "Проверить Kommo"},
         {"command": "calendar_test", "description": "Проверить Google Calendar"},
-        {"command": "calendar_test_write", "description": "Тест записи в Google Calendar"},
     ]
     async with httpx.AsyncClient(timeout=15) as client:
         response = await client.post(
@@ -708,11 +714,15 @@ async def send_main_menu(chat_id: int) -> dict:
     keyboard = {
         "inline_keyboard": [
             [
+                {"text": "🧠 AI-агент", "callback_data": "menu:agent"},
                 {"text": "🎙 Новый разговор", "callback_data": "menu:new"},
-                {"text": "🔎 Найти сделку", "callback_data": "menu:search"},
             ],
             [
+                {"text": "🔎 Найти сделку", "callback_data": "menu:search"},
                 {"text": "📋 Открытые сделки", "callback_data": "menu:leads:1"},
+            ],
+            [
+                {"text": "☀️ Приоритеты", "callback_data": "menu:digest"},
                 {"text": "🧭 Статус аудио", "callback_data": "menu:jobs"},
             ],
             [
@@ -721,8 +731,7 @@ async def send_main_menu(chat_id: int) -> dict:
             ],
             [
                 {"text": "📅 Проверить календарь", "callback_data": "menu:calendar"},
-                {"text": "☀️ Дайджест", "callback_data": "menu:digest"},
-                {"text": "📓 Notion", "callback_data": "menu:notion"},
+                {"text": "📓 Проверить Notion", "callback_data": "menu:notion"},
             ],
             [
                 {
@@ -735,12 +744,12 @@ async def send_main_menu(chat_id: int) -> dict:
     return await send_message(
         chat_id,
         (
-            "✨ <b>BBS • CRM Assistant</b>\n"
+            "✨ <b>BBS • AI Agent</b>\n"
             "━━━━━━━━━━━━━━━━━━\n"
-            "Голосовые сообщения — ваши команды боту: календарь, напоминания, поиск.\n\n"
-            "Чтобы записать <b>разговор с клиентом</b> и создать лид — "
-            "нажмите <b>🎙 Новый разговор</b>.\n"
-            "Чтобы дополнить сделку — найдите её и выберите действие в карточке."
+            "Пишите или отправляйте голосовые обычными словами. Агент понимает контекст, "
+            "ищет сделки, готовит КП и запросы поставщикам, планирует задачи и помогает принимать решения.\n\n"
+            "Любая запись в Kommo, Notion, Gmail или Calendar выполняется только после подтверждения.\n"
+            "Для явной записи разговора с клиентом нажмите <b>🎙 Новый разговор</b>."
         ),
         reply_markup=keyboard,
     )

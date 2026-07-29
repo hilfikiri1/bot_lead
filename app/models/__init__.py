@@ -4,9 +4,13 @@ from app.models.voice_note import VoiceNote
 from app.models.ai_report import AIReport
 from app.models.action import Action
 from app.models.integration_check import IntegrationCheck
-from app.models.integration_event import IntegrationEvent
 from app.models.calendar_event import CalendarEvent
 from app.models.spreadsheet_lead_mapping import SpreadsheetLeadMapping
+
+from app.models.agent_session import AgentSession
+from app.models.agent_message import AgentMessage
+from app.models.pending_agent_action import PendingAgentAction
+from app.models.integration_event import IntegrationEvent
 
 __all__ = [
     "Client",
@@ -15,7 +19,10 @@ __all__ = [
     "AIReport",
     "Action",
     "IntegrationCheck",
-    "IntegrationEvent",
     "SpreadsheetLeadMapping",
     "CalendarEvent",
+    "AgentSession",
+    "AgentMessage",
+    "PendingAgentAction",
+    "IntegrationEvent",
 ]

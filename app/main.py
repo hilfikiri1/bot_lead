@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 import structlog
 from fastapi import FastAPI
@@ -13,6 +14,7 @@ from app.api.admin import router as admin_router
 from app.api.telegram import router as telegram_router
 from app.config import get_settings
 from app.db_migrations import upgrade_database
+from app.services import lead_status_sync_service
 from app.services.telegram_service import (
     delete_webhook,
     register_webhook,
@@ -20,6 +22,7 @@ from app.services.telegram_service import (
 )
 
 settings = get_settings()
+APP_VERSION = "3.1.0-agent-status-sync"
 
 structlog.configure(
     processors=[
@@ -68,15 +71,32 @@ async def lifespan(app: FastAPI):
         except Exception as exc:
             app_logger.warning("Telegram command registration failed: %s", exc)
 
-    yield
-    app_logger.info("Shutting down")
+    status_sync_task: asyncio.Task | None = None
+    if settings.lead_status_sync_enabled:
+        status_sync_task = asyncio.create_task(
+            lead_status_sync_service.periodic_status_sync_loop(),
+            name="lead-status-sync",
+        )
+        app_logger.info(
+            "Lead status sync scheduler enabled (report-only, interval=%s min)",
+            settings.lead_status_sync_interval_minutes,
+        )
+
+    try:
+        yield
+    finally:
+        if status_sync_task:
+            status_sync_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await status_sync_task
+        app_logger.info("Shutting down")
 
 
 docs_enabled = settings.expose_api_docs and not settings.is_production
 app = FastAPI(
     title="Buy & Bring Solutions — CRM Assistant API",
     description="Telegram CRM assistant for Kommo lead workflows",
-    version="3.0.0-agent",
+    version=APP_VERSION,
     lifespan=lifespan,
     docs_url="/docs" if docs_enabled else None,
     redoc_url="/redoc" if docs_enabled else None,
@@ -111,7 +131,7 @@ async def health():
     return {
         "status": "ok",
         "service": "buy-bring-crm-assistant",
-        "version": "3.0.0-agent",
+        "version": APP_VERSION,
     }
 
 

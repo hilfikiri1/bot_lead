@@ -30,6 +30,7 @@ from app.services import (
     crm_service,
     google_sheets_service,
     kommo_service,
+    lead_status_sync_service,
     notion_service,
     telegram_service,
     telegram_state_service,
@@ -697,6 +698,142 @@ async def _show_lead_edit_preview(
     )
 
 
+async def _run_status_sync(chat_id: int, user_id: int) -> None:
+    if not _is_allowed_user(user_id):
+        await telegram_service.send_message(chat_id, "Доступ запрещён.")
+        return
+    await telegram_service.send_message(
+        chat_id,
+        "🔄 Читаю статусы Kommo и Google Sheets. Ничего не изменяю…",
+    )
+    try:
+        report = await lead_status_sync_service.build_status_sync_report()
+    except google_sheets_service.GoogleSheetsError as exc:
+        await telegram_service.send_message(
+            chat_id,
+            f"❌ <b>Ошибка Google Sheets</b>\n\n{html.escape(str(exc)[:500])}",
+        )
+        return
+    except Exception as exc:
+        logger.exception("Lead status sync preview failed")
+        await telegram_service.send_message(
+            chat_id,
+            "❌ <b>Сверка не выполнена</b>\n\n"
+            f"{html.escape(type(exc).__name__)}: проверьте Kommo и Google Sheets.",
+        )
+        return
+
+    await telegram_state_service.set_state(
+        user_id,
+        {
+            "mode": "lead_status_sync_preview",
+            "chat_id": chat_id,
+            "updates_digest": report.get("updates_digest"),
+            "updates_count": report.get("updates_count"),
+            "generated_at": report.get("generated_at"),
+        },
+        ttl_seconds=settings.telegram_state_ttl_minutes * 60,
+    )
+    await telegram_service.send_status_sync_report(chat_id, report)
+
+
+async def _prepare_status_sync_confirmation(chat_id: int, user_id: int) -> None:
+    state = await telegram_state_service.get_state(user_id)
+    if not state or state.get("mode") != "lead_status_sync_preview":
+        await telegram_service.send_message(
+            chat_id,
+            "⚠️ Отчёт устарел. Запустите сверку заново.",
+            reply_markup={
+                "inline_keyboard": [
+                    [{"text": "🔄 Запустить сверку", "callback_data": "sync:run"}]
+                ]
+            },
+        )
+        return
+    if not settings.google_sheets_write_enabled:
+        await telegram_service.send_message(
+            chat_id,
+            "🔒 <b>Запись в таблицу отключена</b>\n\n"
+            "Сейчас бот работает только в режиме чтения и отчётов. "
+            "Для разрешения подтверждаемых изменений нужно отдельно установить "
+            "<code>GOOGLE_SHEETS_WRITE_ENABLED=true</code> в Railway и дать "
+            "service account право Editor.",
+        )
+        return
+    if int(state.get("updates_count") or 0) <= 0:
+        await telegram_service.send_message(chat_id, "Изменений для записи нет.")
+        return
+
+    confirmation_state = {**state, "mode": "lead_status_sync_confirmation"}
+    await telegram_state_service.set_state(
+        user_id,
+        confirmation_state,
+        ttl_seconds=settings.telegram_state_ttl_minutes * 60,
+    )
+    await telegram_service.send_status_sync_confirmation(
+        chat_id,
+        {"updates_count": confirmation_state.get("updates_count")},
+    )
+
+
+async def _confirm_status_sync(chat_id: int, user_id: int) -> None:
+    state = await telegram_state_service.get_state(user_id)
+    if not state or state.get("mode") != "lead_status_sync_confirmation":
+        await telegram_service.send_message(
+            chat_id,
+            "⚠️ Подтверждение устарело. Запустите сверку заново.",
+        )
+        return
+
+    await telegram_service.send_message(
+        chat_id,
+        "🔐 Повторно проверяю оба источника перед записью…",
+    )
+    try:
+        result = await lead_status_sync_service.apply_confirmed_report(
+            expected_digest=str(state.get("updates_digest") or ""),
+            expected_updates_count=int(state.get("updates_count") or 0),
+        )
+    except google_sheets_service.GoogleSheetsError as exc:
+        await telegram_service.send_message(
+            chat_id,
+            f"❌ <b>Обновление не выполнено</b>\n\n{html.escape(str(exc)[:700])}",
+        )
+        return
+    except Exception as exc:
+        logger.exception("Confirmed lead status sync failed")
+        await telegram_service.send_message(
+            chat_id,
+            "❌ <b>Обновление не выполнено</b>\n\n"
+            f"{html.escape(type(exc).__name__)}: данные не изменены.",
+        )
+        return
+
+    if result.get("stale"):
+        fresh_report = result.get("report") or {}
+        await telegram_state_service.set_state(
+            user_id,
+            {
+                "mode": "lead_status_sync_preview",
+                "chat_id": chat_id,
+                "updates_digest": fresh_report.get("updates_digest"),
+                "updates_count": fresh_report.get("updates_count"),
+                "generated_at": fresh_report.get("generated_at"),
+            },
+            ttl_seconds=settings.telegram_state_ttl_minutes * 60,
+        )
+        await telegram_service.send_message(
+            chat_id,
+            "⚠️ Данные изменились после предпросмотра. Ничего не записано; "
+            "проверьте новый отчёт и подтвердите ещё раз.",
+        )
+        await telegram_service.send_status_sync_report(chat_id, fresh_report)
+        return
+
+    await telegram_state_service.clear_state(user_id)
+    await telegram_service.send_status_sync_result(chat_id, result)
+
+
 async def _show_unreviewed_page(chat_id: int, user_id: int, page: int = 1) -> None:
     if not _is_allowed_user(user_id):
         await telegram_service.send_message(chat_id, "Доступ запрещён.")
@@ -1112,6 +1249,38 @@ async def _handle_manager_callback(
 ) -> bool:
     """Handle menu/lead/note callbacks. Return False for approval callbacks."""
     if callback_data == "noop":
+        return True
+
+    if callback_data == "sync:run":
+        await _run_status_sync(chat_id, user_id)
+        return True
+    if callback_data == "sync:prepare":
+        await _prepare_status_sync_confirmation(chat_id, user_id)
+        return True
+    if callback_data == "sync:confirm":
+        await _confirm_status_sync(chat_id, user_id)
+        return True
+    if callback_data == "sync:cancel":
+        await telegram_state_service.clear_state(user_id)
+        await telegram_service.send_message(
+            chat_id,
+            "Отменено. Таблица и Kommo не изменены.",
+            reply_markup={
+                "inline_keyboard": [
+                    [{"text": "🏠 Главное меню", "callback_data": "menu:home"}]
+                ]
+            },
+        )
+        return True
+    if callback_data == "sync:write_help":
+        await telegram_service.send_message(
+            chat_id,
+            "🔒 <b>Сейчас включён безопасный режим</b>\n\n"
+            "Бот только сравнивает Kommo с таблицей. Для разрешения записи "
+            "нужно отдельное подтверждение владельца, переменная "
+            "<code>GOOGLE_SHEETS_WRITE_ENABLED=true</code> в Railway и право "
+            "Editor для service account.",
+        )
         return True
 
     if callback_data == "menu:home":
@@ -2527,6 +2696,10 @@ async def telegram_webhook(
 
         if text.startswith("/kommo_test"):
             await _handle_kommo_test(chat_id, user_id, db)
+            return {"ok": True}
+
+        if text.startswith("/status_sync"):
+            await _run_status_sync(chat_id, user_id)
             return {"ok": True}
 
         if text.startswith("/calendar_test_write"):

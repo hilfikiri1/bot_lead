@@ -215,4 +215,12 @@ def install_diagnostic_runtime() -> None:
     )
 
     install_diagnostics_hardening_runtime()
+
+    # Install the operator fixes last, after diagnostics hardening has replaced the
+    # Drive/project functions that these wrappers extend.
+    from app.services.round3_runtime import install_round3_runtime
+    from app.services.round3_compat import install_round3_compat
+
+    install_round3_runtime()
+    install_round3_compat()
     logger.info("System diagnostic runtime installed")

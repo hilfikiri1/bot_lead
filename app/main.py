@@ -192,5 +192,38 @@ if settings.enable_google_oauth_routes:
 
 
 @app.get("/health")
-async def health_check():
-    return {"status": "ok", "service": "buybring-crm-assistant", "version": APP_VERSION}
+async def health():
+    return {
+        "status": "ok",
+        "service": "buy-bring-crm-assistant",
+        "version": APP_VERSION,
+    }
+
+
+@app.get("/ready")
+async def ready():
+    return {
+        "status": "ready",
+        "service": "buy-bring-crm-assistant",
+        "version": APP_VERSION,
+    }
+
+
+@app.get("/version")
+async def version():
+    return {
+        "version": APP_VERSION,
+        "service": "buy-bring-crm-assistant",
+        "agent": "v5.2-diagnostics",
+    }
+
+
+@app.get("/")
+async def root():
+    return {
+        "service": "Buy & Bring Solutions CRM Assistant",
+        "version": APP_VERSION,
+        "health": "/health",
+        "ready": "/ready",
+        "docs_enabled": docs_enabled,
+    }

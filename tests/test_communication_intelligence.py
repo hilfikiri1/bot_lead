@@ -96,8 +96,11 @@ def test_deterministic_reviewer_flags_placeholder_and_overpromise():
         playbook={"reviewer_checks": ["placeholder", "guarantee"]},
     )
     assert result["approved"] is False
-    assert any("szablon" in issue.lower() for issue in result["issues"])
-    assert any("gwaranc" in issue.lower() for issue in result["issues"])
+    assert any("шаблон" in issue.lower() for issue in result["issues"])
+    assert any(
+        "гарант" in issue.lower() or "обещан" in issue.lower()
+        for issue in result["issues"]
+    )
 
 
 def test_runtime_metadata_preserves_original_reviewed_and_models():

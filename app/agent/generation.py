@@ -56,7 +56,7 @@ async def generate_draft(
     *,
     kind: str,
     lead: dict[str, Any],
-    language: str = "ru",
+    language: str = "auto",
     manager_request: str = "",
 ) -> dict[str, Any]:
     guidance = _DRAFT_GUIDANCE.get(kind)
@@ -64,6 +64,8 @@ async def generate_draft(
         raise ValueError(f"Unsupported draft kind: {kind}")
     if not settings.openai_api_key.strip():
         raise RuntimeError("OPENAI_API_KEY не настроен")
+    if language == "auto":
+        language = "en" if kind == "supplier_inquiry" else "ru"
     client = AsyncOpenAI(api_key=settings.openai_api_key)
     response = await client.chat.completions.create(
         model=settings.agent_writer_model or settings.openai_model,
@@ -113,7 +115,9 @@ async def generate_draft(
         "missing_data": [str(x) for x in (data.get("missing_data") or []) if str(x).strip()][:30],
         "assumptions": [str(x) for x in (data.get("assumptions") or []) if str(x).strip()][:30],
         "next_action": str(data.get("next_action") or "Проверить и дополнить черновик")[:1000],
-        "language": str(data.get("language") or language)[:20],
+        # The requested/resolved code is authoritative; model output may use a
+        # human-readable word such as "Polish".
+        "language": language,
         "kind": kind,
     }
 

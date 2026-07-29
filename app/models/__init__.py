@@ -14,6 +14,9 @@ from app.models.agent_session import AgentSession
 from app.models.agent_message import AgentMessage
 from app.models.pending_agent_action import PendingAgentAction
 from app.models.integration_event import IntegrationEvent
+from app.models.agent_user import AgentUser
+from app.models.agent_invite import AgentInvite
+from app.models.client_message_draft import ClientMessageDraft
 
 __all__ = [
     "Client",
@@ -30,4 +33,7 @@ __all__ = [
     "AgentMessage",
     "PendingAgentAction",
     "IntegrationEvent",
+    "AgentUser",
+    "AgentInvite",
+    "ClientMessageDraft",
 ]

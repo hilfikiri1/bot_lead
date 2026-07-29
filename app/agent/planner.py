@@ -39,7 +39,14 @@ _WRITE_INTENTS = {
 _DRAFT_KINDS = {
     "commercial_offer": ("кп", "коммерческ", "предложени"),
     "supplier_inquiry": ("поставщик", "фабрик", "производител", "запрос в китай"),
-    "followup_message": ("follow-up", "follow up", "фоллоу", "сообщение клиент", "напомнить клиент"),
+    "followup_message": (
+        "follow-up",
+        "follow up",
+        "фоллоу",
+        "сообщение клиент",
+        "напомнить клиент",
+        "напиши клиент",
+    ),
     "email": ("письмо", "email", "e-mail"),
     "catalog_outline": ("каталог", "прайс", "price list"),
     "technical_brief": ("техзадан", "техническ", "тз "),
@@ -80,7 +87,7 @@ Rules:
 - If an essential target/date/text is missing, use mode="clarify" and write one concise Russian clarification_question.
 - due_at can be a natural Russian phrase such as "завтра в 10:00". Do not invent dates.
 - fields for update_kommo_lead may contain only name, price, status_id.
-- language should reflect the requested output language; default ru.
+- language should reflect an explicitly requested output language; otherwise use auto.
 - confidence is 0..1.
 
 Schema:
@@ -99,7 +106,7 @@ Schema:
   "reminder_minutes": 30,
   "event_type": "call|meeting|message|proposal|other",
   "fields": {},
-  "language": "ru|pl|uk|en|de|zh",
+  "language": "auto|ru|pl|uk|en|de|zh",
   "clarification_question": "Russian string or null",
   "rationale": "short Russian string"
 }
@@ -146,17 +153,28 @@ def _plan_lead_refs(text: str, context: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _language_hint(normalized: str) -> str:
-    if "на польск" in normalized or "po polsku" in normalized:
+    if any(
+        token in normalized
+        for token in ("на польск", "по-польск", "по польск", "po polsku")
+    ):
         return "pl"
-    if "на украин" in normalized or "україн" in normalized:
+    if any(
+        token in normalized
+        for token in ("на украин", "по-украин", "по украин", "україн")
+    ):
         return "uk"
+    if any(
+        token in normalized
+        for token in ("на русск", "по-русск", "по русск", "російськ")
+    ):
+        return "ru"
     if "на англий" in normalized or "in english" in normalized:
         return "en"
     if "на немец" in normalized or "auf deutsch" in normalized:
         return "de"
     if "на китай" in normalized or "中文" in normalized:
         return "zh"
-    return "ru"
+    return "auto"
 
 
 def deterministic_plan(text: str, context: dict[str, Any]) -> AgentPlan | None:

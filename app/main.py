@@ -23,7 +23,7 @@ from app.services.telegram_service import (
 )
 
 settings = get_settings()
-APP_VERSION = "3.1.0-agent-status-sync"
+APP_VERSION = "4.0.0-identity-language-whatsapp"
 
 structlog.configure(
     processors=[

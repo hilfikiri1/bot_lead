@@ -64,12 +64,13 @@ async def send_document(
     filename: str,
     content: bytes,
     caption: str | None = None,
+    mime_type: str = "application/octet-stream",
 ) -> dict:
     data = {"chat_id": str(chat_id)}
     if caption:
         data["caption"] = caption
         data["parse_mode"] = "HTML"
-    files = {"document": (filename, content, "text/calendar")}
+    files = {"document": (filename, content, mime_type)}
     async with httpx.AsyncClient(timeout=30) as client:
         response = await client.post(f"{TELEGRAM_API}/sendDocument", data=data, files=files)
         _ensure_success(response, "sendDocument")
@@ -137,6 +138,7 @@ async def send_calendar_result(
             filename="reminder.ics",
             content=ics_bytes,
             caption=f"📅 {html.escape(title)}",
+            mime_type="text/calendar",
         )
         return "Отправлен файл .ics для ручного добавления."
     return "Не удалось создать событие в календаре."
@@ -449,6 +451,7 @@ async def send_calendar_success(
             filename="event.ics",
             content=str(result["ics_content"]).encode("utf-8"),
             caption=f"📅 {_esc(result.get('title'))}",
+            mime_type="text/calendar",
         )
     return message
 
@@ -572,6 +575,19 @@ async def download_voice(file_id: str) -> bytes:
     return await download_file(await get_file_path(file_id))
 
 
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=10))
+async def get_bot_username() -> str:
+    if settings.telegram_bot_username.strip():
+        return settings.telegram_bot_username.strip().lstrip("@")
+    async with httpx.AsyncClient(timeout=15) as client:
+        response = await client.get(f"{TELEGRAM_API}/getMe")
+        _ensure_success(response, "getMe")
+        username = str((response.json().get("result") or {}).get("username") or "")
+        if not username:
+            raise RuntimeError("Telegram bot username is missing.")
+        return username
+
+
 async def delete_webhook() -> dict:
     async with httpx.AsyncClient(timeout=15) as client:
         response = await client.post(
@@ -604,6 +620,9 @@ async def set_bot_commands() -> dict:
         {"command": "errors", "description": "Последние ошибки интеграций"},
         {"command": "sync_leads", "description": "Синхронизировать Kommo с Notion"},
         {"command": "reset_memory", "description": "Очистить контекст агента"},
+        {"command": "invite", "description": "Пригласить сотрудника"},
+        {"command": "team", "description": "Пользователи и роли"},
+        {"command": "bind_kommo", "description": "Привязать менеджера к Kommo"},
         {"command": "jobs", "description": "Статус обработки аудио"},
         {"command": "notion_test", "description": "Проверить рабочие базы Notion"},
         {"command": "kommo_test", "description": "Проверить Kommo"},

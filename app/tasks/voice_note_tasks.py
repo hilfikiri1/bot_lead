@@ -18,6 +18,7 @@ from app.services import (
     command_router_service,
     crm_service,
     notion_service,
+    identity_service,
     storage_service,
     telegram_service,
     transcription_service,
@@ -179,6 +180,11 @@ async def _process(
     voice_note = None
     try:
         async with AsyncSessionLocal() as db:
+            actor = await identity_service.authorize_telegram_user(
+                db, telegram_user_id=telegram_user_id
+            )
+            if actor is None:
+                raise PermissionError("Telegram-пользователь больше не имеет доступа к агенту.")
             voice_note, created = await crm_service.get_or_create_voice_note_job(
                 db,
                 telegram_user_id=telegram_user_id,

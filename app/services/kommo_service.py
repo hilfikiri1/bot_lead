@@ -582,6 +582,12 @@ async def get_all_open_leads(
                 continue
             if not _lead_belongs_to_pipeline(lead, selected_pipeline):
                 continue
+            from app.services import identity_service
+
+            if not identity_service.current_user_can_access_responsible_id(
+                lead.get("responsible_user_id")
+            ):
+                continue
             open_leads.append(lead)
 
         if len(page_leads) < PAGE_SIZE:
@@ -1071,6 +1077,10 @@ async def get_lead_details(lead_id: int) -> dict[str, Any]:
     )
     if not lead:
         raise KommoAPIError("Сделка не найдена.", status_code=404)
+
+    from app.services import identity_service
+
+    identity_service.assert_current_user_can_access_lead(lead)
 
     try:
         pipeline_names, status_names = await get_pipeline_index()

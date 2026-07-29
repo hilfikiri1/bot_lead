@@ -38,6 +38,7 @@ class Settings(BaseSettings):
         "kommo_unreviewed_status_id",
         "lead_status_sync_pipeline_id",
         "kommo_internal_lead_number_field_id",
+        "telegram_owner_user_id",
         mode="before",
     )
     @classmethod
@@ -76,17 +77,30 @@ class Settings(BaseSettings):
     telegram_webhook_secret: str = ""
     webhook_base_url: str = "https://your-domain.com"
     allowed_telegram_user_ids: str = ""
+    # Compatibility with the Railway variable name used in the v4 rollout
+    # checklist. Both names are accepted and merged.
+    telegram_allowed_user_ids: str = ""
+    telegram_owner_user_id: Optional[int] = None
+    telegram_bot_username: str = ""
     max_audio_file_size_mb: int = 20
 
     def get_allowed_user_ids(self) -> List[int]:
-        if not self.allowed_telegram_user_ids.strip():
+        raw = ",".join(
+            value
+            for value in (
+                self.allowed_telegram_user_ids.strip(),
+                self.telegram_allowed_user_ids.strip(),
+            )
+            if value
+        )
+        if not raw:
             return []
         try:
-            return [
+            return list(dict.fromkeys(
                 int(uid.strip())
-                for uid in self.allowed_telegram_user_ids.split(",")
+                for uid in raw.split(",")
                 if uid.strip()
-            ]
+            ))
         except ValueError:
             return []
 
@@ -214,6 +228,8 @@ class Settings(BaseSettings):
     agent_sync_max_leads: int = 50
     agent_memory_compact_every: int = 20
     agent_memory_recent_messages: int = 12
+    agent_default_client_language: str = "pl"
+    agent_invite_ttl_hours: int = 48
 
     # Google Drive (Agent v4)
     google_drive_enabled: bool = False

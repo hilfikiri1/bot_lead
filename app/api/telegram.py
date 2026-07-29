@@ -19,6 +19,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.celery_app import celery_app
 from app.agent import service as agent_service
+from app.agent import generation as agent_generation
+from app.agent import tools as agent_tools
 from app.agent.security import sanitize_text
 from app.config import get_settings
 from app.database import get_db
@@ -30,12 +32,14 @@ from app.services import (
     command_router_service,
     crm_service,
     google_sheets_service,
+    identity_service,
     kommo_service,
     lead_status_sync_service,
     notion_service,
     telegram_service,
     telegram_state_service,
     unreviewed_leads_service,
+    client_message_service,
 )
 from app.tasks.voice_note_tasks import process_voice_note, process_voice_note_async
 
@@ -43,6 +47,7 @@ router = APIRouter(prefix="/webhook", tags=["telegram"])
 logger = logging.getLogger(__name__)
 settings = get_settings()
 BACKGROUND_TASKS: set[asyncio.Task[Any]] = set()
+RUNTIME_AUTHORIZED_USER_IDS: set[int] = set()
 
 SUPPORTED_AUDIO_EXTENSIONS = {
     "ogg",
@@ -79,9 +84,303 @@ def _verify_secret(x_telegram_bot_api_secret_token: str | None) -> bool:
 
 def _is_allowed_user(user_id: int) -> bool:
     allowed = settings.get_allowed_user_ids()
-    if not allowed:
+    return int(user_id) in allowed or int(user_id) in RUNTIME_AUTHORIZED_USER_IDS
+
+
+def _telegram_display_name(sender: dict[str, Any]) -> str | None:
+    full_name = " ".join(
+        str(sender.get(key) or "").strip() for key in ("first_name", "last_name")
+    ).strip()
+    return full_name or None
+
+
+async def _authorize_user(
+    db: AsyncSession,
+    sender: dict[str, Any],
+) -> Any | None:
+    user_id = int(sender["id"])
+    user = await identity_service.authorize_telegram_user(
+        db,
+        telegram_user_id=user_id,
+        telegram_username=(str(sender.get("username")) if sender.get("username") else None),
+        display_name=_telegram_display_name(sender),
+    )
+    if user is not None:
+        RUNTIME_AUTHORIZED_USER_IDS.add(user_id)
+    return user
+
+
+def _role_label(role: str) -> str:
+    return {
+        "owner": "Owner",
+        "admin": "Admin",
+        "manager": "Менеджер",
+        "viewer": "Viewer",
+    }.get(role, role)
+
+
+async def _show_invite_menu(chat_id: int, actor: Any) -> None:
+    if not identity_service.can_manage_users(actor):
+        await telegram_service.send_message(
+            chat_id, "🔒 Приглашать сотрудников могут только Owner и Admin."
+        )
+        return
+    rows = [
+        [
+            {
+                "text": "👔 Менеджер",
+                "callback_data": "identity:invite:manager",
+            },
+            {"text": "👁 Viewer", "callback_data": "identity:invite:viewer"},
+        ]
+    ]
+    if actor.role == "owner":
+        rows.append(
+            [{"text": "🛠 Admin", "callback_data": "identity:invite:admin"}]
+        )
+    await telegram_service.send_message(
+        chat_id,
+        (
+            "<b>Пригласить сотрудника</b>\n\n"
+            "Ссылка будет одноразовой и ограниченной по времени. "
+            "Менеджер после подключения увидит только назначенные ему сделки; "
+            "для этого привяжите его Kommo User ID командой /bind_kommo."
+        ),
+        reply_markup={"inline_keyboard": rows},
+    )
+
+
+async def _create_invite_from_callback(
+    *,
+    db: AsyncSession,
+    chat_id: int,
+    actor: Any,
+    role: str,
+) -> None:
+    invite, token = await identity_service.create_invite(
+        db,
+        invited_by=actor,
+        role=role,
+    )
+    username = await telegram_service.get_bot_username()
+    invite_url = f"https://t.me/{username}?start={token}"
+    await telegram_service.send_message(
+        chat_id,
+        (
+            f"✅ <b>Приглашение: {_role_label(role)}</b>\n\n"
+            f"<code>{html.escape(invite_url)}</code>\n\n"
+            f"Действует до: {invite.expires_at.astimezone(_manager_tz()).strftime('%d.%m.%Y %H:%M')}. "
+            "Ссылка сработает только один раз."
+        ),
+        reply_markup={
+            "inline_keyboard": [
+                [{"text": "Открыть ссылку", "url": invite_url}],
+                [{"text": "👥 Команда", "callback_data": "identity:team"}],
+            ]
+        },
+    )
+
+
+def _format_team(users: list[Any]) -> str:
+    lines = ["<b>👥 Пользователи B&BS Agent</b>", ""]
+    for user in users:
+        name = user.display_name or (
+            f"@{user.telegram_username}" if user.telegram_username else str(user.telegram_user_id)
+        )
+        access = (
+            "все сделки"
+            if user.lead_access_scope == "all"
+            else (
+                f"назначенные · Kommo {user.kommo_user_id}"
+                if user.kommo_user_id
+                else "назначенные · Kommo ID не привязан"
+            )
+        )
+        lines.append(
+            f"• <b>{html.escape(str(name))}</b> — {_role_label(user.role)} · "
+            f"{html.escape(access)} · {html.escape(user.status)}"
+        )
+        lines.append(f"  Telegram ID: <code>{user.telegram_user_id}</code>")
+    lines.extend(
+        [
+            "",
+            "Привязка менеджера: <code>/bind_kommo TELEGRAM_ID KOMMO_USER_ID</code>",
+        ]
+    )
+    return "\n".join(lines)
+
+
+async def _handle_identity_callback(
+    *,
+    callback_data: str,
+    chat_id: int,
+    actor: Any,
+    db: AsyncSession,
+) -> bool:
+    if not callback_data.startswith("identity:"):
         return False
-    return user_id in allowed
+    if callback_data == "identity:team":
+        if not identity_service.can_manage_users(actor):
+            raise PermissionError("У вас нет права просматривать команду.")
+        await telegram_service.send_message(
+            chat_id, _format_team(await identity_service.list_users(db))
+        )
+        return True
+    if callback_data.startswith("identity:invite:"):
+        role = callback_data.rsplit(":", 1)[1]
+        await _create_invite_from_callback(
+            db=db, chat_id=chat_id, actor=actor, role=role
+        )
+        return True
+    return True
+
+
+async def _handle_client_message_callback(
+    *,
+    callback_data: str,
+    chat_id: int,
+    user_id: int,
+    db: AsyncSession,
+) -> bool:
+    if not callback_data.startswith("clientmsg:"):
+        return False
+    parts = callback_data.split(":")
+    if len(parts) < 3 or not parts[-1].isdigit():
+        raise ValueError("Некорректная команда черновика.")
+    draft_id = int(parts[-1])
+    record = await client_message_service.get_draft(db, draft_id)
+    if record is None:
+        raise ValueError("Черновик не найден.")
+    lead = await kommo_service.get_lead_details(int(record.kommo_lead_id))
+    command = parts[1]
+    actor = identity_service.current_user()
+    if command not in {"vcf", "show"} and not identity_service.can_write(actor):
+        raise PermissionError("Роль Viewer позволяет только просматривать данные.")
+
+    if command == "vcf":
+        contact = ((lead.get("contacts") or [{}])[0]) or {}
+        emails = contact.get("emails") or []
+        content = client_message_service.build_vcard(
+            name=record.client_name or contact.get("name"),
+            company=record.company,
+            phone=record.recipient,
+            email=emails[0] if emails else None,
+            language=record.communication_language,
+        )
+        await telegram_service.send_document(
+            chat_id,
+            filename=client_message_service.vcard_filename(
+                record.client_name or contact.get("name")
+            ),
+            content=content,
+            caption="👤 Нажмите на файл и подтвердите добавление контакта.",
+            mime_type="text/vcard",
+        )
+        return True
+
+    if command == "edit":
+        await telegram_state_service.set_state(
+            user_id,
+            {
+                "mode": "edit_client_message",
+                "client_message_draft_id": draft_id,
+                "chat_id": chat_id,
+            },
+            ttl_seconds=settings.telegram_state_ttl_minutes * 60,
+        )
+        await telegram_service.send_message(
+            chat_id,
+            "✏️ Отправьте новый текст сообщения одним сообщением.",
+            reply_markup={
+                "inline_keyboard": [
+                    [{"text": "❌ Отмена", "callback_data": f"clientmsg:show:{draft_id}"}]
+                ]
+            },
+        )
+        return True
+
+    if command == "show":
+        await telegram_state_service.clear_state(user_id)
+        await telegram_service.send_message(
+            chat_id,
+            client_message_service.format_client_message_draft(record),
+            reply_markup=client_message_service.message_draft_markup(record),
+        )
+        return True
+
+    if command == "lang":
+        if len(parts) != 4:
+            raise ValueError("Некорректный выбор языка.")
+        language = parts[2]
+        generated = await agent_generation.generate_draft(
+            kind="followup_message",
+            lead=agent_tools.lead_summary_for_ai(lead),
+            language=language,
+            manager_request=(
+                "Translate/adapt the existing follow-up without changing its facts: "
+                + record.body
+            ),
+        )
+        record = await client_message_service.update_language_and_body(
+            db,
+            draft_id=draft_id,
+            telegram_user_id=user_id,
+            lead=lead,
+            language=language,
+            generated=generated,
+        )
+        await telegram_service.send_message(
+            chat_id,
+            client_message_service.format_client_message_draft(record),
+            reply_markup=client_message_service.message_draft_markup(record),
+        )
+        return True
+
+    if command == "sent":
+        try:
+            record = await client_message_service.confirm_sent(
+                db, draft_id=draft_id, telegram_user_id=user_id
+            )
+        except Exception:
+            failed = await client_message_service.get_draft(db, draft_id)
+            if failed and failed.status == "sent_log_failed":
+                await telegram_service.send_message(
+                    chat_id,
+                    (
+                        "⚠️ Отправка отмечена локально, но заметка в Kommo не записалась. "
+                        "Проверьте соединение и нажмите повторить."
+                    ),
+                    reply_markup={
+                        "inline_keyboard": [
+                            [
+                                {
+                                    "text": "🔄 Повторить запись в Kommo",
+                                    "callback_data": f"clientmsg:sent:{draft_id}",
+                                }
+                            ]
+                        ]
+                    },
+                )
+                return True
+            raise
+        await telegram_service.send_message(
+            chat_id,
+            (
+                "✅ <b>Сообщение отмечено как отправленное</b>\n\n"
+                "Результат и текст записаны в Kommo. Аудит отправителя сохранён."
+            ),
+        )
+        return True
+
+    if command == "cancel":
+        await client_message_service.cancel_draft(
+            db, draft_id=draft_id, telegram_user_id=user_id
+        )
+        await telegram_service.send_message(
+            chat_id, "❌ Черновик отменён. В Kommo ничего не записано."
+        )
+        return True
+    raise ValueError("Неизвестная команда черновика.")
 
 
 async def _claim_audio_message(user_id: int, message_id: int) -> bool:
@@ -208,6 +507,10 @@ def _extract_project_file_attachment(message: dict[str, Any]) -> dict[str, Any] 
             "kind": "photo",
         }
     return None
+
+
+def _spawn_background(coro: Any) -> None:
+    """Keep a strong reference so in-process audio fallback is not collected."""
     task = asyncio.create_task(coro)
     BACKGROUND_TASKS.add(task)
 
@@ -1293,6 +1596,18 @@ async def _handle_manager_callback(
     """Handle menu/lead/note callbacks. Return False for approval callbacks."""
     if callback_data == "noop":
         return True
+    actor = identity_service.current_user()
+    if (
+        actor is not None
+        and actor.lead_access_scope == "assigned"
+        and callback_data.startswith(("menu:unrev", "unrev:", "sync:"))
+    ):
+        await telegram_service.send_message(
+            chat_id,
+            "🔒 Эта сводная операция доступна Owner/Admin. "
+            "Менеджер работает только с назначенными ему сделками.",
+        )
+        return True
 
     if callback_data == "sync:run":
         await _run_status_sync(chat_id, user_id)
@@ -2279,17 +2594,85 @@ async def _handle_manager_callback(
     return not callback_data.startswith("action:")
 
 
+def _legacy_callback_requires_write(callback_data: str) -> bool:
+    return callback_data.startswith(
+        (
+            "sync:confirm",
+            "unrev:add:",
+            "unrev:pick:",
+            "unrev:confirm:",
+            "lead:audio:",
+            "lead:text:",
+            "lead:task:",
+            "lead:calendar:",
+            "lead:edit:",
+            "leadedit:",
+            "leadcreate:",
+            "note:",
+            "task:",
+            "calendar:confirm:",
+            "calendar:retry_kommo:",
+            "action:",
+            "calevt:",
+            "calday:",
+            "caltime:",
+            "caldur:",
+            "calrem:",
+        )
+    )
+
+
 async def _handle_text_state(
     *,
     chat_id: int,
     user_id: int,
     text: str,
+    db: AsyncSession,
 ) -> bool:
     state = await telegram_state_service.get_state(user_id)
     if not state:
         return False
 
     mode = state.get("mode")
+    actor = identity_service.current_user()
+    if (
+        actor is not None
+        and not identity_service.can_write(actor)
+        and mode != "awaiting_lead_search"
+    ):
+        await telegram_state_service.clear_state(user_id)
+        await telegram_service.send_message(
+            chat_id, "🔒 Роль Viewer позволяет только просматривать данные."
+        )
+        return True
+    if mode == "edit_client_message":
+        draft_id = int(state.get("client_message_draft_id") or 0)
+        record = await client_message_service.get_draft(db, draft_id)
+        if record is None:
+            await telegram_state_service.clear_state(user_id)
+            await telegram_service.send_message(chat_id, "⌛ Черновик больше не найден.")
+            return True
+        await kommo_service.get_lead_details(int(record.kommo_lead_id))
+        try:
+            updated = await client_message_service.update_body(
+                db,
+                draft_id=draft_id,
+                telegram_user_id=user_id,
+                body=text,
+            )
+        except ValueError as exc:
+            await telegram_service.send_message(
+                chat_id, f"❌ {html.escape(str(exc))}"
+            )
+            return True
+        await telegram_state_service.clear_state(user_id)
+        await telegram_service.send_message(
+            chat_id,
+            client_message_service.format_client_message_draft(updated),
+            reply_markup=client_message_service.message_draft_markup(updated),
+        )
+        return True
+
     if mode == "awaiting_lead_search":
         await telegram_state_service.clear_state(user_id)
         await telegram_service.send_message(chat_id, "🔄 Ищу сделки в Kommo...")
@@ -2670,7 +3053,8 @@ async def telegram_webhook(
             callback = body["callback_query"]
             callback_data = callback.get("data", "")
             chat_id = callback["message"]["chat"]["id"]
-            user_id = callback["from"]["id"]
+            sender = callback["from"]
+            user_id = sender["id"]
             callback_id = callback["id"]
 
             try:
@@ -2678,11 +3062,35 @@ async def telegram_webhook(
             except Exception as exc:
                 logger.warning("answer_callback_query failed: %s", exc)
 
-            if not _is_allowed_user(user_id):
+            actor = await _authorize_user(db, sender)
+            if actor is None:
                 await telegram_service.send_message(chat_id, "Доступ запрещён.")
                 return {"ok": True}
 
             try:
+                if await _handle_identity_callback(
+                    callback_data=callback_data,
+                    chat_id=chat_id,
+                    actor=actor,
+                    db=db,
+                ):
+                    return {"ok": True}
+                if await _handle_client_message_callback(
+                    callback_data=callback_data,
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    db=db,
+                ):
+                    return {"ok": True}
+                if (
+                    _legacy_callback_requires_write(callback_data)
+                    and not identity_service.can_write(actor)
+                ):
+                    await telegram_service.send_message(
+                        chat_id,
+                        "🔒 Роль Viewer позволяет только просматривать данные.",
+                    )
+                    return {"ok": True}
                 agent_reply = await agent_service.handle_callback(
                     db,
                     callback_data=callback_data,
@@ -2730,11 +3138,67 @@ async def telegram_webhook(
             return {"ok": True}
 
         chat_id = message["chat"]["id"]
-        user_id = message["from"]["id"]
+        sender = message["from"]
+        user_id = sender["id"]
         message_id = message["message_id"]
         text = (message.get("text") or "").strip()
 
-        if not _is_allowed_user(user_id):
+        if text.startswith("/start "):
+            start_payload = text.split(maxsplit=1)[1].strip()
+            if start_payload.startswith("inv_"):
+                try:
+                    invited_user = await identity_service.accept_invite(
+                        db,
+                        raw_token=start_payload,
+                        telegram_user_id=user_id,
+                        telegram_username=(
+                            str(sender.get("username")) if sender.get("username") else None
+                        ),
+                        display_name=_telegram_display_name(sender),
+                    )
+                    RUNTIME_AUTHORIZED_USER_IDS.add(int(user_id))
+                    if invited_user.invited_by_user_id:
+                        inviter = await db.get(
+                            type(invited_user), int(invited_user.invited_by_user_id)
+                        )
+                        if inviter:
+                            try:
+                                await telegram_service.send_message(
+                                    int(inviter.telegram_user_id),
+                                    (
+                                        "✅ <b>Сотрудник подключён</b>\n\n"
+                                        f"{html.escape(str(invited_user.display_name or invited_user.telegram_user_id))} "
+                                        f"— {_role_label(invited_user.role)}."
+                                    ),
+                                )
+                            except Exception as exc:
+                                logger.warning(
+                                    "Could not notify invite owner %s: %s",
+                                    inviter.telegram_user_id,
+                                    exc,
+                                )
+                    await telegram_service.send_message(
+                        chat_id,
+                        (
+                            "✅ <b>Вы подключены к B&BS Agent</b>\n\n"
+                            f"Роль: {_role_label(invited_user.role)}.\n"
+                            + (
+                                "Доступ к назначенным сделкам станет активным после привязки Kommo User ID владельцем."
+                                if invited_user.lead_access_scope == "assigned"
+                                and not invited_user.kommo_user_id
+                                else "Доступ настроен."
+                            )
+                        ),
+                    )
+                    await telegram_service.send_main_menu(chat_id)
+                except (ValueError, PermissionError) as exc:
+                    await telegram_service.send_message(
+                        chat_id, f"❌ {html.escape(str(exc))}"
+                    )
+                return {"ok": True}
+
+        actor = await _authorize_user(db, sender)
+        if actor is None:
             await telegram_service.send_message(chat_id, "Доступ запрещён.")
             return {"ok": True}
 
@@ -2743,12 +3207,63 @@ async def telegram_webhook(
             await telegram_service.send_main_menu(chat_id)
             return {"ok": True}
 
+        if text.startswith("/invite"):
+            await _show_invite_menu(chat_id, actor)
+            return {"ok": True}
+
+        if text.startswith("/team"):
+            if not identity_service.can_manage_users(actor):
+                await telegram_service.send_message(
+                    chat_id, "🔒 Просматривать команду могут только Owner и Admin."
+                )
+            else:
+                await telegram_service.send_message(
+                    chat_id, _format_team(await identity_service.list_users(db))
+                )
+            return {"ok": True}
+
+        if text.startswith("/bind_kommo"):
+            parts = text.split()
+            if len(parts) != 3 or not parts[1].isdigit() or not parts[2].isdigit():
+                await telegram_service.send_message(
+                    chat_id,
+                    "Использование: <code>/bind_kommo TELEGRAM_ID KOMMO_USER_ID</code>",
+                )
+                return {"ok": True}
+            try:
+                target = await identity_service.bind_kommo_user(
+                    db,
+                    actor=actor,
+                    target_telegram_user_id=int(parts[1]),
+                    kommo_user_id=int(parts[2]),
+                )
+            except (ValueError, PermissionError) as exc:
+                await telegram_service.send_message(
+                    chat_id, f"❌ {html.escape(str(exc))}"
+                )
+                return {"ok": True}
+            await telegram_service.send_message(
+                chat_id,
+                (
+                    "✅ <b>Kommo-пользователь привязан</b>\n\n"
+                    f"{html.escape(str(target.display_name or target.telegram_user_id))}: "
+                    f"Kommo User ID <code>{target.kommo_user_id}</code>."
+                ),
+            )
+            return {"ok": True}
+
         if text.startswith("/kommo_test"):
             await _handle_kommo_test(chat_id, user_id, db)
             return {"ok": True}
 
         if text.startswith("/status_sync"):
-            await _run_status_sync(chat_id, user_id)
+            if actor.role not in {"owner", "admin"}:
+                await telegram_service.send_message(
+                    chat_id,
+                    "🔒 Полная сверка Kommo ↔ Sheets доступна Owner/Admin.",
+                )
+            else:
+                await _run_status_sync(chat_id, user_id)
             return {"ok": True}
 
         if text.startswith("/calendar_test_write"):
@@ -2815,7 +3330,7 @@ async def telegram_webhook(
             return {"ok": True}
 
         if text and await _handle_text_state(
-            chat_id=chat_id, user_id=user_id, text=text
+            chat_id=chat_id, user_id=user_id, text=text, db=db
         ):
             return {"ok": True}
 
@@ -2826,6 +3341,12 @@ async def telegram_webhook(
 
         attachment = _extract_audio_attachment(message)
         if attachment:
+            if not identity_service.can_write(actor):
+                await telegram_service.send_message(
+                    chat_id,
+                    "🔒 Роль Viewer не позволяет запускать обработку аудио.",
+                )
+                return {"ok": True}
             state = await telegram_state_service.get_state(user_id)
             if state and state.get("mode") in {
                 "awaiting_text_note",
@@ -2996,6 +3517,12 @@ async def telegram_webhook(
 
         project_file = _extract_project_file_attachment(message)
         if project_file and settings.agent_enabled:
+            if not identity_service.can_write(actor):
+                await telegram_service.send_message(
+                    chat_id,
+                    "🔒 Роль Viewer не позволяет загружать файлы в проекты.",
+                )
+                return {"ok": True}
             max_bytes = min(settings.max_audio_file_size_mb, 20) * 1024 * 1024
             file_size = int(project_file.get("file_size") or 0)
             if file_size and file_size > max_bytes:

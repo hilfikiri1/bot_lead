@@ -15,6 +15,12 @@ class PendingAgentAction(Base):
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     telegram_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    approved_by_telegram_user_id: Mapped[int | None] = mapped_column(
+        BigInteger, nullable=True, index=True
+    )
+    executed_by_telegram_user_id: Mapped[int | None] = mapped_column(
+        BigInteger, nullable=True, index=True
+    )
     chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
     action_type: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
     status: Mapped[str] = mapped_column(

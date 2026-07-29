@@ -179,7 +179,7 @@ async def continue_pending(
         note_text=pending.get("note_text"),
         draft_kind=pending.get("draft_kind"),
         due_at=pending.get("due_at"),
-        language=str(pending.get("language") or "ru"),
+        language=str(pending.get("language") or "auto"),
         duration_minutes=int(pending.get("duration_minutes") or 30),
         reminder_minutes=int(pending.get("reminder_minutes") or 30),
         event_type=str(pending.get("event_type") or "call"),

@@ -28,7 +28,7 @@ class AgentPlan(BaseModel):
     reminder_minutes: int = 30
     event_type: str = "call"
     fields: dict[str, Any] = Field(default_factory=dict)
-    language: str = "ru"
+    language: str = "auto"
     clarification_question: str | None = None
     rationale: str | None = None
 

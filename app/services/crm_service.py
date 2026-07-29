@@ -42,6 +42,12 @@ async def upsert_client(db: AsyncSession, client_data: dict[str, Any]) -> Client
                 setattr(existing, field, value)
         if kommo_contact_id:
             existing.kommo_contact_id = int(kommo_contact_id)
+        client_language = str(client_data.get("language") or "").strip().lower()
+        if client_language in {"pl", "uk", "ru", "en", "de"}:
+            existing.communication_language = client_language
+            existing.communication_language_source = "conversation_analysis"
+            existing.communication_language_confidence = 0.90
+            existing.communication_language_updated_at = datetime.now(timezone.utc)
         await db.commit()
         await db.refresh(existing)
         logger.info("Updated existing client id=%d", existing.id)
@@ -54,6 +60,30 @@ async def upsert_client(db: AsyncSession, client_data: dict[str, Any]) -> Client
         email=email,
         company=client_data.get("company"),
         language=client_data.get("language"),
+        communication_language=(
+            str(client_data.get("language")).strip().lower()
+            if str(client_data.get("language") or "").strip().lower()
+            in {"pl", "uk", "ru", "en", "de"}
+            else None
+        ),
+        communication_language_source=(
+            "conversation_analysis"
+            if str(client_data.get("language") or "").strip().lower()
+            in {"pl", "uk", "ru", "en", "de"}
+            else None
+        ),
+        communication_language_confidence=(
+            0.90
+            if str(client_data.get("language") or "").strip().lower()
+            in {"pl", "uk", "ru", "en", "de"}
+            else None
+        ),
+        communication_language_updated_at=(
+            datetime.now(timezone.utc)
+            if str(client_data.get("language") or "").strip().lower()
+            in {"pl", "uk", "ru", "en", "de"}
+            else None
+        ),
         source=client_data.get("source") or "telegram_voice_note",
     )
     db.add(client)

@@ -104,6 +104,7 @@ async def execute_action(
 
     action.status = "executing"
     action.approved_at = datetime.now(timezone.utc)
+    action.approved_by_telegram_user_id = int(telegram_user_id)
     await db.commit()
 
     started = time.monotonic()
@@ -112,6 +113,7 @@ async def execute_action(
         partial_failed = bool(result.get("partial_failed"))
         action.status = "failed" if partial_failed else "executed"
         action.executed_at = datetime.now(timezone.utc)
+        action.executed_by_telegram_user_id = int(telegram_user_id)
         action.result = result.get("data") or {}
         action.error_message = sanitize_text(result.get("error_message"), limit=4000) if partial_failed else None
         await db.commit()

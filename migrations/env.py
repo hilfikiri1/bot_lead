@@ -9,7 +9,8 @@ from app.database import Base
 from app.models import (  # noqa: F401
     action, agent_message, agent_session, ai_report, calendar_event, client,
     integration_check, integration_event, lead, pending_agent_action,
-    spreadsheet_lead_mapping, voice_note,
+    spreadsheet_lead_mapping, voice_note, agent_user, agent_invite,
+    client_message_draft,
 )
 
 config = context.config

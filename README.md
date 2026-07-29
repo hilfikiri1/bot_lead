@@ -272,6 +272,15 @@ Telegram стал единым AI-интерфейсом для текста и 
 - [`INSTALL_AGENT_V3.md`](INSTALL_AGENT_V3.md) — установка и Git workflow;
 - [`RAILWAY_AGENT_V3.md`](RAILWAY_AGENT_V3.md) — переменные и deployment.
 
+## B&BS AI Agent v4 — Identity, Language and WhatsApp
+
+Agent v4 supports users and roles, one-time Telegram invitations, per-client
+communication language, Polish/Ukraine market defaults, WhatsApp Click to Chat,
+vCard contact files and audited manual-send confirmation in Kommo.
+
+Automatic WhatsApp Cloud API sending remains disabled. Deployment and smoke
+tests: [`AGENT_V4_IDENTITY_LANGUAGE_WHATSAPP.md`](AGENT_V4_IDENTITY_LANGUAGE_WHATSAPP.md).
+
 ## Kommo ↔ Google Sheets status sync
 
 The existing Telegram bot can compare Kommo stages with the status column in

@@ -254,7 +254,8 @@ def test_scheduler_uses_database_claims_and_suppresses_duplicate_evening_digest(
         encoding="utf-8"
     )
     assert "claim_evening_invitation" in source
-    assert "claim_weekly_review" in source
+    assert "_claim_weekly_delivery" in source
+    assert "automatic_delivery_pending" in source
     assert "claim_due_reminders" in source
     assert "elif (" in source
     assert "settings.agent_evening_digest_enabled" in source

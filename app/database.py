@@ -41,7 +41,7 @@ async def init_db():
         action, agent_message, agent_session, ai_report, calendar_event, client,
         integration_check, integration_event, lead, pending_agent_action,
         spreadsheet_lead_mapping, voice_note, agent_user, agent_invite,
-        client_message_draft, project_artifact,
+        client_message_draft, project_artifact, supplier_workspace,
     )
 
     async with engine.begin() as conn:

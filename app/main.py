@@ -22,6 +22,7 @@ from app.services.communication_timeline_runtime import (
 )
 from app.services.followup_runtime import install_followup_runtime_extensions
 from app.services.runtime_extensions import install_runtime_extensions
+from app.services.supplier_workspace_runtime import install_supplier_workspace_runtime
 from app.services.telegram_service import (
     delete_webhook,
     register_webhook,
@@ -34,6 +35,7 @@ install_runtime_extensions()
 if followup_service.enabled():
     install_followup_runtime_extensions()
 install_communication_timeline_runtime()
+install_supplier_workspace_runtime()
 
 structlog.configure(
     processors=[
@@ -183,7 +185,7 @@ async def version():
     return {
         "version": APP_VERSION,
         "service": "buy-bring-crm-assistant",
-        "agent": "v5.0-unified-communications",
+        "agent": "v5.0-supplier-workspace",
     }
 
 

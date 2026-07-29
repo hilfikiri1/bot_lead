@@ -13,6 +13,7 @@ from app.services import (
 )
 
 _INSTALLED = False
+_MANUAL_HINT = "Сообщение ещё не отправлено. Отправка выполняется вручную с вашего телефона."
 
 
 def _assert_writer() -> None:
@@ -61,9 +62,13 @@ def install_whatsapp_cloud_runtime() -> None:
         if record.channel != "whatsapp":
             return text
         if whatsapp_cloud_service.enabled():
+            text = text.replace(
+                _MANUAL_HINT,
+                "Сообщение ещё не отправлено. Можно отправить через API или открыть WhatsApp вручную.",
+            )
             extra = (
                 "\n\n<b>WhatsApp Cloud API:</b> настроен. "
-                "Отправка через API выполняется только после нажатия кнопки подтверждения."
+                "Свободный текст отправляется только внутри 24-часового окна после сообщения клиента."
             )
         else:
             extra = (

@@ -1,10 +1,12 @@
-"""Runtime extensions for manual onboarding, iPhone contacts and chat context."""
+"""Runtime extensions for onboarding, iPhone contacts, chat and communication intelligence."""
 from __future__ import annotations
 
 import html
 import logging
 import os
 from typing import Any
+
+from sqlalchemy.orm.attributes import flag_modified
 
 from app.agent import tools as agent_tools
 from app.services import (
@@ -64,6 +66,47 @@ def _chat_section(chat: dict[str, Any]) -> str:
             ]
         )
     return "\n".join(lines)
+
+
+def _communication_intelligence_metadata(draft: dict[str, Any]) -> dict[str, Any]:
+    original = str(draft.get("ai_original_body") or draft.get("body") or "").strip()
+    reviewed = str(draft.get("reviewed_body") or draft.get("body") or "").strip()
+    return {
+        "ai_original_body": original[:15000],
+        "reviewed_body": reviewed[:15000],
+        "manager_final_body": None,
+        "review_approved": bool(draft.get("review_approved")),
+        "review_issues": [
+            str(value)[:1000]
+            for value in (draft.get("review_issues") or [])
+            if str(value).strip()
+        ][:20],
+        "knowledge_version": draft.get("knowledge_version"),
+        "writer_model": draft.get("writer_model"),
+        "reviewer_model": draft.get("reviewer_model"),
+        "generation_context": draft.get("generation_context") or {},
+        "manager_edited": False,
+        "sent_as_approved_example": False,
+    }
+
+
+async def _save_intelligence_metadata(
+    db: Any,
+    record: Any,
+    intelligence: dict[str, Any],
+) -> None:
+    meta = dict(getattr(record, "metadata_json", None) or {})
+    meta["communication_intelligence"] = intelligence
+    record.metadata_json = meta
+    try:
+        flag_modified(record, "metadata_json")
+    except Exception:
+        pass
+    await db.commit()
+    try:
+        await db.refresh(record)
+    except Exception:
+        pass
 
 
 def _format_onboarding_report(report: dict[str, Any]) -> str:
@@ -278,6 +321,115 @@ def install_runtime_extensions() -> None:
         return (base + "\n\n" + section)[:4000]
 
     agent_tools.format_lead_summary = format_lead_summary_with_chat
+
+    original_lead_summary_for_ai = agent_tools.lead_summary_for_ai
+
+    def lead_summary_for_ai_with_conversation(lead: dict[str, Any]) -> dict[str, Any]:
+        summary = original_lead_summary_for_ai(lead)
+        summary["notes"] = list(lead.get("notes") or [])[:20]
+        summary["chat_context"] = dict(lead.get("chat_context") or {})
+        if lead.get("conversation"):
+            summary["conversation"] = list(lead.get("conversation") or [])[-30:]
+        return summary
+
+    agent_tools.lead_summary_for_ai = lead_summary_for_ai_with_conversation
+
+    original_create_draft = client_message_service.create_client_message_draft
+
+    async def create_draft_with_intelligence(*args: Any, **kwargs: Any) -> Any:
+        record = await original_create_draft(*args, **kwargs)
+        db = kwargs.get("db") or (args[0] if args else None)
+        draft = dict(kwargs.get("draft") or {})
+        if db is not None and draft:
+            try:
+                await _save_intelligence_metadata(
+                    db, record, _communication_intelligence_metadata(draft)
+                )
+            except Exception as exc:
+                logger.warning("Could not persist draft intelligence metadata: %s", exc)
+        return record
+
+    client_message_service.create_client_message_draft = create_draft_with_intelligence
+
+    original_update_body = client_message_service.update_body
+
+    async def update_body_with_final_version(*args: Any, **kwargs: Any) -> Any:
+        record = await original_update_body(*args, **kwargs)
+        db = kwargs.get("db") or (args[0] if args else None)
+        if db is not None:
+            try:
+                meta = dict(getattr(record, "metadata_json", None) or {})
+                intelligence = dict(meta.get("communication_intelligence") or {})
+                intelligence["manager_final_body"] = str(record.body or "")[:15000]
+                intelligence["manager_edited"] = True
+                await _save_intelligence_metadata(db, record, intelligence)
+            except Exception as exc:
+                logger.warning("Could not persist manager draft edit: %s", exc)
+        return record
+
+    client_message_service.update_body = update_body_with_final_version
+
+    original_update_language = client_message_service.update_language_and_body
+
+    async def update_language_with_intelligence(*args: Any, **kwargs: Any) -> Any:
+        record = await original_update_language(*args, **kwargs)
+        db = kwargs.get("db") or (args[0] if args else None)
+        generated = dict(kwargs.get("generated") or {})
+        if db is not None and generated:
+            try:
+                intelligence = _communication_intelligence_metadata(generated)
+                intelligence["language_regenerated"] = True
+                await _save_intelligence_metadata(db, record, intelligence)
+            except Exception as exc:
+                logger.warning("Could not persist regenerated draft metadata: %s", exc)
+        return record
+
+    client_message_service.update_language_and_body = update_language_with_intelligence
+
+    original_confirm_sent = client_message_service.confirm_sent
+
+    async def confirm_sent_with_approved_example(*args: Any, **kwargs: Any) -> Any:
+        record = await original_confirm_sent(*args, **kwargs)
+        db = kwargs.get("db") or (args[0] if args else None)
+        if db is not None and getattr(record, "status", None) == "sent":
+            try:
+                meta = dict(getattr(record, "metadata_json", None) or {})
+                intelligence = dict(meta.get("communication_intelligence") or {})
+                intelligence["manager_final_body"] = str(record.body or "")[:15000]
+                intelligence["sent_as_approved_example"] = True
+                intelligence["manager_edited"] = bool(
+                    intelligence.get("manager_edited")
+                    or intelligence.get("ai_original_body") != str(record.body or "")
+                )
+                await _save_intelligence_metadata(db, record, intelligence)
+            except Exception as exc:
+                logger.warning("Could not mark sent draft as approved example: %s", exc)
+        return record
+
+    client_message_service.confirm_sent = confirm_sent_with_approved_example
+
+    original_format_client_draft = client_message_service.format_client_message_draft
+
+    def format_client_draft_with_review(record: Any) -> str:
+        base = original_format_client_draft(record)
+        meta = dict(getattr(record, "metadata_json", None) or {})
+        intelligence = dict(meta.get("communication_intelligence") or {})
+        issues = list(intelligence.get("review_issues") or [])
+        if not intelligence:
+            return base
+        lines = ["", "<b>AI-проверка</b>"]
+        if intelligence.get("review_approved") and not issues:
+            lines.append("✅ Reviewer не обнаружил критических проблем.")
+        elif issues:
+            lines.append("⚠️ Проверьте перед отправкой:")
+            lines.extend(f"• {_esc(issue)}" for issue in issues[:8])
+        version = intelligence.get("knowledge_version")
+        if version:
+            lines.append(f"<i>База правил: {_esc(version)}</i>")
+        return (base + "\n" + "\n".join(lines))[:4000]
+
+    client_message_service.format_client_message_draft = format_client_draft_with_review
+
     telegram_service.format_status_sync_report = _format_onboarding_report
     telegram_service.send_status_sync_report = _send_onboarding_report
     telegram_service.send_status_sync_confirmation = _send_onboarding_confirmation

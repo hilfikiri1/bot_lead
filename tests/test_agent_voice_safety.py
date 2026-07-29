@@ -22,7 +22,8 @@ def test_migration_continues_from_current_head():
         encoding="utf-8"
     )
     assert 'revision = "007_unified_agent_v3"' in source
-    assert 'down_revision = "006_calendar_events"' in source
+    assert 'down_revision = "007_operational_agent_v2"' in source
+    assert 'op.create_table(\n        "integration_events"' not in source
 
 
 def test_voice_command_preserves_selected_kommo_lead_context():

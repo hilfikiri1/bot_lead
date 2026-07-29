@@ -637,6 +637,88 @@ async def get_all_open_leads(
     }
 
 
+async def get_all_leads_for_status_sync(
+    max_pages: int | None = None,
+    *,
+    pipeline_id: int | None = None,
+) -> dict[str, Any]:
+    """Return open and closed Kommo leads for spreadsheet status comparison."""
+    page_cap = max_pages or settings.kommo_open_leads_max_pages
+    page_cap = max(1, min(page_cap, 100))
+    selected_pipeline = pipeline_id
+    if selected_pipeline is None:
+        selected_pipeline = (
+            settings.lead_status_sync_pipeline_id or configured_menu_pipeline_id()
+        )
+
+    leads: list[dict[str, Any]] = []
+    scanned = 0
+    truncated = False
+    for page in range(1, page_cap + 1):
+        params: dict[str, Any] = {
+            "page": page,
+            "limit": PAGE_SIZE,
+            "order[updated_at]": "desc",
+        }
+        if selected_pipeline is not None:
+            params["filter[pipeline_id]"] = selected_pipeline
+
+        data = await _request("GET", "/api/v4/leads", params=params)
+        if data is None:
+            break
+        page_leads = (data.get("_embedded") or {}).get("leads") or []
+        scanned += len(page_leads)
+        for lead in page_leads:
+            if not _lead_belongs_to_pipeline(lead, selected_pipeline):
+                continue
+            leads.append(lead)
+
+        if len(page_leads) < PAGE_SIZE:
+            break
+        if page == page_cap:
+            truncated = True
+
+    pipeline_names, status_names = await get_pipeline_index()
+    normalized: list[dict[str, Any]] = []
+    for lead in leads:
+        current_pipeline_id = lead.get("pipeline_id")
+        status_id = lead.get("status_id")
+        normalized.append(
+            {
+                "id": lead.get("id"),
+                "name": lead.get("name") or "Без названия",
+                "pipeline_id": current_pipeline_id,
+                "pipeline_name": pipeline_names.get(
+                    current_pipeline_id, f"Воронка {current_pipeline_id}"
+                ),
+                "status_id": status_id,
+                "status_name": status_names.get(
+                    (current_pipeline_id, status_id), f"Этап {status_id}"
+                ),
+                "updated_at": lead.get("updated_at"),
+                "created_at": lead.get("created_at"),
+                "closed_at": lead.get("closed_at"),
+                "url": f"{_base_url()}/leads/detail/{lead.get('id')}",
+            }
+        )
+
+    normalized.sort(key=lambda item: item.get("updated_at") or 0, reverse=True)
+    pipeline_label = (
+        pipeline_names.get(selected_pipeline, f"Воронка {selected_pipeline}")
+        if selected_pipeline is not None
+        else None
+    )
+    return {
+        "leads": normalized,
+        "count": len(normalized),
+        "scanned_count": scanned,
+        "truncated": truncated,
+        "page_cap": page_cap,
+        "pipeline_id": selected_pipeline,
+        "pipeline_name": pipeline_label,
+    }
+
+
 def _normalize_phone(value: str | None) -> str:
     return re.sub(r"\D", "", value or "")
 

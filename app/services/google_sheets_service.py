@@ -1,4 +1,9 @@
-"""Read-only Google Sheets access for the internal lead registry."""
+"""Google Sheets access for the internal lead registry.
+
+Reads are always available when the integration is configured. Writes are
+guarded by a separate environment flag and are only called after an explicit
+Telegram confirmation.
+"""
 
 from __future__ import annotations
 
@@ -15,7 +20,8 @@ from app.config import get_settings
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
-SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets.readonly"
+SHEETS_READ_SCOPE = "https://www.googleapis.com/auth/spreadsheets.readonly"
+SHEETS_WRITE_SCOPE = "https://www.googleapis.com/auth/spreadsheets"
 _cache_rows: list["SpreadsheetRow"] | None = None
 _cache_loaded_at: float = 0.0
 
@@ -35,6 +41,7 @@ class SpreadsheetRow:
     company: str | None
     product: str | None
     lead_number: str | None
+    lead_status: str | None = None
 
 
 def _has_service_account_credentials() -> bool:
@@ -51,6 +58,10 @@ def is_configured() -> bool:
         and settings.google_sheets_worksheet_name.strip()
         and _has_service_account_credentials()
     )
+
+
+def is_write_enabled() -> bool:
+    return is_configured() and settings.google_sheets_write_enabled
 
 
 def column_letter_to_index(column: str) -> int:
@@ -99,13 +110,13 @@ def service_account_email() -> str | None:
         return None
 
 
-def _sheets_service():
+def _sheets_service(*, readonly: bool = True):
     from google.oauth2 import service_account
     from googleapiclient.discovery import build
 
     credentials = service_account.Credentials.from_service_account_info(
         _load_service_account_info(),
-        scopes=[SHEETS_SCOPE],
+        scopes=[SHEETS_READ_SCOPE if readonly else SHEETS_WRITE_SCOPE],
     )
     return build("sheets", "v4", credentials=credentials, cache_discovery=False)
 
@@ -142,6 +153,9 @@ def _parse_rows(values: list[list[Any]]) -> list[SpreadsheetRow]:
                 company=_cell_value(raw_row, settings.google_sheets_company_column),
                 product=product,
                 lead_number=lead_number,
+                lead_status=_cell_value(
+                    raw_row, settings.google_sheets_status_column
+                ),
             )
         )
     return parsed
@@ -262,3 +276,148 @@ def get_row_by_number(row_number: int) -> SpreadsheetRow | None:
         if row.row_number == row_number:
             return row
     return None
+
+
+def _normalized_cell_text(value: Any) -> str:
+    return " ".join(str(value or "").split()).casefold()
+
+
+def _quoted_sheet_name(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def apply_status_updates(updates: list[dict[str, Any]]) -> dict[str, Any]:
+    """Apply confirmed status changes after checking every source row again.
+
+    Each update must contain ``lead_number``, ``row_number``, ``old_status`` and
+    ``new_status``. A row is skipped if its lead number, position or current
+    status changed after the preview was generated.
+    """
+    if not settings.google_sheets_write_enabled:
+        raise GoogleSheetsError(
+            "Запись в Google Sheets отключена. Для разрешения подтверждаемых "
+            "обновлений установите GOOGLE_SHEETS_WRITE_ENABLED=true в Railway."
+        )
+    if not is_configured():
+        raise GoogleSheetsError("Google Sheets не настроен.")
+    if not updates:
+        return {"updated_count": 0, "updated": [], "skipped": []}
+    if len(updates) > 500:
+        raise GoogleSheetsError("Слишком много изменений за один запуск.")
+
+    # Validate the configured column before constructing any API request.
+    column_letter_to_index(settings.google_sheets_status_column)
+    current_rows = get_rows(force_refresh=True)
+    rows_by_number: dict[str, list[SpreadsheetRow]] = {}
+    for row in current_rows:
+        lead_number = str(row.lead_number or "").strip()
+        if lead_number:
+            rows_by_number.setdefault(lead_number, []).append(row)
+
+    safe_updates: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    for item in updates:
+        lead_number = str(item.get("lead_number") or "").strip()
+        new_status = " ".join(str(item.get("new_status") or "").split())
+        candidates = rows_by_number.get(lead_number) or []
+        if len(candidates) != 1:
+            skipped.append(
+                {
+                    "lead_number": lead_number,
+                    "reason": "row_not_unique",
+                }
+            )
+            continue
+
+        row = candidates[0]
+        expected_row = int(item.get("row_number") or 0)
+        if row.row_number != expected_row:
+            skipped.append(
+                {
+                    "lead_number": lead_number,
+                    "reason": "row_moved",
+                }
+            )
+            continue
+        if _normalized_cell_text(row.lead_status) != _normalized_cell_text(
+            item.get("old_status")
+        ):
+            skipped.append(
+                {
+                    "lead_number": lead_number,
+                    "reason": "status_changed_manually",
+                }
+            )
+            continue
+        if not new_status:
+            skipped.append(
+                {
+                    "lead_number": lead_number,
+                    "reason": "empty_new_status",
+                }
+            )
+            continue
+        if _normalized_cell_text(row.lead_status) == _normalized_cell_text(new_status):
+            skipped.append(
+                {
+                    "lead_number": lead_number,
+                    "reason": "already_current",
+                }
+            )
+            continue
+
+        safe_updates.append(
+            {
+                **item,
+                "row_number": row.row_number,
+                "lead_number": lead_number,
+                "new_status": new_status,
+            }
+        )
+
+    if not safe_updates:
+        return {"updated_count": 0, "updated": [], "skipped": skipped}
+
+    worksheet = settings.google_sheets_worksheet_name.strip()
+    sheet_ref = _quoted_sheet_name(worksheet)
+    status_column = settings.google_sheets_status_column.strip().upper()
+    data = [
+        {
+            "range": f"{sheet_ref}!{status_column}{item['row_number']}",
+            "majorDimension": "ROWS",
+            "values": [[item["new_status"]]],
+        }
+        for item in safe_updates
+    ]
+
+    try:
+        service = _sheets_service(readonly=False)
+        (
+            service.spreadsheets()
+            .values()
+            .batchUpdate(
+                spreadsheetId=settings.google_sheets_spreadsheet_id.strip(),
+                body={"valueInputOption": "USER_ENTERED", "data": data},
+            )
+            .execute()
+        )
+    except Exception as exc:
+        message = str(exc)
+        if "403" in message or "permission" in message.lower():
+            email = service_account_email()
+            share_hint = (
+                f"Дайте аккаунту {email} право Editor."
+                if email
+                else "Дайте service account право Editor."
+            )
+            raise GoogleSheetsError(
+                "Google Sheets отклонил запись. " + share_hint
+            ) from exc
+        raise GoogleSheetsError("Не удалось обновить статусы в Google Sheets.") from exc
+
+    clear_cache()
+    return {
+        "updated_count": len(safe_updates),
+        "updated": safe_updates,
+        "skipped": skipped,
+    }

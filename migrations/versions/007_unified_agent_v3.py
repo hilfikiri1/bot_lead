@@ -1,7 +1,7 @@
 """Add persistent memory, pending confirmations and integration audit for AI agent.
 
 Revision ID: 007_unified_agent_v3
-Revises: 006_calendar_events
+Revises: 007_operational_agent_v2
 Create Date: 2026-07-29
 """
 
@@ -9,7 +9,7 @@ from alembic import op
 import sqlalchemy as sa
 
 revision = "007_unified_agent_v3"
-down_revision = "006_calendar_events"
+down_revision = "007_operational_agent_v2"
 branch_labels = None
 depends_on = None
 
@@ -71,29 +71,7 @@ def upgrade() -> None:
     for column in ("telegram_user_id", "chat_id", "action_type", "status", "idempotency_key", "created_at"):
         op.create_index(f"ix_pending_agent_actions_{column}", "pending_agent_actions", [column], unique=(column == "idempotency_key"))
 
-    op.create_table(
-        "integration_events",
-        sa.Column("id", sa.BigInteger(), primary_key=True, autoincrement=True),
-        sa.Column("service", sa.String(length=50), nullable=False),
-        sa.Column("operation", sa.String(length=100), nullable=False),
-        sa.Column("status", sa.String(length=20), nullable=False),
-        sa.Column("external_id", sa.String(length=255), nullable=True),
-        sa.Column("telegram_user_id", sa.BigInteger(), nullable=True),
-        sa.Column("duration_ms", sa.Integer(), nullable=True),
-        sa.Column("payload", sa.JSON(), nullable=True),
-        sa.Column("result", sa.JSON(), nullable=True),
-        sa.Column("error_message", sa.Text(), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
-    )
-    for column in ("service", "operation", "status", "external_id", "telegram_user_id", "created_at"):
-        op.create_index(f"ix_integration_events_{column}", "integration_events", [column])
-
-
 def downgrade() -> None:
-    for column in ("created_at", "telegram_user_id", "external_id", "status", "operation", "service"):
-        op.drop_index(f"ix_integration_events_{column}", table_name="integration_events")
-    op.drop_table("integration_events")
-
     for column in ("created_at", "idempotency_key", "status", "action_type", "chat_id", "telegram_user_id"):
         op.drop_index(f"ix_pending_agent_actions_{column}", table_name="pending_agent_actions")
     op.drop_table("pending_agent_actions")

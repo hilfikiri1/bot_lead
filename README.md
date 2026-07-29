@@ -271,3 +271,14 @@ Telegram стал единым AI-интерфейсом для текста и 
 - [`AGENT_V3.md`](AGENT_V3.md) — архитектура и возможности;
 - [`INSTALL_AGENT_V3.md`](INSTALL_AGENT_V3.md) — установка и Git workflow;
 - [`RAILWAY_AGENT_V3.md`](RAILWAY_AGENT_V3.md) — переменные и deployment.
+
+## Kommo ↔ Google Sheets status sync
+
+The existing Telegram bot can compare Kommo stages with the status column in
+the lead spreadsheet, report mismatches, duplicates, and missing records, and
+optionally update only the spreadsheet after a two-step Telegram confirmation.
+Kommo is never modified by this feature, and spreadsheet writes are disabled by
+default.
+
+See [STATUS_SYNC_SETUP.md](STATUS_SYNC_SETUP.md) for Railway variables and the
+safe rollout checklist.

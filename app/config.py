@@ -36,6 +36,7 @@ class Settings(BaseSettings):
         "kommo_menu_pipeline_id",
         "kommo_unreviewed_pipeline_id",
         "kommo_unreviewed_status_id",
+        "lead_status_sync_pipeline_id",
         mode="before",
     )
     @classmethod
@@ -172,8 +173,20 @@ class Settings(BaseSettings):
     google_sheets_email_column: str = ""
     google_sheets_client_name_column: str = ""
     google_sheets_company_column: str = ""
+    google_sheets_status_column: str = "W"
     google_sheets_header_row: int = 1
     google_sheets_cache_ttl_seconds: int = 300
+    # Spreadsheet writes stay disabled until the manager explicitly enables them
+    # in Railway and confirms a concrete update from Telegram.
+    google_sheets_write_enabled: bool = False
+
+    # Periodic Kommo -> Google Sheets status reconciliation.
+    # The scheduler is report-only; it never applies updates automatically.
+    lead_status_sync_enabled: bool = False
+    lead_status_sync_pipeline_id: Optional[int] = None
+    lead_status_sync_interval_minutes: int = 180
+    lead_status_sync_initial_delay_seconds: int = 90
+    lead_status_sync_notify_only_on_differences: bool = True
 
     # Notion workspace integration
     notion_api_token: str = ""
@@ -183,6 +196,9 @@ class Settings(BaseSettings):
     notion_calls_database_id: str = ""
     notion_tasks_database_id: str = ""
     voice_command_mode: bool = True
+    # Kept for compatibility with the legacy command router still used by
+    # voice-note and fallback flows in Agent v3.
+    natural_command_router_enabled: bool = True
     morning_digest_enabled: bool = True
     morning_digest_hour: int = 8
 

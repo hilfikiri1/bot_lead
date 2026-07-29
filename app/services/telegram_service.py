@@ -598,6 +598,7 @@ async def set_bot_commands() -> dict:
         {"command": "jobs", "description": "Статус обработки аудио"},
         {"command": "notion_test", "description": "Проверить рабочие базы Notion"},
         {"command": "kommo_test", "description": "Проверить Kommo"},
+        {"command": "status_sync", "description": "Сверить статусы Kommo и таблицы"},
         {"command": "calendar_test", "description": "Проверить Google Calendar"},
     ]
     async with httpx.AsyncClient(timeout=15) as client:
@@ -737,6 +738,12 @@ async def send_main_menu(chat_id: int) -> dict:
                 {
                     "text": "📥 Неразобранные сделки",
                     "callback_data": "menu:unrev:1",
+                },
+            ],
+            [
+                {
+                    "text": "🔄 Сверка статусов",
+                    "callback_data": "sync:run",
                 },
             ],
         ]
@@ -1554,6 +1561,189 @@ async def send_unreviewed_success(
                     },
                     {"text": "🏠 Главное меню", "callback_data": "menu:home"},
                 ],
+            ]
+        },
+    )
+
+
+def format_status_sync_report(
+    report: dict[str, Any],
+    *,
+    update_preview_limit: int = 12,
+) -> str:
+    updates = report.get("updates") or []
+    table_only = report.get("table_only") or []
+    kommo_only = report.get("kommo_only") or []
+    table_duplicates = report.get("table_duplicates") or []
+    kommo_duplicates = report.get("kommo_duplicates") or []
+    lines = [
+        "🔄 <b>СВЕРКА СТАТУСОВ</b>",
+        "",
+        f"Строк в таблице: <b>{_esc(report.get('spreadsheet_rows_count'))}</b>",
+        f"Сделок Kommo: <b>{_esc(report.get('kommo_leads_count'))}</b>",
+        f"Статус совпадает: <b>{_esc(report.get('matching_count'))}</b>",
+        f"Нужно обновить в таблице: <b>{len(updates)}</b>",
+        f"Только в таблице: <b>{len(table_only)}</b>",
+        f"Только в Kommo: <b>{len(kommo_only)}</b>",
+        f"Дубли ID: <b>{len(table_duplicates) + len(kommo_duplicates)}</b>",
+    ]
+    pipeline_name = report.get("pipeline_name")
+    if pipeline_name:
+        lines.insert(2, f"Воронка: <b>{_esc(pipeline_name)}</b>")
+    if updates:
+        lines.extend(["", "<b>Предлагаемые изменения:</b>"])
+        for item in updates[:update_preview_limit]:
+            old_status = item.get("old_status") or "пусто"
+            lines.append(
+                f"• №{_esc(item.get('lead_number'))}: "
+                f"{_esc(old_status)} → <b>{_esc(item.get('new_status'))}</b>"
+            )
+        if len(updates) > update_preview_limit:
+            lines.append(f"<i>…и ещё {len(updates) - update_preview_limit}</i>")
+    if table_only:
+        sample = ", ".join(
+            f"№{_esc(item.get('lead_number'))}" for item in table_only[:8]
+        )
+        suffix = "…" if len(table_only) > 8 else ""
+        lines.extend(["", f"⚠️ Не найдены в Kommo: {sample}{suffix}"])
+    if kommo_only:
+        sample = ", ".join(
+            f"№{_esc(item.get('lead_number'))}" for item in kommo_only[:8]
+        )
+        suffix = "…" if len(kommo_only) > 8 else ""
+        lines.extend(["", f"⚠️ Нет строки в таблице: {sample}{suffix}"])
+    if table_duplicates or kommo_duplicates:
+        duplicate_ids = [
+            str(item.get("lead_number"))
+            for item in (table_duplicates + kommo_duplicates)[:8]
+        ]
+        lines.extend(["", f"⚠️ Дубли: {_esc(', '.join(duplicate_ids))}"])
+    if report.get("unnumbered_kommo_count"):
+        lines.extend(
+            [
+                "",
+                "ℹ️ Сделки Kommo без внутреннего номера: "
+                f"<b>{_esc(report.get('unnumbered_kommo_count'))}</b>",
+            ]
+        )
+    if report.get("kommo_truncated"):
+        lines.extend(
+            [
+                "",
+                "⚠️ Достигнут лимит страниц Kommo; отчёт может быть неполным.",
+            ]
+        )
+    if not report.get("has_differences") and not updates:
+        lines.extend(["", "✅ Расхождений по пронумерованным лидам нет."])
+    return "\n".join(lines)
+
+
+async def send_status_sync_report(
+    chat_id: int,
+    report: dict[str, Any],
+) -> dict:
+    rows: list[list[dict[str, Any]]] = []
+    if report.get("updates_count"):
+        if settings.google_sheets_write_enabled:
+            rows.append(
+                [
+                    {
+                        "text": f"✅ Подготовить обновление ({report['updates_count']})",
+                        "callback_data": "sync:prepare",
+                    }
+                ]
+            )
+        else:
+            rows.append(
+                [
+                    {
+                        "text": "🔒 Запись в таблицу выключена",
+                        "callback_data": "sync:write_help",
+                    }
+                ]
+            )
+    rows.extend(
+        [
+            [{"text": "🔄 Проверить заново", "callback_data": "sync:run"}],
+            [{"text": "🏠 Главное меню", "callback_data": "menu:home"}],
+        ]
+    )
+    return await send_message(
+        chat_id,
+        format_status_sync_report(report),
+        reply_markup={"inline_keyboard": rows},
+    )
+
+
+async def send_status_sync_confirmation(
+    chat_id: int,
+    report: dict[str, Any],
+) -> dict:
+    count = int(report.get("updates_count") or 0)
+    return await send_message(
+        chat_id,
+        (
+            "⚠️ <b>ПОДТВЕРЖДЕНИЕ ОБНОВЛЕНИЯ</b>\n\n"
+            f"Будет изменена только колонка "
+            f"<code>{_esc(settings.google_sheets_status_column)}</code> "
+            f"в <b>{count}</b> строках Google Sheets.\n\n"
+            "Kommo изменяться не будет. Перед записью бот ещё раз проверит "
+            "Kommo, номера строк и старые значения статусов."
+        ),
+        reply_markup={
+            "inline_keyboard": [
+                [
+                    {
+                        "text": f"✅ Да, обновить {count}",
+                        "callback_data": "sync:confirm",
+                    }
+                ],
+                [{"text": "❌ Отмена", "callback_data": "sync:cancel"}],
+            ]
+        },
+    )
+
+
+async def send_status_sync_result(
+    chat_id: int,
+    result: dict[str, Any],
+) -> dict:
+    updated_count = int(result.get("updated_count") or 0)
+    skipped = result.get("skipped") or []
+    return await send_message(
+        chat_id,
+        (
+            "✅ <b>СВЕРКА ЗАВЕРШЕНА</b>\n\n"
+            f"Обновлено строк: <b>{updated_count}</b>\n"
+            f"Пропущено после повторной проверки: <b>{len(skipped)}</b>\n\n"
+            "В Kommo изменений не вносилось."
+        ),
+        reply_markup={
+            "inline_keyboard": [
+                [{"text": "🔄 Проверить ещё раз", "callback_data": "sync:run"}],
+                [{"text": "🏠 Главное меню", "callback_data": "menu:home"}],
+            ]
+        },
+    )
+
+
+async def send_status_sync_notification(
+    chat_id: int,
+    report: dict[str, Any],
+) -> dict:
+    return await send_message(
+        chat_id,
+        (
+            "🔔 <b>Обнаружены расхождения статусов</b>\n\n"
+            f"Предлагаемых обновлений: <b>{_esc(report.get('updates_count'))}</b>\n"
+            f"Только в таблице: <b>{len(report.get('table_only') or [])}</b>\n"
+            f"Только в Kommo: <b>{len(report.get('kommo_only') or [])}</b>\n"
+            f"Дубли ID: <b>{len(report.get('table_duplicates') or []) + len(report.get('kommo_duplicates') or [])}</b>\n\n"
+            "Автоматически ничего не изменено."
+        ),
+        reply_markup={
+            "inline_keyboard": [
+                [{"text": "🔄 Открыть сверку", "callback_data": "sync:run"}]
             ]
         },
     )

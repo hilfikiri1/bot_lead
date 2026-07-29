@@ -49,7 +49,7 @@ def test_parse_internal_number_accepts_dash_and_historical_space_format():
 
 
 @pytest.mark.asyncio
-async def test_report_assigns_next_number_and_preserves_existing_x_and_w():
+async def test_report_assigns_row_number_and_preserves_existing_x_and_w():
     rows = [
         _row(
             "165",
@@ -128,13 +128,13 @@ async def test_report_assigns_next_number_and_preserves_existing_x_and_w():
     new_row = report["sheet_updates"][0]
     assert new_row["row_number"] == 166
     assert new_row["old_lead_number"] == ""
-    assert new_row["new_lead_number"] == "171"
+    assert new_row["new_lead_number"] == "166"
     assert new_row["marketing_status"] == "SQL"
     assert new_row["old_comment"] == "Существующий комментарий X"
     assert new_row["new_comment"] == "Существующий комментарий X"
     assert "new_status" not in new_row
-    assert report["kommo_renames"][0]["new_name"] == "171 - Чай"
-    assert report["onboarding_actions"][0]["lead_number"] == "171"
+    assert report["kommo_renames"][0]["new_name"] == "166 - Чай"
+    assert report["onboarding_actions"][0]["lead_number"] == "166"
 
 
 @pytest.mark.asyncio

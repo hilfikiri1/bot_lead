@@ -93,6 +93,7 @@ async def send_evening_reflection(
         )
         if entry is None:
             return
+        session = None
         try:
             session = await memory.get_or_create_session(
                 db, telegram_user_id=user_id
@@ -114,7 +115,15 @@ async def send_evening_reflection(
                 db, entry=entry
             )
         except Exception:
-            await db.rollback()
+            # A failed Telegram delivery must not leave a hidden reflection state
+            # that could capture the manager's next unrelated work message.
+            if session is not None:
+                try:
+                    await kaizen_journal_service.clear_pending_reflection(
+                        db, session=session
+                    )
+                except Exception:
+                    await db.rollback()
             try:
                 await kaizen_journal_service.release_evening_invitation_claim(
                     db, entry=entry
@@ -146,6 +155,7 @@ async def send_due_reflection_reminders() -> None:
     async with AsyncSessionLocal() as db:
         entries = await kaizen_journal_service.claim_due_reminders(db)
         for entry in entries:
+            session = None
             try:
                 session = await memory.get_or_create_session(
                     db, telegram_user_id=int(entry.telegram_user_id)
@@ -171,8 +181,14 @@ async def send_due_reflection_reminders() -> None:
                     entry.telegram_user_id,
                     exc.__class__.__name__,
                 )
+                if session is not None:
+                    try:
+                        await kaizen_journal_service.clear_pending_reflection(
+                            db, session=session
+                        )
+                    except Exception:
+                        await db.rollback()
                 try:
-                    await db.rollback()
                     await _rearm_failed_reminder(db, entry)
                 except Exception as retry_exc:
                     await db.rollback()
@@ -183,37 +199,147 @@ async def send_due_reflection_reminders() -> None:
                     )
 
 
+async def _claim_weekly_delivery(db: AsyncSession, user_id: int):
+    """Claim an automatic weekly delivery while leaving manual /week untouched."""
+    start, end = kaizen_journal_service.week_period()
+    entry = await kaizen_journal_service.get_entry(
+        db,
+        telegram_user_id=user_id,
+        entry_type=kaizen_journal_service.WEEKLY_ENTRY_TYPE,
+        period_start=start,
+        period_end=end,
+    )
+    if entry is None:
+        daily = await kaizen_journal_service.daily_entries_for_week(
+            db,
+            telegram_user_id=user_id,
+            start=start,
+            end=end,
+        )
+        minimum = max(1, int(settings.agent_weekly_review_min_daily_entries or 2))
+        if len(daily) < minimum:
+            return None
+        entry = await kaizen_journal_service.get_or_create_entry(
+            db,
+            telegram_user_id=user_id,
+            entry_type=kaizen_journal_service.WEEKLY_ENTRY_TYPE,
+            period_start=start,
+            period_end=end,
+            source="scheduled",
+        )
+
+    entry = await kaizen_journal_service.get_entry(
+        db,
+        telegram_user_id=user_id,
+        entry_type=kaizen_journal_service.WEEKLY_ENTRY_TYPE,
+        period_start=start,
+        period_end=end,
+        lock=True,
+    )
+    if entry is None:
+        return None
+    meta = dict(entry.analysis or {})
+    scheduler = dict(meta.get("scheduler") or {})
+    if scheduler.get("weekly_sent_at"):
+        return None
+    pending = bool(scheduler.get("automatic_delivery_pending"))
+    if not pending:
+        # Existing completed entries without this marker were requested manually.
+        if entry.status == "completed":
+            return None
+        scheduler["automatic_delivery_pending"] = True
+
+    claimed = scheduler.get("weekly_claimed_at")
+    if claimed:
+        try:
+            claimed_at = datetime.fromisoformat(str(claimed).replace("Z", "+00:00"))
+            if claimed_at.astimezone(timezone.utc) > datetime.now(timezone.utc) - timedelta(minutes=10):
+                return None
+        except (TypeError, ValueError):
+            pass
+    scheduler["weekly_claimed_at"] = datetime.now(timezone.utc).isoformat()
+    meta["scheduler"] = scheduler
+    entry.analysis = meta
+    flag_modified(entry, "analysis")
+    await db.commit()
+    return entry
+
+
+async def _set_weekly_delivery_pending(db: AsyncSession, entry) -> None:
+    meta = dict(entry.analysis or {})
+    scheduler = dict(meta.get("scheduler") or {})
+    scheduler["automatic_delivery_pending"] = True
+    scheduler.setdefault("weekly_claimed_at", datetime.now(timezone.utc).isoformat())
+    meta["scheduler"] = scheduler
+    entry.analysis = meta
+    flag_modified(entry, "analysis")
+    await db.commit()
+
+
+async def _mark_weekly_delivery_sent(db: AsyncSession, entry) -> None:
+    meta = dict(entry.analysis or {})
+    scheduler = dict(meta.get("scheduler") or {})
+    scheduler["automatic_delivery_pending"] = False
+    scheduler["weekly_sent_at"] = datetime.now(timezone.utc).isoformat()
+    scheduler.pop("weekly_claimed_at", None)
+    meta["scheduler"] = scheduler
+    entry.analysis = meta
+    flag_modified(entry, "analysis")
+    await db.commit()
+
+
+async def _release_weekly_delivery_claim(db: AsyncSession, entry) -> None:
+    meta = dict(entry.analysis or {})
+    scheduler = dict(meta.get("scheduler") or {})
+    scheduler["automatic_delivery_pending"] = True
+    scheduler.pop("weekly_claimed_at", None)
+    meta["scheduler"] = scheduler
+    entry.analysis = meta
+    flag_modified(entry, "analysis")
+    await db.commit()
+
+
 async def send_weekly_review(*, user_id: int, chat_id: int | None = None) -> None:
     target_chat = chat_id or user_id
     async with AsyncSessionLocal() as db:
         identity_service.set_current_user(
             await identity_service.get_user_by_telegram_id(db, user_id)
         )
-        period = await kaizen_journal_service.claim_weekly_review(
-            db, telegram_user_id=user_id
-        )
-        if period is None:
+        claimed = await _claim_weekly_delivery(db, user_id)
+        if claimed is None:
             return
-        entry, analysis_ok = await kaizen_journal_service.build_weekly_review(
-            db,
-            telegram_user_id=user_id,
-            week_start=period[0],
-            force_rebuild=True,
-        )
-        reply = AgentReply(
-            kaizen_journal_service.format_weekly_review(
-                entry, analysis_ok=analysis_ok
-            ),
-            reply_markup=kaizen_journal_service.weekly_review_markup(entry),
-            intent="weekly_review",
-            metadata={"entry_id": int(entry.id), "scheduled": True},
-        )
-        guarded = await guard_weekly_reply(reply)
-        await send_message(
-            target_chat,
-            guarded.text,
-            reply_markup=guarded.reply_markup,
-        )
+        entry = claimed
+        try:
+            entry, analysis_ok = await kaizen_journal_service.build_weekly_review(
+                db,
+                telegram_user_id=user_id,
+                week_start=claimed.period_start,
+                force_rebuild=False,
+            )
+            # build_weekly_review replaces the analysis object, so restore delivery
+            # metadata before the external Telegram call.
+            await _set_weekly_delivery_pending(db, entry)
+            reply = AgentReply(
+                kaizen_journal_service.format_weekly_review(
+                    entry, analysis_ok=analysis_ok
+                ),
+                reply_markup=kaizen_journal_service.weekly_review_markup(entry),
+                intent="weekly_review",
+                metadata={"entry_id": int(entry.id), "scheduled": True},
+            )
+            guarded = await guard_weekly_reply(reply)
+            await send_message(
+                target_chat,
+                guarded.text,
+                reply_markup=guarded.reply_markup,
+            )
+            await _mark_weekly_delivery_sent(db, entry)
+        except Exception:
+            try:
+                await _release_weekly_delivery_claim(db, entry)
+            except Exception:
+                await db.rollback()
+            raise
 
 
 async def periodic_digest_loop() -> None:

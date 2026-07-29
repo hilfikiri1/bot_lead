@@ -11,6 +11,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.admin import router as admin_router
+from app.api.diagnostics import router as diagnostics_router
 from app.api.telegram import router as telegram_router
 from app.api.whatsapp import router as whatsapp_router
 from app.config import get_settings
@@ -20,12 +21,14 @@ from app.services.agent_scheduled_digest_service import start_periodic_digest_lo
 from app.services.communication_timeline_runtime import (
     install_communication_timeline_runtime,
 )
+from app.services.diagnostic_runtime import install_diagnostic_runtime
 from app.services.followup_runtime import install_followup_runtime_extensions
 from app.services.lead_registry_runtime import install_lead_registry_runtime
 from app.services.operator_experience_phone_patch import (
     install_operator_experience_phone_patch,
 )
 from app.services.operator_experience_runtime import install_operator_experience_runtime
+from app.services.request_trace import install_request_tracing
 from app.services.runtime_extensions import install_runtime_extensions
 from app.services.supplier_workspace_runtime import install_supplier_workspace_runtime
 from app.services.whatsapp_cloud_runtime import install_whatsapp_cloud_runtime
@@ -36,7 +39,7 @@ from app.services.telegram_service import (
 )
 
 settings = get_settings()
-APP_VERSION = "5.0.0"
+APP_VERSION = "5.2.0"
 install_runtime_extensions()
 if followup_service.enabled():
     install_followup_runtime_extensions()
@@ -46,6 +49,8 @@ install_whatsapp_cloud_runtime()
 install_lead_registry_runtime()
 install_operator_experience_runtime()
 install_operator_experience_phone_patch()
+# Install last so /diag wraps the final production behavior of the agent.
+install_diagnostic_runtime()
 
 structlog.configure(
     processors=[
@@ -146,6 +151,7 @@ app = FastAPI(
     redoc_url="/redoc" if docs_enabled else None,
     openapi_url="/openapi.json" if docs_enabled else None,
 )
+install_request_tracing(app)
 
 cors_origins = settings.get_cors_origins()
 if cors_origins:
@@ -158,6 +164,8 @@ if cors_origins:
             "X-Admin-Key",
             "X-Telegram-Bot-Api-Secret-Token",
             "X-Hub-Signature-256",
+            "X-Request-ID",
+            "X-Correlation-ID",
         ],
         allow_credentials=False,
     )
@@ -165,6 +173,7 @@ if cors_origins:
 app.include_router(telegram_router)
 app.include_router(whatsapp_router)
 app.include_router(admin_router)
+app.include_router(diagnostics_router)
 
 if settings.enable_google_oauth_routes:
     from app.api.auth import router as auth_router
@@ -195,7 +204,7 @@ async def version():
     return {
         "version": APP_VERSION,
         "service": "buy-bring-crm-assistant",
-        "agent": "v5.1-operator-experience",
+        "agent": "v5.2-diagnostics",
     }
 
 

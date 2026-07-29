@@ -16,7 +16,8 @@ _INSTALLED = False
 
 
 def _normal(value: str) -> str:
-    return " ".join(str(value or "").strip().casefold().replace("ё", "е").split())
+    text = " ".join(str(value or "").strip().casefold().replace("ё", "е").split())
+    return text.strip(" \t\r\n?!.,;")
 
 
 def _active_id(context: dict[str, Any]) -> int | None:

@@ -1,10 +1,11 @@
-"""Polish local-number compatibility for registry fallback matching."""
+"""Polish local-number compatibility and final operator workflow patches."""
 from __future__ import annotations
 
 import re
 from typing import Any
 
 from app.services import operator_experience_runtime
+from app.services.critical_workflow_runtime import install_critical_workflow_runtime
 
 _INSTALLED = False
 
@@ -59,3 +60,4 @@ def install_operator_experience_phone_patch() -> None:
     operator_experience_runtime._lead_exactly_matches_row = (
         lead_exactly_matches_row_with_local_phone
     )
+    install_critical_workflow_runtime()

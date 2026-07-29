@@ -57,6 +57,18 @@ def _validate_title(title: str) -> str:
     return clean
 
 
+def _safe_fallback_title(product: str) -> str:
+    """Never raise — used when AI/rules cannot produce a Russian title."""
+    source = re.sub(r"\s+", " ", (product or "").strip())
+    # Keep only Cyrillic words if the source already mixes languages.
+    cyrillic_words = re.findall(r"[А-Яа-яЁё][А-Яа-яЁё\-]*", source)
+    if cyrillic_words:
+        candidate = " ".join(cyrillic_words[:3])[:_MAX_CHARS].strip()
+        if candidate:
+            return candidate
+    return "Товар"
+
+
 def deterministic_short_title(product: str | None) -> str | None:
     folded = _fold(product or "")
     if not folded:
@@ -102,7 +114,7 @@ async def _ai_short_title(product: str) -> str:
 async def short_product_title(product: str | None) -> str:
     source = (product or "").strip()
     if not source:
-        raise ValueError("Описание товара пустое.")
+        return "Товар"
 
     key = _cache_key(source)
     cached = _TITLE_CACHE.get(key)
@@ -114,16 +126,21 @@ async def short_product_title(product: str | None) -> str:
         _TITLE_CACHE[key] = mapped
         return mapped
 
+    title: str | None = None
     try:
         title = await _ai_short_title(source)
     except Exception as exc:
         logger.warning("AI product title fallback failed: %s", exc)
-        fallback = re.sub(r"\s+", " ", source)[:_MAX_CHARS].strip()
-        if not fallback:
-            raise ValueError("Не удалось сократить название товара.") from exc
-        title = fallback
 
-    validated = _validate_title(title)
+    if title:
+        try:
+            validated = _validate_title(title)
+            _TITLE_CACHE[key] = validated
+            return validated
+        except ValueError as exc:
+            logger.warning("AI product title rejected (%s): %s", exc, title[:80])
+
+    validated = _safe_fallback_title(source)
     _TITLE_CACHE[key] = validated
     return validated
 

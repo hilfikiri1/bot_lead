@@ -1,0 +1,163 @@
+[
+  {
+    "id": "pl_vehicle_market_correction_001",
+    "source": "anonymized_manager_chat_2026-07-29",
+    "language": "pl",
+    "channel": "whatsapp",
+    "kind": "followup_message",
+    "intent": "correct_overgeneralized_market_claim",
+    "product_category": "vehicles",
+    "quality_weight": 2,
+    "tags": ["auta", "Chiny", "produkcja", "homologacja", "alternatywa", "PHEV"],
+    "situation": "Klient prosi o ofertę na kilka konkretnych modeli. Wstępna odpowiedź zbyt kategorycznie stwierdziła, że żadnego z nich nie produkuje się w Chinach.",
+    "client_message": "Proszę o ofertę. Czy ma Pan coś dostępnego?",
+    "manager_correction": "Rozdziel modele. Nie twierdź, że wszystkie są niedostępne. Wyjaśnij, które nie są lokalnie produkowane, które wymagają osobnej weryfikacji i zaproponuj chińskie alternatywy.",
+    "approved_reply": "Dzień dobry, sprawdziliśmy wstępnie rynek chiński pod kątem wskazanych modeli. Część z nich nie należy do wersji, które warto szukać bezpośrednio na rynku chińskim, natomiast jeden z modeli był oferowany również w wersji lokalnej i wymaga osobnej weryfikacji dostępności, dokumentów eksportowych oraz możliwości rejestracji w Polsce. Równolegle możemy sprawdzić konkurencyjne cenowo chińskie modele hybrydowe i elektryczne w podobnej klasie. Czy jest Pan gotowy rozważyć również takie alternatywy? Jeżeli tak, proszę wskazać preferowany typ nadwozia, napęd i maksymalny budżet.",
+    "lessons": [
+      "Nie łącz kilku modeli w jedno niezweryfikowane twierdzenie.",
+      "Oddziel lokalną produkcję od dostępności u dealera lub eksportera.",
+      "Nie przedstawiaj orientacyjnej różnicy ceny jako reguły.",
+      "Zakończ jednym pytaniem kwalifikującym alternatywę."
+    ]
+  },
+  {
+    "id": "pl_price_without_spec_001",
+    "source": "bbs_first_contact_playbook",
+    "language": "pl",
+    "channel": "whatsapp",
+    "kind": "followup_message",
+    "intent": "client_demands_price",
+    "product_category": "industrial_equipment",
+    "quality_weight": 2,
+    "tags": ["cena", "wycena", "specyfikacja", "ilość", "dostawa"],
+    "situation": "Klient chce natychmiast otrzymać cenę, ale nie podał dokładnej wersji, ilości ani miejsca dostawy.",
+    "client_message": "Proszę wysłać cennik i warunki. Nie mam czasu na długi telefon.",
+    "manager_correction": "Uszanuj czas klienta, ale nie wysyłaj przypadkowej ceny. Poproś tylko o trzy dane krytyczne.",
+    "approved_reply": "Rozumiem i przygotuję konkretną wycenę. Żeby nie wysłać przypadkowej oferty, potrzebuję tylko trzech informacji: dokładnego wariantu produktu, planowanej ilości oraz miasta dostawy. Po ich otrzymaniu porównamy realne opcje i warunki zakupu.",
+    "lessons": [
+      "Nie opowiadaj historii firmy, gdy klient chce konkretów.",
+      "Wyjaśnij, dlaczego dane są potrzebne.",
+      "Ogranicz liczbę pytań."
+    ]
+  },
+  {
+    "id": "pl_followup_no_reply_001",
+    "source": "bbs_communication_playbook",
+    "language": "pl",
+    "channel": "whatsapp",
+    "kind": "followup_message",
+    "intent": "followup_no_reply",
+    "product_category": "general_b2b",
+    "quality_weight": 1,
+    "tags": ["follow-up", "brak odpowiedzi", "aktualność", "następny krok"],
+    "situation": "Klient otrzymał prośbę o dane i nie odpowiedział przez kilka dni.",
+    "client_message": "",
+    "manager_correction": "Przypomnij konkretny temat, nie naciskaj i daj prostą możliwość potwierdzenia aktualności.",
+    "approved_reply": "Dzień dobry, wracam do naszej wcześniejszej rozmowy. Czy projekt jest nadal aktualny? Jeżeli tak, proszę przesłać brakujący parametr, o którym rozmawialiśmy, a przygotujemy kolejny krok.",
+    "lessons": [
+      "Nie powtarzaj całej prezentacji.",
+      "Jedno pytanie i jeden brakujący element.",
+      "Nie twórz fałszywej presji."
+    ]
+  },
+  {
+    "id": "pl_price_objection_001",
+    "source": "anonymized_manager_chat",
+    "language": "pl",
+    "channel": "whatsapp",
+    "kind": "followup_message",
+    "intent": "price_too_high",
+    "product_category": "ppe",
+    "quality_weight": 2,
+    "tags": ["drogo", "target", "landed cost", "jakość", "specyfikacja"],
+    "situation": "Klient uważa ofertę za zbyt drogą i podaje docelową cenę loco Polska.",
+    "client_message": "To jest za drogo. Nasz target to niższa cena loco Poznań.",
+    "manager_correction": "Nie broń ceny ogólnikami. Pokaż, co ją tworzy, sprawdź słabszy materiał lub inną specyfikację i poproś o potwierdzenie minimalnych wymagań.",
+    "approved_reply": "Rozumiem docelowy poziom ceny. Obecna kalkulacja obejmuje wskazaną gramaturę, transport, odprawę i podatki, dlatego nie chcę obiecywać niższej kwoty bez zmiany parametrów. Sprawdzimy wariant z lżejszym materiałem i większym wolumenem. Proszę tylko potwierdzić minimalną akceptowalną gramaturę oraz czy cena docelowa ma obejmować dostawę do Poznania.",
+    "lessons": [
+      "Oddziel cenę produktu od landed cost.",
+      "Nie obiecuj targetu przed zmianą specyfikacji.",
+      "Ustal minimalne wymagania jakościowe."
+    ]
+  },
+  {
+    "id": "pl_existing_supplier_service_001",
+    "source": "bbs_logistics_playbook",
+    "language": "pl",
+    "channel": "whatsapp",
+    "kind": "followup_message",
+    "intent": "client_already_has_supplier",
+    "product_category": "logistics",
+    "quality_weight": 2,
+    "tags": ["fabryka znaleziona", "kontrola", "transport", "odprawa", "EORI"],
+    "situation": "Klient ma już dostawcę i nie potrzebuje sourcingu, ale chce pomocy z dokumentami, kontrolą i transportem.",
+    "client_message": "Dostawcę już wybrałem. Potrzebuję transportu, kontroli dokumentów i odprawy.",
+    "manager_correction": "Nie sprzedawaj ponownie wyszukiwania fabryki. Ustal zakres odpowiedzialności i dane ładunku.",
+    "approved_reply": "Rozumiem — w takim przypadku nie musimy szukać nowego dostawcy. Możemy przejąć kontrolę dokumentów, koordynację odbioru, transport i współpracę z agencją celną. Do kalkulacji potrzebujemy PI lub invoice, Incoterm, adres odbioru, liczbę miejsc, wymiary, wagę, datę gotowości oraz kod pocztowy dostawy. Czy może Pan przesłać te dane w jednym pliku lub wiadomości?",
+    "lessons": [
+      "Dopasuj usługę do realnej luki klienta.",
+      "Nie nazywaj B&BS importerem bez ustalenia.",
+      "Nie wyceniaj transportu bez packing data."
+    ]
+  },
+  {
+    "id": "en_supplier_inquiry_machine_001",
+    "source": "bbs_supplier_inquiry_playbook",
+    "language": "en",
+    "channel": "email",
+    "kind": "supplier_inquiry",
+    "intent": "technical_machine_inquiry",
+    "product_category": "industrial_equipment",
+    "quality_weight": 2,
+    "tags": ["machine", "FOB", "CE", "components", "lead time", "warranty"],
+    "situation": "A factory must confirm a machine against a concrete technical brief.",
+    "client_message": "",
+    "manager_correction": "Separate mandatory requirements, options and unanswered questions. Ask for component brands and acceptance evidence.",
+    "approved_reply": "Dear Sales Team,\n\nWe are evaluating a machine for a B2B project. Please confirm compliance point by point with the attached specification and provide: exact model and configuration, production capacity, brands/models of key components, EXW and FOB price with named port, MOQ, lead time, packing dimensions and gross weight, warranty, spare-parts package, CE/Declaration documents, and videos of the same configuration in operation. Please mark every deviation clearly and list optional items separately.\n\nBest regards,\nBuy & Bring Solutions",
+    "lessons": [
+      "Do not ask only for a catalog and price.",
+      "Require point-by-point confirmation.",
+      "Separate options and deviations."
+    ]
+  },
+  {
+    "id": "ru_aggressive_client_price_list_001",
+    "source": "anonymized_manager_chat",
+    "language": "ru",
+    "channel": "whatsapp",
+    "kind": "followup_message",
+    "intent": "aggressive_client_demands_catalog",
+    "product_category": "electric_vehicles",
+    "quality_weight": 2,
+    "tags": ["прайс", "агрессивный клиент", "объем", "FOB", "компания"],
+    "situation": "Клиент резко требует готовый прайс Excel и просит не занимать его время.",
+    "client_message": "Мне нужен прайс в Excel с характеристиками, фотографиями и ценами FOB. Если нет — не занимайте мое время.",
+    "manager_correction": "Не спорить и не оправдываться. Подтвердить, что прайс будет подготовлен, и коротко запросить данные о компании и объёме, чтобы выбрать релевантный ассортимент.",
+    "approved_reply": "Понимаю вашу занятость. Прайс с характеристиками, фотографиями и ценами FOB подготовим. Чтобы он соответствовал вашим реальным объёмам и сегментам, напишите, пожалуйста, несколько слов о вашей компании и ориентировочном количестве на первый заказ. Тогда я не буду включать случайные модели.",
+    "lessons": [
+      "Сохранять спокойный деловой тон.",
+      "Сначала подтвердить действие.",
+      "Задать один квалифицирующий вопрос."
+    ]
+  },
+  {
+    "id": "uk_first_contact_equipment_001",
+    "source": "bbs_first_contact_uk_playbook",
+    "language": "uk",
+    "channel": "whatsapp",
+    "kind": "followup_message",
+    "intent": "first_contact_equipment",
+    "product_category": "industrial_equipment",
+    "quality_weight": 1,
+    "tags": ["перший контакт", "обладнання", "ТЗ", "наступний крок"],
+    "situation": "Новий український B2B-лід залишив загальний запит на обладнання.",
+    "client_message": "Цікавить обладнання з Китаю.",
+    "manager_correction": "Представитися коротко, попросити опис задачі і не проводити повне технічне інтерв'ю в першому повідомленні.",
+    "approved_reply": "Добрий день! Мене звати Євгеній, компанія Buy & Bring Solutions. Ви залишали запит щодо обладнання з Китаю. Щоб я правильно зрозумів задачу, надішліть, будь ласка, фото, посилання або короткий опис того, що обладнання має виробляти чи обробляти. Після цього визначимо, які параметри потрібно уточнити для пошуку виробників.",
+    "lessons": [
+      "Не ставити двадцять питань одразу.",
+      "Почати з призначення обладнання.",
+      "Домовитися про конкретний наступний матеріал."
+    ]
+  }
+]

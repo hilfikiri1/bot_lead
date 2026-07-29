@@ -7,6 +7,11 @@ from openai import AsyncOpenAI
 from app.agent.retrying import retry, stop_after_attempt, wait_exponential
 
 from app.config import get_settings
+from app.services import (
+    communication_context_service,
+    communication_example_service,
+    message_review_service,
+)
 
 settings = get_settings()
 
@@ -22,12 +27,13 @@ _DRAFT_GUIDANCE = {
         "certification, quotation terms, lead time, packaging and a separate missing-data list."
     ),
     "followup_message": (
-        "Prepare a short B2B follow-up message in the requested/client language. It must be friendly, "
-        "specific, non-pushy and end with one clear question. Do not promise price or delivery."
+        "Continue the actual B2B conversation in the requested/client language. Refer to the latest "
+        "message, promise or unresolved action. Be friendly, specific and non-pushy. Do not repeat "
+        "questions already answered. Use one practical objective and normally end with one clear question."
     ),
     "email": (
         "Prepare a professional B2B email draft with subject and body in the requested/client language. "
-        "Do not invent commitments."
+        "Continue the existing conversation, use confirmed facts only and finish with one concrete action."
     ),
     "catalog_outline": (
         "Prepare a structured outline for a B&BS client catalog/price list: sections, table columns, "
@@ -51,6 +57,18 @@ def _language_name(code: str) -> str:
     }.get(code, "Russian")
 
 
+def _channel_for_kind(kind: str) -> str:
+    if kind == "followup_message":
+        return "whatsapp"
+    if kind in {"email", "supplier_inquiry"}:
+        return "email"
+    return kind
+
+
+def _writer_model() -> str:
+    return settings.agent_writer_model or settings.openai_model
+
+
 @retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=1, min=1, max=6))
 async def generate_draft(
     *,
@@ -66,16 +84,47 @@ async def generate_draft(
         raise RuntimeError("OPENAI_API_KEY не настроен")
     if language == "auto":
         language = "en" if kind == "supplier_inquiry" else "ru"
+
+    channel = _channel_for_kind(kind)
+    communication_context = communication_context_service.build_communication_context(
+        lead,
+        manager_request=manager_request,
+        max_messages=30,
+    )
+    playbook = communication_context_service.playbook_for_prompt(
+        kind=kind,
+        language=language,
+        channel=channel,
+    )
+    query = communication_example_service.example_search_query(
+        lead=lead,
+        communication_context=communication_context,
+        manager_request=manager_request,
+    )
+    examples = communication_example_service.find_similar_examples(
+        kind=kind,
+        language=language,
+        channel=channel,
+        query=query,
+        limit=4,
+    )
+
     client = AsyncOpenAI(api_key=settings.openai_api_key)
+    writer_model = _writer_model()
     response = await client.chat.completions.create(
-        model=settings.agent_writer_model or settings.openai_model,
+        model=writer_model,
         messages=[
             {
                 "role": "system",
                 "content": (
-                    "You are the senior B2B sourcing assistant of Buy & Bring Solutions. "
-                    "Create manager-review drafts only. Never invent facts, prices, certifications, "
-                    "supplier availability or delivery promises. Return only JSON."
+                    "You are the senior B2B sourcing communication writer of Buy & Bring Solutions. "
+                    "Create manager-review drafts only. The source priority is strict: "
+                    "(1) latest real client conversation, (2) confirmed Kommo facts, "
+                    "(3) direct manager request, (4) approved B&BS examples, (5) general playbook. "
+                    "Continue the conversation instead of starting it again. Never ask a question that "
+                    "the client has already answered. Never invent facts, prices, certifications, supplier "
+                    "availability, completed checks or delivery promises. Clearly separate confirmed facts "
+                    "from assumptions. Use one message objective and one practical next step. Return only JSON."
                 ),
             },
             {
@@ -84,8 +133,12 @@ async def generate_draft(
                     {
                         "task": guidance,
                         "output_language": _language_name(language),
+                        "channel": channel,
                         "manager_request": manager_request,
                         "lead": lead,
+                        "communication_context": communication_context,
+                        "bbs_playbook": playbook,
+                        "approved_similar_examples": examples,
                         "schema": {
                             "title": "string",
                             "subject": "string|null",
@@ -102,23 +155,68 @@ async def generate_draft(
             },
         ],
         response_format={"type": "json_object"},
-        temperature=0.15,
+        temperature=0.12,
     )
     data = json.loads(response.choices[0].message.content or "{}")
-    body = str(data.get("body") or "").strip()
-    if not body:
+    original_body = str(data.get("body") or "").strip()
+    if not original_body:
         raise ValueError("AI вернул пустой черновик")
+
+    review = await message_review_service.review_draft(
+        body=original_body,
+        kind=kind,
+        language=language,
+        communication_context=communication_context,
+        playbook=playbook,
+    )
+    reviewed_body = str(review.get("corrected_body") or original_body).strip()
+    issues = [str(x) for x in (review.get("issues") or []) if str(x).strip()][:20]
+
+    assumptions = [
+        str(x) for x in (data.get("assumptions") or []) if str(x).strip()
+    ][:30]
+    if issues:
+        assumptions.extend(f"Reviewer: {issue}" for issue in issues[:8])
+
     return {
         "title": str(data.get("title") or "Рабочий черновик")[:500],
         "subject": (str(data.get("subject"))[:500] if data.get("subject") else None),
-        "body": body,
-        "missing_data": [str(x) for x in (data.get("missing_data") or []) if str(x).strip()][:30],
-        "assumptions": [str(x) for x in (data.get("assumptions") or []) if str(x).strip()][:30],
-        "next_action": str(data.get("next_action") or "Проверить и дополнить черновик")[:1000],
-        # The requested/resolved code is authoritative; model output may use a
-        # human-readable word such as "Polish".
+        "body": reviewed_body,
+        "ai_original_body": original_body,
+        "reviewed_body": reviewed_body,
+        "review_approved": bool(review.get("approved")),
+        "review_issues": issues,
+        "missing_data": [
+            str(x) for x in (data.get("missing_data") or []) if str(x).strip()
+        ][:30],
+        "assumptions": assumptions[:30],
+        "next_action": str(
+            data.get("next_action") or "Проверить и дополнить черновик"
+        )[:1000],
         "language": language,
         "kind": kind,
+        "knowledge_version": communication_context_service.KNOWLEDGE_VERSION,
+        "writer_model": writer_model,
+        "reviewer_model": review.get("model"),
+        "generation_context": {
+            "waiting_on": (communication_context.get("conversation") or {}).get(
+                "waiting_on"
+            ),
+            "last_client_message": (
+                communication_context.get("conversation") or {}
+            ).get("last_client_message"),
+            "last_manager_message": (
+                communication_context.get("conversation") or {}
+            ).get("last_manager_message"),
+            "promises_made": (
+                communication_context.get("conversation") or {}
+            ).get("promises_made"),
+            "open_questions": (
+                communication_context.get("conversation") or {}
+            ).get("open_questions"),
+            "example_ids": [item.get("id") for item in examples],
+            "playbook_version": playbook.get("version"),
+        },
     }
 
 

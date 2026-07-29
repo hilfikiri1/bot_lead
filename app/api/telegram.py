@@ -181,7 +181,33 @@ def _extract_audio_attachment(message: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
-def _spawn_background(coro: Any) -> None:
+def _extract_project_file_attachment(message: dict[str, Any]) -> dict[str, Any] | None:
+    """Non-audio documents and photos for Agent v4 Drive uploads."""
+    document = message.get("document")
+    if document:
+        mime_type = (document.get("mime_type") or "application/octet-stream").lower()
+        if mime_type.startswith("audio/"):
+            return None
+        file_name = document.get("file_name") or f"document.{MIME_EXTENSION_MAP.get(mime_type, 'bin')}"
+        return {
+            "file_id": document["file_id"],
+            "file_size": document.get("file_size"),
+            "file_name": file_name,
+            "mime_type": mime_type,
+            "kind": "document",
+        }
+
+    photos = message.get("photo") or []
+    if photos:
+        photo = photos[-1]
+        return {
+            "file_id": photo["file_id"],
+            "file_size": photo.get("file_size"),
+            "file_name": "photo.jpg",
+            "mime_type": "image/jpeg",
+            "kind": "photo",
+        }
+    return None
     task = asyncio.create_task(coro)
     BACKGROUND_TASKS.add(task)
 
@@ -2965,6 +2991,39 @@ async def telegram_webhook(
                 await telegram_service.send_message(
                     chat_id,
                     "⚠️ Очередь Redis/Celery недоступна. Начинаю обработку аудио на основном сервере.",
+                )
+            return {"ok": True}
+
+        project_file = _extract_project_file_attachment(message)
+        if project_file and settings.agent_enabled:
+            max_bytes = min(settings.max_audio_file_size_mb, 20) * 1024 * 1024
+            file_size = int(project_file.get("file_size") or 0)
+            if file_size and file_size > max_bytes:
+                await telegram_service.send_message(
+                    chat_id,
+                    f"❌ Файл слишком большой: максимум {min(settings.max_audio_file_size_mb, 20)} МБ.",
+                )
+                return {"ok": True}
+            try:
+                file_path = await telegram_service.get_file_path(project_file["file_id"])
+                content = await telegram_service.download_file(file_path)
+                reply = await agent_service.handle_project_file_upload(
+                    db,
+                    chat_id=chat_id,
+                    telegram_user_id=user_id,
+                    filename=str(project_file.get("file_name") or "file"),
+                    mime_type=str(project_file.get("mime_type") or "application/octet-stream"),
+                    content=content,
+                    caption=(message.get("caption") or "").strip() or None,
+                )
+                await telegram_service.send_message(
+                    chat_id, reply.text, reply_markup=reply.reply_markup
+                )
+            except Exception:
+                logger.exception("Project file upload staging failed")
+                await telegram_service.send_message(
+                    chat_id,
+                    "❌ Не удалось подготовить загрузку файла в Drive. Попробуйте позже.",
                 )
             return {"ok": True}
 

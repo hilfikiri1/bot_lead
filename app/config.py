@@ -215,6 +215,25 @@ class Settings(BaseSettings):
     agent_memory_compact_every: int = 20
     agent_memory_recent_messages: int = 12
 
+    # Google Drive (Agent v4)
+    google_drive_enabled: bool = False
+    google_drive_root_folder_id: str = ""
+    google_drive_inbox_folder_id: str = ""
+    google_drive_projects_folder_id: str = ""
+    google_drive_project_template_folder_id: str = ""
+
+    # Scheduled agent digests (Agent v4)
+    agent_morning_digest_enabled: bool = False
+    agent_morning_digest_hour: int = 8
+    agent_evening_digest_enabled: bool = False
+    agent_evening_digest_hour: int = 19
+    agent_digest_timezone: str = "Europe/Warsaw"
+
+    # AI usage budgets (0 = no blocking)
+    agent_daily_ai_budget_usd: float = 0
+    agent_monthly_ai_budget_usd: float = 0
+    agent_cost_warning_percent: int = 80
+
     # New operational Notion Data Sources (Notion API 2025-09-03)
     notion_projects_data_source_id: str = ""
     notion_tasks_data_source_id: str = ""

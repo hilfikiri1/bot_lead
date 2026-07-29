@@ -31,6 +31,9 @@ _WRITE_INTENTS = {
     "save_draft_to_notion",
     "create_gmail_draft",
     "sync_leads_to_notion",
+    "create_drive_project",
+    "save_file_to_drive_project",
+    "link_project_systems",
 }
 
 _DRAFT_KINDS = {
@@ -167,8 +170,12 @@ def deterministic_plan(text: str, context: dict[str, Any]) -> AgentPlan | None:
         return AgentPlan(intent="cancel_clarification", mode="read", confidence=1.0)
     if normalized in {"забудь контекст", "сбрось память", "reset memory", "/reset_memory"}:
         return AgentPlan(intent="reset_memory", mode="write", confidence=1.0)
-    if normalized in {"дайджест", "digest", "что делать сегодня", "задачи дня", "/digest", "/morning"}:
+    if normalized in {"дайджест", "digest", "что делать сегодня", "задачи дня", "/digest", "/morning", "/today"}:
         return AgentPlan(intent="daily_digest", mode="read", confidence=1.0)
+    if normalized in {"/evening", "подведи итоги дня"}:
+        return AgentPlan(intent="daily_digest", mode="read", confidence=1.0)
+    if normalized in {"/costs", "/cost", "расходы ai", "стоимость ai"}:
+        return AgentPlan(intent="ai_costs", mode="read", confidence=1.0)
     if normalized in {"ошибки", "последние ошибки", "журнал ошибок", "/errors"}:
         return AgentPlan(intent="integration_errors", mode="read", confidence=1.0)
     if "проверь notion" in normalized or "тест notion" in normalized or normalized == "/notion_test":
@@ -296,6 +303,59 @@ def deterministic_plan(text: str, context: dict[str, Any]) -> AgentPlan | None:
             due_at=text.strip(),
             event_type=event_type,
             language=language,
+        )
+
+    if any(phrase in normalized for phrase in (
+        "создай проект в drive",
+        "создай папку",
+        "создай папки",
+        "организуй документы",
+        "создай структуру проекта",
+        "создай проект по",
+    )):
+        return AgentPlan(
+            intent="create_drive_project",
+            mode="write",
+            confidence=0.95,
+            lead_id=lead_id or context.get("active_kommo_lead_id"),
+            query=query,
+            lead_refs=lead_refs,
+            clarification_question=None if lead_id or query or lead_refs or context.get("active_kommo_lead_id") else user_error_hint(),
+        )
+
+    if any(phrase in normalized for phrase in (
+        "свяжи проект",
+        "свяжи notion",
+        "привяжи notion",
+        "свяжи kommo notion drive",
+        "link notion",
+    )):
+        return AgentPlan(
+            intent="link_project_systems",
+            mode="write",
+            confidence=0.94,
+            lead_id=lead_id or context.get("active_kommo_lead_id"),
+            query=query,
+            lead_refs=lead_refs,
+            clarification_question=None if lead_id or query or lead_refs or context.get("active_kommo_lead_id") else user_error_hint(),
+        )
+
+    if any(phrase in normalized for phrase in (
+        "что происходит по проекту",
+        "полную карточку",
+        "покажи проект",
+        "что мы уже сделали",
+        "какие вопросы остались",
+        "покажи документы проекта",
+    )):
+        return AgentPlan(
+            intent="project_snapshot",
+            mode="read",
+            confidence=0.94,
+            lead_id=lead_id or context.get("active_kommo_lead_id"),
+            query=query,
+            lead_refs=lead_refs,
+            clarification_question=None if lead_id or query or lead_refs or context.get("active_kommo_lead_id") else user_error_hint(),
         )
 
     if any(hint in normalized for hint in ("покажи сделку", "найди сделку", "найди лид", "открой сделку", "что по сделке", "расскажи по сделке")):

@@ -15,6 +15,7 @@ from app.api.telegram import router as telegram_router
 from app.config import get_settings
 from app.db_migrations import upgrade_database
 from app.services import lead_status_sync_service
+from app.services.agent_scheduled_digest_service import start_periodic_digest_loop
 from app.services.telegram_service import (
     delete_webhook,
     register_webhook,
@@ -72,6 +73,7 @@ async def lifespan(app: FastAPI):
             app_logger.warning("Telegram command registration failed: %s", exc)
 
     status_sync_task: asyncio.Task | None = None
+    digest_task: asyncio.Task | None = None
     if settings.lead_status_sync_enabled:
         status_sync_task = asyncio.create_task(
             lead_status_sync_service.periodic_status_sync_loop(),
@@ -82,9 +84,21 @@ async def lifespan(app: FastAPI):
             settings.lead_status_sync_interval_minutes,
         )
 
+    if settings.agent_morning_digest_enabled or settings.agent_evening_digest_enabled:
+        digest_task = await start_periodic_digest_loop()
+        app_logger.info(
+            "Agent scheduled digest enabled (morning=%s, evening=%s)",
+            settings.agent_morning_digest_enabled,
+            settings.agent_evening_digest_enabled,
+        )
+
     try:
         yield
     finally:
+        if digest_task:
+            digest_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await digest_task
         if status_sync_task:
             status_sync_task.cancel()
             with suppress(asyncio.CancelledError):

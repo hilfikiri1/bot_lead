@@ -40,6 +40,26 @@ async def save_audio(audio_bytes: bytes, extension: str = "ogg") -> str:
         return await _save_locally(audio_bytes, filename)
 
 
+async def save_project_file(content: bytes, filename: str) -> str:
+    """Persist a Telegram document/photo until Drive upload is confirmed."""
+    safe_name = Path(filename).name or f"{uuid.uuid4()}.bin"
+    if settings.storage_backend == "s3":
+        return await _save_to_s3(content, f"project_files/{safe_name}")
+    storage_dir = Path(settings.local_storage_path) / "project_files"
+    storage_dir.mkdir(parents=True, exist_ok=True)
+    file_path = storage_dir / f"{uuid.uuid4()}_{safe_name}"
+    file_path.write_bytes(content)
+    logger.info("Saved project file locally: %s", file_path)
+    return str(file_path)
+
+
+def read_project_file_bytes(storage_path: str) -> bytes:
+    path = Path(storage_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"Файл не найден: {storage_path}")
+    return path.read_bytes()
+
+
 async def _save_locally(audio_bytes: bytes, filename: str) -> str:
     storage_dir = Path(settings.local_storage_path)
     storage_dir.mkdir(parents=True, exist_ok=True)

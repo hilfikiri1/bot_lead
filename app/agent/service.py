@@ -8,12 +8,13 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agent import actions, audit, clarification, digest, generation, memory, notion_gateway, planner, security, tools
+from app.agent import actions, audit, clarification, digest, generation, memory, notion_gateway, planner, project_drive, project_linking, project_snapshot, security, tools
 from app.agent.contracts import AgentPlan, AgentReply
 from app.agent.executor import execute_action
 from app.agent.lead_refs import extract_internal_lead_number, user_error_hint
 from app.config import get_settings
-from app.services import ai_analysis_service, calendar_event_builder, kommo_service, telegram_service
+from app.services import ai_analysis_service, ai_usage_service, calendar_event_builder, kommo_service, storage_service, telegram_service
+from app.services.google_drive_service import PROJECT_SUBFOLDERS, sanitize_filename
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -107,6 +108,7 @@ async def _resolve_leads_for_plan(
     plan: AgentPlan,
     context: dict[str, Any],
     session: Any,
+    original_text: str,
     pre_resolved: list[dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], AgentReply | None]:
     if pre_resolved:
@@ -120,7 +122,7 @@ async def _resolve_leads_for_plan(
     if result.unresolved or (not result.resolved and result.error_message):
         pending = clarification.build_pending(
             plan=plan,
-            original_text=text,
+            original_text=original_text,
             source="text",
             requested_refs=result.unresolved,
             resolved_leads=result.resolved,
@@ -397,6 +399,59 @@ async def _execute_plan(
             metadata=result,
         )
 
+    if plan.intent == "ai_costs":
+        summary = await ai_usage_service.usage_summary(db)
+        return AgentReply(ai_usage_service.format_costs_report(summary), intent=plan.intent)
+
+    if plan.intent == "project_snapshot":
+        lead = await _resolve_lead_for_plan(
+            db, plan=plan, context=context, session=session
+        )
+        snap = await project_snapshot.build_snapshot(db, lead=lead, context=context)
+        return AgentReply(project_snapshot.format_snapshot(snap), intent=plan.intent)
+
+    if plan.intent == "create_drive_project":
+        lead = await _resolve_lead_for_plan(
+            db, plan=plan, context=context, session=session
+        )
+        preview_data = await project_drive.build_drive_project_preview(db, lead=lead)
+        preview_text = project_drive.format_drive_project_preview(preview_data)
+        action = await actions.stage_action(
+            db,
+            telegram_user_id=telegram_user_id,
+            chat_id=chat_id,
+            action_type="create_drive_project",
+            payload=preview_data,
+            preview_text=preview_text,
+        )
+        return AgentReply(
+            preview_text,
+            reply_markup=actions.approval_markup(action.id),
+            intent=plan.intent,
+            metadata={"action_id": action.id},
+        )
+
+    if plan.intent == "link_project_systems":
+        lead = await _resolve_lead_for_plan(
+            db, plan=plan, context=context, session=session
+        )
+        preview_data = await project_linking.build_link_preview(db, lead=lead)
+        preview_text = project_linking.format_link_preview(preview_data)
+        action = await actions.stage_action(
+            db,
+            telegram_user_id=telegram_user_id,
+            chat_id=chat_id,
+            action_type="link_project_systems",
+            payload=preview_data,
+            preview_text=preview_text,
+        )
+        return AgentReply(
+            preview_text,
+            reply_markup=actions.approval_markup(action.id),
+            intent=plan.intent,
+            metadata={"action_id": action.id},
+        )
+
     if plan.intent == "notion_diagnostics":
         result = await notion_gateway.validate_schema(include_optional=True)
         return AgentReply(
@@ -554,6 +609,9 @@ async def _execute_plan(
         "update_kommo_lead",
         "create_gmail_draft",
         "save_draft_to_notion",
+        "create_drive_project",
+        "save_file_to_drive_project",
+        "link_project_systems",
     }:
         return await _stage_write(
             db,
@@ -597,7 +655,12 @@ async def _stage_write(
     batch_intents = {"create_kommo_tasks_batch", "add_kommo_notes_batch"}
     if plan.intent in batch_intents:
         leads, clarify_reply = await _resolve_leads_for_plan(
-            db, plan=plan, context=context, session=session, pre_resolved=pre_resolved_leads
+            db,
+            plan=plan,
+            context=context,
+            session=session,
+            original_text=text,
+            pre_resolved=pre_resolved_leads,
         )
         if clarify_reply:
             return clarify_reply
@@ -1009,3 +1072,77 @@ async def handle_callback(
             return AgentReply(_error_text(exc), intent="action_failed")
 
     return AgentReply("❌ Некорректная команда агента.", intent="callback_error")
+
+
+def _infer_subfolder(caption: str | None) -> str:
+    if not caption:
+        return PROJECT_SUBFOLDERS[0]
+    normalized = caption.casefold()
+    for name in PROJECT_SUBFOLDERS:
+        if name.casefold() in normalized or name.split(" ", 1)[0] in normalized:
+            return name
+    return PROJECT_SUBFOLDERS[0]
+
+
+async def handle_project_file_upload(
+    db: AsyncSession,
+    *,
+    chat_id: int,
+    telegram_user_id: int,
+    filename: str,
+    mime_type: str,
+    content: bytes,
+    caption: str | None = None,
+) -> AgentReply:
+    session = await memory.get_or_create_session(db, telegram_user_id=telegram_user_id)
+    context = await memory.build_context(
+        db, telegram_user_id=telegram_user_id, session=session
+    )
+    active_id = context.get("active_kommo_lead_id")
+    if not active_id:
+        return AgentReply(
+            f"❓ Для какого проекта сохранить файл? {user_error_hint()}",
+            intent="file_upload_clarification",
+        )
+    lead = await kommo_service.get_lead_details(int(active_id))
+    from app.services import project_link_service
+
+    link = await project_link_service.get_by_kommo_lead_id(db, int(active_id))
+    if not link or not link.drive_folder_id:
+        return AgentReply(
+            "❓ Сначала создай проект в Google Drive для этой сделки.\n"
+            "Например: <i>создай проект в drive по этой сделке</i>",
+            intent="file_upload_missing_project",
+        )
+    safe_name = sanitize_filename(filename)
+    storage_path = await storage_service.save_project_file(content, safe_name)
+    subfolder = _infer_subfolder(caption)
+    preview = (
+        "<b>Загрузить файл в Google Drive?</b>\n\n"
+        f"Проект: <code>{html.escape(str(link.project_key))}</code>\n"
+        f"Сделка: <b>{html.escape(str(lead.get('name') or '—'))}</b>\n"
+        f"Файл: {html.escape(safe_name)}\n"
+        f"Папка: {html.escape(subfolder)}"
+    )
+    payload = {
+        "kommo_lead_id": int(active_id),
+        "project_key": link.project_key,
+        "filename": safe_name,
+        "mime_type": mime_type,
+        "storage_path": storage_path,
+        "subfolder_name": subfolder,
+    }
+    action = await actions.stage_action(
+        db,
+        telegram_user_id=telegram_user_id,
+        chat_id=chat_id,
+        action_type="save_file_to_drive_project",
+        payload=payload,
+        preview_text=preview,
+    )
+    return AgentReply(
+        preview,
+        reply_markup=actions.approval_markup(action.id),
+        intent="save_file_to_drive_project",
+        metadata={"action_id": action.id},
+    )

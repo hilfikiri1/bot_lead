@@ -88,9 +88,11 @@ async def build_digest(*, limit: int | None = None) -> dict[str, Any]:
             }
         )
     now = datetime.now(timezone.utc)
+    sections = group_digest_sections(digest_items)
     return {
         "items": items,
         "digest_map": digest_items,
+        "sections": sections,
         "open_count": len(leads),
         "truncated": bool(result.get("truncated")),
         "scanned_count": result.get("scanned_count"),
@@ -107,30 +109,37 @@ def format_digest(result: dict[str, Any]) -> str:
         "",
     ]
     digest_map = result.get("digest_map") or []
+    sections = result.get("sections") or group_digest_sections(digest_map)
     if not digest_map:
         lines.append("Активных сделок не найдено.")
-    for item in digest_map:
-        position = int(item.get("position") or 0)
-        internal = item.get("internal_lead_number")
-        name = html.escape(str(item.get("name") or f"Сделка {item.get('kommo_lead_id')}"))
-        kommo_id = html.escape(str(item.get("kommo_lead_id") or "—"))
-        url = html.escape(str(item.get("url") or ""), quote=True)
-        if internal:
-            lines.append(f"<b>{position}. №{html.escape(str(internal))} — {name}</b>")
-        else:
-            lines.append(f"<b>{position}. {name}</b>")
-            lines.append("Внутренний номер: не указан")
-        lines.extend(
-            [
-                f"Kommo ID: <code>{kommo_id}</code>",
-                f"Приоритет: <b>{html.escape(str(item.get('priority') or '—'))}</b>",
-                f"Причина: {html.escape(str(item.get('reason') or '—'))}",
-                f"Следующий шаг: {html.escape(str(item.get('next_step') or '—'))}",
-            ]
-        )
-        if url:
-            lines.append(f'<a href="{url}">Открыть в Kommo</a>')
+    for section_key in ("urgent", "attention", "planned"):
+        section_items = sections.get(section_key) or []
+        if not section_items:
+            continue
+        lines.append(f"<b>{_SECTION_TITLES[section_key]}</b>")
         lines.append("")
+        for item in section_items:
+            position = int(item.get("position") or 0)
+            internal = item.get("internal_lead_number")
+            name = html.escape(str(item.get("name") or f"Сделка {item.get('kommo_lead_id')}"))
+            kommo_id = html.escape(str(item.get("kommo_lead_id") or "—"))
+            url = html.escape(str(item.get("url") or ""), quote=True)
+            if internal:
+                lines.append(f"<b>{position}. №{html.escape(str(internal))} — {name}</b>")
+            else:
+                lines.append(f"<b>{position}. {name}</b>")
+                lines.append("Внутренний номер: не указан")
+            lines.extend(
+                [
+                    f"Kommo ID: <code>{kommo_id}</code>",
+                    f"Приоритет: <b>{html.escape(str(item.get('priority') or '—'))}</b>",
+                    f"Причина: {html.escape(str(item.get('reason') or '—'))}",
+                    f"Следующий шаг: {html.escape(str(item.get('next_step') or '—'))}",
+                ]
+            )
+            if url:
+                lines.append(f'<a href="{url}">Открыть в Kommo</a>')
+            lines.append("")
     if result.get("truncated"):
         lines.append("⚠️ Список ограничен лимитом страниц Kommo.")
     lines.append("Дайджест ничего не изменяет во внешних сервисах.")
@@ -168,3 +177,30 @@ def build_last_digest_context(result: dict[str, Any]) -> dict[str, Any]:
         "expires_at": result.get("expires_at"),
         "items": list(result.get("digest_map") or []),
     }
+
+
+def _section_for_score(score: int) -> str:
+    if score >= 90:
+        return "urgent"
+    if score >= 55:
+        return "attention"
+    return "planned"
+
+
+def group_digest_sections(digest_map: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    sections: dict[str, list[dict[str, Any]]] = {
+        "urgent": [],
+        "attention": [],
+        "planned": [],
+    }
+    for item in digest_map:
+        score = int(item.get("score") or 0)
+        sections[_section_for_score(score)].append(item)
+    return sections
+
+
+_SECTION_TITLES = {
+    "urgent": "🔴 Срочно",
+    "attention": "🟡 Требует внимания",
+    "planned": "🟢 Планово",
+}

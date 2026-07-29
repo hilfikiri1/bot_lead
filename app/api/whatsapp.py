@@ -1,16 +1,22 @@
 """Meta WhatsApp Cloud API webhook endpoints."""
 from __future__ import annotations
 
+import os
 from typing import Any
 
-from fastapi import APIRouter, Header, HTTPException, Query, Request
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Header,
+    HTTPException,
+    Query,
+    Request,
+)
 from fastapi.responses import PlainTextResponse
 
-from app.config import get_settings
 from app.services import whatsapp_webhook_service
 
 router = APIRouter(prefix="/webhook/whatsapp", tags=["whatsapp"])
-settings = get_settings()
 
 
 @router.get("", response_class=PlainTextResponse)
@@ -19,7 +25,7 @@ async def verify_webhook(
     hub_verify_token: str | None = Query(default=None, alias="hub.verify_token"),
     hub_challenge: str | None = Query(default=None, alias="hub.challenge"),
 ) -> str:
-    expected = str(getattr(settings, "whatsapp_verify_token", "") or "").strip()
+    expected = os.getenv("WHATSAPP_VERIFY_TOKEN", "").strip()
     if hub_mode != "subscribe" or not expected or hub_verify_token != expected:
         raise HTTPException(status_code=403, detail="Invalid WhatsApp verification token")
     return str(hub_challenge or "")
@@ -28,7 +34,10 @@ async def verify_webhook(
 @router.post("")
 async def receive_webhook(
     request: Request,
-    x_hub_signature_256: str | None = Header(default=None, alias="X-Hub-Signature-256"),
+    background_tasks: BackgroundTasks,
+    x_hub_signature_256: str | None = Header(
+        default=None, alias="X-Hub-Signature-256"
+    ),
 ) -> dict[str, Any]:
     raw_body = await request.body()
     if not whatsapp_webhook_service.verify_meta_signature(
@@ -39,5 +48,9 @@ async def receive_webhook(
         payload = await request.json()
     except Exception as exc:
         raise HTTPException(status_code=400, detail="Invalid JSON") from exc
-    processed = await whatsapp_webhook_service.process_webhook(payload)
-    return {"status": "ok", "processed": processed}
+    messages = whatsapp_webhook_service.extract_incoming_messages(payload)
+    for item in messages:
+        background_tasks.add_task(
+            whatsapp_webhook_service.notify_incoming_message, item
+        )
+    return {"status": "accepted", "messages": len(messages)}

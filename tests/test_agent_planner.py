@@ -40,6 +40,17 @@ def test_small_lead_number_is_search_query_not_kommo_id():
     assert plan.query == "135"
 
 
+def test_lead_search_text_is_not_replaced_with_clarification():
+    plan = deterministic_plan(
+        "Покажи сделку по кормушкам",
+        {"active_kommo_lead_id": 111},
+    )
+    assert plan is not None
+    assert plan.intent == "lead_summary"
+    assert plan.query == "Покажи сделку по кормушкам"
+    assert plan.clarification_question is None
+
+
 def test_normal_client_message_not_forced_into_write():
     assert deterministic_plan("Добрый день, ожидаю ваш ответ по цене", {}) is None
 

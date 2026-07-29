@@ -300,14 +300,19 @@ def deterministic_plan(text: str, context: dict[str, Any]) -> AgentPlan | None:
 
     if any(hint in normalized for hint in ("покажи сделку", "найди сделку", "найди лид", "открой сделку", "что по сделке", "расскажи по сделке")):
         intent = "lead_summary" if any(h in normalized for h in ("что по", "расскажи", "покажи")) else "search_lead"
+        search_query = query or text
         return AgentPlan(
             intent=intent,
             mode="read",
             confidence=0.94,
             lead_id=lead_id,
-            query=query or text,
+            query=search_query,
             lead_refs=lead_refs,
-            clarification_question=(None if lead_id or query or lead_refs else user_error_hint()),
+            clarification_question=(
+                None
+                if lead_id or search_query.strip() or lead_refs
+                else user_error_hint()
+            ),
         )
 
     return None

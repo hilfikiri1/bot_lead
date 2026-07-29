@@ -11,7 +11,8 @@ from datetime import datetime, timezone
 from typing import Any
 
 from app.config import get_settings
-from app.services import kommo_service, telegram_service
+from app.database import AsyncSessionLocal
+from app.services import followup_service, kommo_service, telegram_service
 from app.services.lead_matching_service import normalize_phone
 
 logger = logging.getLogger(__name__)
@@ -106,16 +107,18 @@ async def _find_lead_by_phone(phone: str) -> dict[str, Any] | None:
     return matches[0] if len(matches) == 1 else None
 
 
-def _message_time(item: dict[str, Any]) -> str:
+def _incoming_at(item: dict[str, Any]) -> datetime:
     timestamp = item.get("timestamp")
-    if not isinstance(timestamp, int):
-        return "сейчас"
-    try:
-        return datetime.fromtimestamp(timestamp, tz=timezone.utc).strftime(
-            "%d.%m.%Y %H:%M UTC"
-        )
-    except Exception:
-        return "сейчас"
+    if isinstance(timestamp, int):
+        try:
+            return datetime.fromtimestamp(timestamp, tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            pass
+    return datetime.now(timezone.utc)
+
+
+def _message_time(item: dict[str, Any]) -> str:
+    return _incoming_at(item).strftime("%d.%m.%Y %H:%M UTC")
 
 
 async def _log_to_kommo(lead: dict[str, Any], item: dict[str, Any]) -> None:
@@ -144,11 +147,48 @@ async def _log_to_kommo(lead: dict[str, Any], item: dict[str, Any]) -> None:
         logger.warning("Could not log WhatsApp message to Kommo lead %s: %s", lead_id, exc)
 
 
+async def _close_active_followup(
+    lead: dict[str, Any], item: dict[str, Any]
+) -> bool:
+    if not followup_service.enabled():
+        return False
+    lead_id = int(lead.get("id") or 0)
+    if not lead_id:
+        return False
+    try:
+        async with AsyncSessionLocal() as db:
+            state = await followup_service.close_followup(
+                db,
+                lead_id=lead_id,
+                reason="incoming_whatsapp",
+                waiting_on="us",
+                action_text="Ответить клиенту",
+                incoming_at=_incoming_at(item),
+                incoming_message_id=(
+                    str(item.get("message_id")) if item.get("message_id") else None
+                ),
+            )
+            metadata = dict((state.metadata_json or {}).get("followup") or {}) if state else {}
+            return metadata.get("closed_reason") == "incoming_whatsapp"
+    except Exception as exc:
+        logger.warning("Could not reconcile WhatsApp reply with follow-up: %s", exc)
+        return False
+
+
 def _notification_markup(
     item: dict[str, Any], lead: dict[str, Any] | None
 ) -> dict[str, Any]:
     digits = re.sub(r"\D", "", str(item.get("phone") or ""))
     rows: list[list[dict[str, str]]] = []
+    if lead and lead.get("id"):
+        rows.append(
+            [
+                {
+                    "text": "✍️ Подготовить ответ",
+                    "callback_data": f"followup:prepare:{int(lead['id'])}",
+                }
+            ]
+        )
     if digits:
         rows.append(
             [{"text": "💬 Открыть WhatsApp", "url": f"https://wa.me/{digits}"}]
@@ -160,10 +200,17 @@ def _notification_markup(
 
 async def notify_incoming_message(item: dict[str, Any]) -> None:
     lead = await _find_lead_by_phone(str(item.get("phone") or ""))
+    followup_closed = False
     if lead:
         await _log_to_kommo(lead, item)
+        followup_closed = await _close_active_followup(lead, item)
     lead_name = str((lead or {}).get("name") or "Сделка не найдена")
     lead_id = (lead or {}).get("id")
+    state_line = (
+        "\n✅ Активное ожидание ответа закрыто. Теперь клиент ждёт нас."
+        if followup_closed
+        else ""
+    )
     text = (
         "💬 <b>НОВОЕ СООБЩЕНИЕ WHATSAPP</b>\n\n"
         f"Клиент: <b>{html.escape(str(item.get('name') or '—'))}</b>\n"
@@ -171,9 +218,10 @@ async def notify_incoming_message(item: dict[str, Any]) -> None:
         f"Сделка: {html.escape(lead_name)}\n"
         + (f"Kommo ID: <code>{lead_id}</code>\n" if lead_id else "")
         + f"Время: {_message_time(item)}\n\n"
-        + f"<b>Сообщение</b>\n"
+        + "<b>Сообщение</b>\n"
         + html.escape(str(item.get("text") or "[без текста]")[:2500])
         + "\n\nАнализ: клиент написал последним — теперь он ждёт наш ответ."
+        + state_line
     )
     for chat_id in settings.get_allowed_user_ids():
         try:

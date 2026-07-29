@@ -71,25 +71,32 @@ def _strip_technical_note(value: Any) -> str | None:
     return text[:_MAX_COMMENT_LENGTH]
 
 
-def _timestamp_prefix(value: Any) -> str:
+def _timestamp_moment(value: Any) -> datetime | None:
     if value in (None, ""):
-        return ""
+        return None
     try:
         if isinstance(value, (int, float)) or str(value).isdigit():
-            moment = datetime.fromtimestamp(int(value), tz=timezone.utc)
-        else:
-            moment = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-        return moment.astimezone().strftime("%d.%m")
+            return datetime.fromtimestamp(int(value), tz=timezone.utc)
+        moment = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=timezone.utc)
+        return moment.astimezone(timezone.utc)
     except Exception:
-        return ""
+        return None
+
+
+def _note_sort_value(item: dict[str, Any]) -> float:
+    moment = _timestamp_moment(item.get("created_at") or item.get("updated_at"))
+    return moment.timestamp() if moment is not None else 0.0
+
+
+def _timestamp_prefix(value: Any) -> str:
+    moment = _timestamp_moment(value)
+    return moment.astimezone().strftime("%d.%m") if moment is not None else ""
 
 
 def _latest_meaningful_comment(notes: list[dict[str, Any]]) -> str | None:
-    ordered = sorted(
-        notes,
-        key=lambda item: int(item.get("created_at") or item.get("updated_at") or 0),
-        reverse=True,
-    )
+    ordered = sorted(notes, key=_note_sort_value, reverse=True)
     for note in ordered:
         text = _strip_technical_note(note.get("text"))
         if not text:
@@ -253,7 +260,13 @@ async def apply_confirmed_report(
     if fresh.get("digest") != expected_digest or int(fresh.get("updates_count") or 0) != int(
         expected_count
     ):
-        return {"stale": True, "report": fresh, "updated_count": 0, "updated": [], "skipped": []}
+        return {
+            "stale": True,
+            "report": fresh,
+            "updated_count": 0,
+            "updated": [],
+            "skipped": [],
+        }
     result = await asyncio.to_thread(
         google_sheets_service.apply_lead_registry_updates,
         list(fresh.get("updates") or []),

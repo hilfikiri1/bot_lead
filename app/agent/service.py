@@ -21,6 +21,7 @@ from app.services import (
     calendar_policy,
     client_language_service,
     client_message_service,
+    contact_hydration_service,
     conversation_analysis_service,
     drive_diagnostics,
     identity_service,
@@ -56,6 +57,7 @@ def _help_text() -> str:
         "• <i>Сделай КП по #123456 на польском</i>\n"
         "• <i>Подготовь запрос поставщику по этой сделке</i>\n"
         "• <i>Добавь примечание в #123456: клиент ждёт цену</i>\n"
+        "• <i>Заполни телефон из чата по этой сделке</i>\n"
         "• <i>Поставь задачу по #123456 завтра в 10:00</i>\n"
         "• <i>Запланируй созвон по этой сделке в пятницу в 15:00</i>\n"
         "• <i>Проверь Notion</i>\n\n"
@@ -926,6 +928,50 @@ async def _execute_plan(
             preview,
             reply_markup=actions.approval_markup(action.id),
             intent=plan.intent,
+        )
+
+    if plan.intent == "fill_contact_from_chat":
+        lead = None
+        if pre_resolved_leads:
+            lead = pre_resolved_leads[0]
+        else:
+            lead = await _resolve_lead_for_plan(
+                db, plan=plan, context=context, session=session
+            )
+        if lead is None:
+            return AgentReply(
+                "❓ Для какой сделки заполнить контакт из чата?\n"
+                + user_error_hint(),
+                intent=plan.intent,
+            )
+        lead = await kommo_service.get_lead_details(int(lead["id"]))
+        corpus = await kommo_service.get_lead_chat_corpus(int(lead["id"]))
+        try:
+            catalog = await kommo_service.get_lead_custom_fields_catalog()
+        except Exception as exc:
+            logger.warning("Lead custom field catalog unavailable: %s", exc)
+            catalog = []
+        proposal = contact_hydration_service.build_hydration_proposal(
+            lead,
+            corpus=corpus,
+            lead_field_catalog=catalog,
+        )
+        preview = contact_hydration_service.format_hydration_preview(proposal)
+        if not proposal.has_updates:
+            return AgentReply(preview, intent=plan.intent)
+        action = await actions.stage_action(
+            db,
+            telegram_user_id=telegram_user_id,
+            chat_id=chat_id,
+            action_type="fill_contact_from_chat",
+            payload=contact_hydration_service.proposal_to_payload(proposal),
+            preview_text=preview,
+        )
+        return AgentReply(
+            preview,
+            reply_markup=actions.approval_markup(action.id),
+            intent=plan.intent,
+            metadata={"lead_id": proposal.lead_id},
         )
 
     if plan.intent in {

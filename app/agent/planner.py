@@ -28,6 +28,7 @@ _WRITE_INTENTS = {
     "create_kommo_tasks_batch",
     "create_calendar_event",
     "update_kommo_lead",
+    "fill_contact_from_chat",
     "save_draft_to_notion",
     "create_gmail_draft",
     "sync_leads_to_notion",
@@ -74,6 +75,7 @@ Supported intents:
 - create_kommo_task: mutating; requires confirmation
 - create_calendar_event: mutating; requires confirmation
 - update_kommo_lead: mutating; requires confirmation
+- fill_contact_from_chat: mutating; fill empty phone/email/name from chat/form; requires confirmation
 - save_draft_to_notion: mutating; requires confirmation
 - create_gmail_draft: mutating; requires confirmation
 - sync_leads_to_notion: mutating; requires confirmation
@@ -270,6 +272,42 @@ def deterministic_plan(text: str, context: dict[str, Any]) -> AgentPlan | None:
     multi_lead = len(lead_refs) > 1 or bool(
         re.search(r"\b\d{1,4}\s*[,/и]\s*\d", normalized)
     )
+
+    if any(
+        token in normalized
+        for token in (
+            "заполни контакт",
+            "заполни телефон",
+            "заполни из чата",
+            "заполни из переписки",
+            "заполни из формы",
+            "возьми из чата",
+            "возьми телефон из",
+            "обнови контакт из",
+            "данные из чата",
+            "данные из формы",
+            "fill contact",
+            "fill phone",
+            "from chat",
+            "/fill_contact",
+        )
+    ):
+        return AgentPlan(
+            intent="fill_contact_from_chat",
+            mode="write"
+            if (lead_id or query or lead_refs or context.get("active_kommo_lead_id"))
+            else "clarify",
+            confidence=0.97,
+            lead_id=lead_id or context.get("active_kommo_lead_id"),
+            query=query,
+            lead_refs=lead_refs,
+            clarification_question=(
+                None
+                if lead_id or query or lead_refs or context.get("active_kommo_lead_id")
+                else "Для какой сделки заполнить телефон/email из чата? "
+                + user_error_hint()
+            ),
+        )
 
     if (
         "проект" in normalized

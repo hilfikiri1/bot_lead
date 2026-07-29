@@ -793,6 +793,251 @@ async def get_contact_field_ids() -> dict[str, int]:
     return result
 
 
+async def get_lead_custom_fields_catalog() -> list[dict[str, Any]]:
+    """Return lead custom-field definitions (id/name/code/type)."""
+    data = await _request(
+        "GET",
+        "/api/v4/leads/custom_fields",
+        params={"limit": PAGE_SIZE},
+    )
+    fields = ((data or {}).get("_embedded") or {}).get("custom_fields", [])
+    catalog: list[dict[str, Any]] = []
+    for field in fields:
+        field_id = field.get("id")
+        if not isinstance(field_id, int):
+            continue
+        catalog.append(
+            {
+                "id": field_id,
+                "name": field.get("name") or "",
+                "code": field.get("code") or "",
+                "type": field.get("type") or "",
+            }
+        )
+    return catalog
+
+
+async def get_lead_talk_messages(lead_id: int, *, limit_talks: int = 5) -> list[str]:
+    """Best-effort chat texts for a lead (Messenger/WhatsApp/forms)."""
+    if lead_id <= 0:
+        return []
+    texts: list[str] = []
+    try:
+        data = await _request(
+            "GET",
+            "/api/v4/talks",
+            params={
+                "filter[entity_type]": "lead",
+                "filter[entity_id]": int(lead_id),
+                "limit": max(1, min(limit_talks, 20)),
+            },
+        )
+    except Exception as exc:
+        logger.warning("Could not list talks for lead %s: %s", lead_id, exc)
+        return []
+    talks = ((data or {}).get("_embedded") or {}).get("talks") or []
+    for talk in talks[:limit_talks]:
+        talk_id = talk.get("talk_id") or talk.get("id")
+        if talk_id is None:
+            continue
+        try:
+            messages_data = await _request(
+                "GET",
+                f"/api/v4/talks/{talk_id}/messages",
+                params={"limit": 50},
+            )
+        except Exception as exc:
+            logger.warning(
+                "Could not load talk %s messages for lead %s: %s",
+                talk_id,
+                lead_id,
+                exc,
+            )
+            continue
+        messages = ((messages_data or {}).get("_embedded") or {}).get("messages") or []
+        if not messages and isinstance(messages_data, dict):
+            messages = messages_data.get("messages") or []
+        for message in messages:
+            text = str(message.get("text") or "").strip()
+            if text:
+                texts.append(text)
+    return texts
+
+
+async def get_lead_chat_corpus(lead_id: int) -> str:
+    """Combine notes + talk messages for contact-field extraction."""
+    chunks: list[str] = []
+    try:
+        notes = await get_recent_common_notes(lead_id, limit=30)
+    except Exception as exc:
+        logger.warning("Could not load notes for chat corpus %s: %s", lead_id, exc)
+        notes = []
+    for note in notes:
+        text = str(note.get("text") or "").strip()
+        if text:
+            chunks.append(text)
+    try:
+        chunks.extend(await get_lead_talk_messages(lead_id))
+    except Exception as exc:
+        logger.warning("Could not load talk corpus for lead %s: %s", lead_id, exc)
+    # Preserve order, drop exact duplicates.
+    unique: list[str] = []
+    seen: set[str] = set()
+    for chunk in chunks:
+        key = chunk.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(chunk)
+    return "\n\n".join(unique)
+
+
+async def update_contact_channels(
+    contact_id: int,
+    *,
+    name: str | None = None,
+    phone: str | None = None,
+    email: str | None = None,
+) -> dict[str, Any]:
+    """Patch contact name/PHONE/EMAIL after manager confirmation."""
+    if contact_id <= 0:
+        raise ValueError("Некорректный ID контакта.")
+    payload: dict[str, Any] = {"id": int(contact_id)}
+    if name is not None:
+        clean = str(name).strip()
+        if clean:
+            payload["name"] = clean[:255]
+    custom_values: list[dict[str, Any]] = []
+    field_ids = await get_contact_field_ids()
+    if phone and field_ids.get("PHONE"):
+        custom_values.append(
+            {
+                "field_id": field_ids["PHONE"],
+                "values": [{"value": str(phone).strip()}],
+            }
+        )
+    if email and field_ids.get("EMAIL"):
+        custom_values.append(
+            {
+                "field_id": field_ids["EMAIL"],
+                "values": [{"value": str(email).strip()}],
+            }
+        )
+    if custom_values:
+        payload["custom_fields_values"] = custom_values
+    if len(payload) == 1:
+        raise ValueError("Нет полей контакта для обновления.")
+    await _request("PATCH", "/api/v4/contacts", json_body=[payload])
+    return {
+        "contact_id": contact_id,
+        "name": payload.get("name"),
+        "phone": phone,
+        "email": email,
+    }
+
+
+async def update_lead_custom_field_values(
+    lead_id: int,
+    values: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Patch lead custom fields. Each item: {field_id, value}."""
+    if lead_id <= 0:
+        raise ValueError("Некорректный ID сделки.")
+    custom_values: list[dict[str, Any]] = []
+    for item in values:
+        field_id = item.get("field_id")
+        value = item.get("value")
+        if not isinstance(field_id, int) or value in (None, ""):
+            continue
+        custom_values.append(
+            {
+                "field_id": int(field_id),
+                "values": [{"value": str(value)[:500]}],
+            }
+        )
+    if not custom_values:
+        raise ValueError("Нет кастомных полей сделки для обновления.")
+    payload = {"id": int(lead_id), "custom_fields_values": custom_values}
+    await _request("PATCH", "/api/v4/leads", json_body=[payload])
+    return {"lead_id": lead_id, "updated_fields": len(custom_values)}
+
+
+async def apply_contact_hydration(
+    *,
+    lead_id: int,
+    contact_id: int | None,
+    updates: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Apply a confirmed fill-from-chat proposal to contact + lead fields."""
+    if lead_id <= 0:
+        raise ValueError("Некорректный ID сделки.")
+    await get_lead_details(lead_id)
+
+    name = next(
+        (
+            str(item.get("value"))
+            for item in updates
+            if item.get("target") == "contact" and item.get("key") == "name"
+        ),
+        None,
+    )
+    phone = next(
+        (
+            str(item.get("value"))
+            for item in updates
+            if item.get("target") == "contact" and item.get("key") == "phone"
+        ),
+        None,
+    )
+    email = next(
+        (
+            str(item.get("value"))
+            for item in updates
+            if item.get("target") == "contact" and item.get("key") == "email"
+        ),
+        None,
+    )
+    contact_result: dict[str, Any] | None = None
+    if contact_id and any([name, phone, email]):
+        contact_result = await update_contact_channels(
+            int(contact_id),
+            name=name,
+            phone=phone,
+            email=email,
+        )
+    elif any([name, phone, email]) and not contact_id:
+        raise ValueError("У сделки нет связанного контакта для записи телефона/email.")
+
+    lead_values = [
+        {"field_id": item.get("field_id"), "value": item.get("value")}
+        for item in updates
+        if item.get("target") == "lead_custom" and item.get("field_id")
+    ]
+    lead_result: dict[str, Any] | None = None
+    if lead_values:
+        lead_result = await update_lead_custom_field_values(lead_id, lead_values)
+
+    details = await get_lead_details(lead_id)
+    applied = [str(item.get("label") or item.get("key")) for item in updates]
+    note_lines = [
+        "Контакт заполнен из чата/формы (подтверждение в Telegram).",
+        *[f"• {label}" for label in applied if label],
+    ]
+    try:
+        await add_common_note(lead_id, "\n".join(note_lines))
+    except Exception as exc:
+        logger.warning("Could not write hydration note for lead %s: %s", lead_id, exc)
+
+    return {
+        "lead_id": lead_id,
+        "contact": contact_result,
+        "lead_custom": lead_result,
+        "applied": applied,
+        "url": details.get("url"),
+        "lead_name": details.get("name"),
+    }
+
+
 def _lead_title(
     client_data: dict[str, Any],
     lead_data: dict[str, Any],

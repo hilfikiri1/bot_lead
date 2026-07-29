@@ -542,6 +542,24 @@ async def _execute(db: AsyncSession, action: PendingAgentAction) -> dict[str, An
             "data": result,
         }
 
+    if action_type == "fill_contact_from_chat":
+        result = await kommo_service.apply_contact_hydration(
+            lead_id=int(payload["lead_id"]),
+            contact_id=(
+                int(payload["contact_id"]) if payload.get("contact_id") else None
+            ),
+            updates=list(payload.get("updates") or []),
+        )
+        applied = result.get("applied") or []
+        lines = [
+            "✅ <b>Контакт заполнен из чата</b>",
+            "",
+            html.escape(str(result.get("lead_name") or result.get("lead_id"))),
+        ]
+        lines.extend(f"• {html.escape(str(item))}" for item in applied[:12])
+        lines.append(_result_link("Открыть в Kommo", result.get("url")))
+        return {"text": "\n".join(lines), "data": result}
+
     if action_type == "create_calendar_event":
         lead_id = payload.get("lead_id")
         lead = await kommo_service.get_lead_details(int(lead_id)) if lead_id else {}

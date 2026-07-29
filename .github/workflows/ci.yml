@@ -13,6 +13,7 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -23,13 +24,23 @@ jobs:
           cache-dependency-path: requirements.txt
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
       - name: Bytecode compile check
         run: python -m compileall -q app migrations
 
       - name: Alembic heads check
-        run: python -m alembic heads
+        run: |
+          heads="$(python -m alembic heads)"
+          echo "$heads"
+          count="$(printf '%s\n' "$heads" | sed '/^$/d' | wc -l | tr -d ' ')"
+          if [ "$count" -ne 1 ]; then
+            echo "Expected exactly one Alembic head, found $count"
+            exit 1
+          fi
+          printf '%s\n' "$heads" | grep -q "007_unified_agent_v3"
 
       - name: Run tests
         run: pytest -q

@@ -15,8 +15,9 @@ from app.api.telegram import router as telegram_router
 from app.api.whatsapp import router as whatsapp_router
 from app.config import get_settings
 from app.db_migrations import upgrade_database
-from app.services import lead_status_sync_service
+from app.services import followup_service, lead_status_sync_service
 from app.services.agent_scheduled_digest_service import start_periodic_digest_loop
+from app.services.followup_runtime import install_followup_runtime_extensions
 from app.services.runtime_extensions import install_runtime_extensions
 from app.services.telegram_service import (
     delete_webhook,
@@ -27,6 +28,8 @@ from app.services.telegram_service import (
 settings = get_settings()
 APP_VERSION = "5.0.0"
 install_runtime_extensions()
+if followup_service.enabled():
+    install_followup_runtime_extensions()
 
 structlog.configure(
     processors=[
@@ -77,6 +80,7 @@ async def lifespan(app: FastAPI):
 
     status_sync_task: asyncio.Task | None = None
     digest_task: asyncio.Task | None = None
+    followup_task: asyncio.Task | None = None
     if settings.lead_status_sync_enabled:
         status_sync_task = asyncio.create_task(
             lead_status_sync_service.periodic_status_sync_loop(),
@@ -94,9 +98,17 @@ async def lifespan(app: FastAPI):
             settings.agent_evening_digest_enabled,
         )
 
+    if followup_service.enabled():
+        followup_task = await followup_service.start_periodic_followup_loop()
+        app_logger.info("Automatic client follow-up scheduler enabled")
+
     try:
         yield
     finally:
+        if followup_task:
+            followup_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await followup_task
         if digest_task:
             digest_task.cancel()
             with suppress(asyncio.CancelledError):
@@ -167,7 +179,7 @@ async def version():
     return {
         "version": APP_VERSION,
         "service": "buy-bring-crm-assistant",
-        "agent": "v5.0-digital-operations-director",
+        "agent": "v5.0-automatic-followup",
     }
 
 

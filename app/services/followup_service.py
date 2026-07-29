@@ -18,12 +18,7 @@ from app.database import AsyncSessionLocal
 from app.models.agent_user import AgentUser
 from app.models.agent_v5 import NextActionState
 from app.models.client_message_draft import ClientMessageDraft
-from app.services import (
-    client_language_service,
-    client_message_service,
-    kommo_service,
-    telegram_service,
-)
+from app.services import client_language_service, client_message_service, kommo_service, telegram_service
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -32,7 +27,7 @@ FOLLOWUP_PRESETS: dict[str, int] = {"tomorrow": 1, "3d": 3, "7d": 7}
 _ACTIVE_STATUSES = {"scheduled", "reminded"}
 
 
-def _utcnow() -> datetime:
+def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
@@ -49,10 +44,16 @@ def _manager_tz() -> ZoneInfo:
         return ZoneInfo("Europe/Warsaw")
 
 
+def enabled() -> bool:
+    import os
+
+    return os.getenv("AGENT_FOLLOWUP_ENABLED", "true").strip().casefold() in {"1", "true", "yes", "on"}
+
+
 def preset_due_at(preset: str, *, now: datetime | None = None) -> datetime:
     if preset not in FOLLOWUP_PRESETS:
         raise ValueError("Неизвестный срок follow-up.")
-    local_now = (now or _utcnow()).astimezone(_manager_tz())
+    local_now = (now or utcnow()).astimezone(_manager_tz())
     target = local_now + timedelta(days=FOLLOWUP_PRESETS[preset])
     target = target.replace(hour=10, minute=0, second=0, microsecond=0)
     if target <= local_now:
@@ -65,13 +66,16 @@ def parse_custom_due_at(value: str, *, now: datetime | None = None) -> datetime:
     if not raw:
         raise ValueError("Дата не указана.")
     tz = _manager_tz()
-    local_now = (now or _utcnow()).astimezone(tz)
+    local_now = (now or utcnow()).astimezone(tz)
     lowered = raw.casefold().replace("ё", "е")
     if lowered in {"завтра", "tomorrow"}:
         return preset_due_at("tomorrow", now=local_now)
     for prefix, days in (("завтра ", 1), ("сегодня ", 0)):
         if lowered.startswith(prefix):
-            parsed_time = datetime.strptime(raw[len(prefix) :], "%H:%M").time()
+            try:
+                parsed_time = datetime.strptime(raw[len(prefix) :], "%H:%M").time()
+            except ValueError as exc:
+                raise ValueError("Используйте формат: завтра 10:00.") from exc
             target = datetime.combine((local_now + timedelta(days=days)).date(), parsed_time, tzinfo=tz)
             if target <= local_now:
                 raise ValueError("Дата должна быть в будущем.")
@@ -158,6 +162,19 @@ def _save_followup_meta(row: NextActionState, followup: dict[str, Any]) -> None:
         pass
 
 
+async def _complete_kommo_task(task_id: int | None, *, result_text: str) -> None:
+    if not task_id:
+        return
+    try:
+        await kommo_service._request(
+            "PATCH",
+            "/api/v4/tasks",
+            json_body=[{"id": int(task_id), "is_completed": True, "result": {"text": result_text[:1000]}}],
+        )
+    except Exception as exc:
+        logger.warning("Could not complete Kommo follow-up task %s: %s", task_id, exc)
+
+
 async def schedule_from_draft(
     db: AsyncSession,
     *,
@@ -179,10 +196,9 @@ async def schedule_from_draft(
         raise PermissionError("Пользователь Telegram не найден.")
 
     due_at = _aware(due_at)
-    if due_at is None or due_at <= _utcnow():
+    if due_at is None or due_at <= utcnow():
         raise ValueError("Срок follow-up должен быть в будущем.")
-    sent_at = _aware(draft.sent_at or draft.sent_confirmed_at or draft.updated_at) or _utcnow()
-
+    sent_at = _aware(draft.sent_at or draft.sent_confirmed_at or draft.updated_at) or utcnow()
     row = await _state_for_update(db, int(draft.kommo_lead_id))
     marker = f"[BBS-FOLLOWUP-{draft.id}]"
     action_text = f"Проверить ответ клиента · {marker}"
@@ -205,7 +221,7 @@ async def schedule_from_draft(
         "client_name": draft.client_name,
         "message_preview": str(draft.body or "")[:1000],
         "scheduled_by_telegram_user_id": int(telegram_user_id),
-        "scheduled_at": _utcnow().isoformat(),
+        "scheduled_at": utcnow().isoformat(),
         "reminder_count": 0,
         "last_reminded_at": None,
         "closed_at": None,
@@ -247,14 +263,12 @@ async def schedule_from_draft(
     }
 
 
-async def skip_for_draft(
-    db: AsyncSession, *, draft_id: int, telegram_user_id: int
-) -> dict[str, Any]:
+async def skip_for_draft(db: AsyncSession, *, draft_id: int, telegram_user_id: int) -> dict[str, Any]:
     draft = await client_message_service.get_draft(db, draft_id, lock=True)
     if draft is None:
         raise ValueError("Черновик не найден.")
     metadata = dict(draft.metadata_json or {})
-    metadata["followup_skipped"] = {"telegram_user_id": int(telegram_user_id), "at": _utcnow().isoformat()}
+    metadata["followup_skipped"] = {"telegram_user_id": int(telegram_user_id), "at": utcnow().isoformat()}
     draft.metadata_json = metadata
     try:
         flag_modified(draft, "metadata_json")
@@ -296,19 +310,21 @@ async def close_followup(
     if incoming_at and sent_at and incoming_at <= sent_at:
         return row
 
+    task_id = followup.get("kommo_task_id")
     followup["status"] = "closed"
-    followup["closed_at"] = _utcnow().isoformat()
+    followup["closed_at"] = utcnow().isoformat()
     followup["closed_reason"] = reason
     followup["incoming_message_id"] = incoming_message_id
     _save_followup_meta(row, followup)
     row.waiting_on = waiting_on
     row.status = "waiting_us" if waiting_on == "us" else "ok"
     row.action_text = action_text
-    row.due_at = incoming_at if waiting_on == "us" else None
+    row.due_at = None
     row.stale_reason = None
     if incoming_at:
         row.last_contact_at = incoming_at
     await db.commit()
+    await _complete_kommo_task(task_id, result_text=f"Follow-up closed: {reason}")
     return row
 
 
@@ -318,12 +334,12 @@ async def snooze_followup(db: AsyncSession, *, lead_id: int, due_at: datetime) -
     if followup.get("status") not in _ACTIVE_STATUSES:
         raise ValueError("Активное ожидание для этой сделки не найдено.")
     due_at = _aware(due_at)
-    if due_at is None or due_at <= _utcnow():
+    if due_at is None or due_at <= utcnow():
         raise ValueError("Новый срок должен быть в будущем.")
     followup["status"] = "scheduled"
     followup["due_at"] = due_at.isoformat()
     followup["last_reminded_at"] = None
-    followup["snoozed_at"] = _utcnow().isoformat()
+    followup["snoozed_at"] = utcnow().isoformat()
     _save_followup_meta(row, followup)
     row.status = "waiting_client"
     row.waiting_on = "client"
@@ -340,7 +356,7 @@ async def prepare_followup_draft(
 ) -> ClientMessageDraft:
     lead = await kommo_service.get_lead_details(int(lead_id))
     resolution = await client_language_service.resolve_communication_language(
-        db, lead=lead, explicit_language="auto", telegram_user_id=telegram_user_id
+        db, lead=lead, explicit_language="auto"
     )
     generated = await agent_generation.generate_draft(
         kind="followup_message",
@@ -357,7 +373,7 @@ async def prepare_followup_draft(
         lead=lead,
         draft=generated,
         language_source=resolution.source,
-        client_id=None,
+        client_id=resolution.client_id,
         channel="whatsapp",
     )
 
@@ -380,7 +396,7 @@ async def _notification_targets(db: AsyncSession, row: NextActionState) -> list[
 
 
 async def send_due_reminders(*, now: datetime | None = None, limit: int = 50) -> int:
-    now = _aware(now) or _utcnow()
+    now = _aware(now) or utcnow()
     sent = 0
     async with AsyncSessionLocal() as db:
         rows = list(

@@ -37,12 +37,9 @@ from app.services.operator_experience_runtime import install_operator_experience
 from app.services.request_trace import install_request_tracing
 from app.services.runtime_extensions import install_runtime_extensions
 from app.services.supplier_workspace_runtime import install_supplier_workspace_runtime
+from app.services.telegram_command_catalog import set_bot_commands
+from app.services.telegram_service import delete_webhook, register_webhook
 from app.services.whatsapp_cloud_runtime import install_whatsapp_cloud_runtime
-from app.services.telegram_service import (
-    delete_webhook,
-    register_webhook,
-    set_bot_commands,
-)
 
 settings = get_settings()
 APP_VERSION = "5.0.0"

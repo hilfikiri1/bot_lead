@@ -753,8 +753,11 @@ async def sync_analyzed_call(
     transcript: str | None,
     audio_url: str | None,
     analysis: dict[str, Any],
+    force: bool = False,
 ) -> NotionSyncResult:
-    if not is_configured() or not settings.notion_auto_sync:
+    # `force=True` is used for manager-confirmed Agent v3 actions. The auto-sync
+    # flag only gates legacy silent writes, never an explicit Telegram confirmation.
+    if not is_configured() or (not force and not settings.notion_auto_sync):
         return NotionSyncResult(None, None, None, None, "Notion sync disabled")
 
     client_page_id = await upsert_client_page(

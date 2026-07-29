@@ -15,6 +15,12 @@ def test_action_key_changes_with_payload():
     assert first != second
 
 
+def test_action_key_has_no_minute_bucket():
+    source = open("app/agent/action_utils.py", encoding="utf-8").read()
+    assert "%Y%m%d%H%M" not in source
+    assert "strftime" not in source
+
+
 def test_plan_rejects_invalid_confidence():
     try:
         AgentPlan(confidence=2)

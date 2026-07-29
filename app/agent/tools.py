@@ -13,15 +13,50 @@ class LeadResolutionError(ValueError):
         self.candidates = candidates or []
 
 
+def _stem_search_token(token: str) -> str:
+    """Reduce common Russian noun endings for tolerant Kommo title search."""
+    if len(token) < 6 or not re.fullmatch(r"[а-яё]+", token, flags=re.I):
+        return token
+    for ending in (
+        "иями",
+        "ями",
+        "ами",
+        "ого",
+        "ему",
+        "ому",
+        "ыми",
+        "ими",
+        "ах",
+        "ях",
+        "ам",
+        "ям",
+        "ов",
+        "ев",
+        "ом",
+        "ем",
+        "у",
+        "ю",
+        "а",
+        "я",
+        "ы",
+        "и",
+        "е",
+    ):
+        if token.casefold().endswith(ending) and len(token) - len(ending) >= 4:
+            return token[: -len(ending)]
+    return token
+
+
 def _clean_search_query(value: str) -> str:
     text = " ".join((value or "").strip().split())
     text = re.sub(
-        r"\b(?:покажи|найди|открой|расскажи|что|по|сделке?|лид[ауе]?|коммо|kommo)\b",
+        r"\b(?:покажи|найди|открой|расскажи|что|по|сделк[аеуы]?|лид[ауе]?|коммо|kommo)\b",
         " ",
         text,
         flags=re.I,
     )
-    return " ".join(text.split()).strip(" #№:—-")
+    cleaned = " ".join(text.split()).strip(" #№:—-")
+    return " ".join(_stem_search_token(token) for token in cleaned.split())
 
 
 async def resolve_lead(
@@ -30,11 +65,14 @@ async def resolve_lead(
     query: str | None,
     context: dict[str, Any],
 ) -> dict[str, Any]:
-    resolved_id = lead_id or context.get("active_kommo_lead_id")
-    if resolved_id:
-        return await kommo_service.get_lead_details(int(resolved_id))
+    if lead_id:
+        return await kommo_service.get_lead_details(int(lead_id))
 
     clean_query = _clean_search_query(str(query or ""))
+    if not clean_query:
+        active_lead_id = context.get("active_kommo_lead_id")
+        if active_lead_id:
+            return await kommo_service.get_lead_details(int(active_lead_id))
     if not clean_query:
         raise LeadResolutionError("Укажи Kommo ID, номер, клиента или часть названия сделки.")
     result = await kommo_service.search_open_leads(clean_query, limit=8)

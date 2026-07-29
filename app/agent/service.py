@@ -13,7 +13,17 @@ from app.agent.contracts import AgentPlan, AgentReply
 from app.agent.executor import execute_action
 from app.agent.lead_refs import extract_internal_lead_number, user_error_hint
 from app.config import get_settings
-from app.services import ai_analysis_service, ai_usage_service, calendar_event_builder, kommo_service, storage_service, telegram_service
+from app.services import (
+    ai_analysis_service,
+    ai_usage_service,
+    calendar_event_builder,
+    client_language_service,
+    client_message_service,
+    identity_service,
+    kommo_service,
+    storage_service,
+    telegram_service,
+)
 from app.services.google_drive_service import PROJECT_SUBFOLDERS, sanitize_filename
 
 logger = logging.getLogger(__name__)
@@ -58,6 +68,13 @@ def _draft_text(lead: dict[str, Any], draft: dict[str, Any]) -> str:
     ]
     if draft.get("subject"):
         lines.extend([f"<b>Тема:</b> {html.escape(str(draft['subject']))}", ""])
+    if draft.get("language"):
+        lines.extend(
+            [
+                f"<b>Язык клиента:</b> {html.escape(str(draft['language']).upper())}",
+                "",
+            ]
+        )
     lines.append(html.escape(preview))
     missing = draft.get("missing_data") or []
     if missing:
@@ -379,6 +396,16 @@ async def _execute_plan(
     session: Any,
     pre_resolved_leads: list[dict[str, Any]] | None = None,
 ) -> AgentReply:
+    actor = identity_service.current_user()
+    if (
+        actor is not None
+        and plan.mode in {"draft", "write", "conversation"}
+        and not identity_service.can_write(actor)
+    ):
+        return AgentReply(
+            "🔒 Роль Viewer позволяет только просматривать данные.",
+            intent="permission_denied",
+        )
     if plan.mode == "clarify" or plan.clarification_question:
         return AgentReply(
             f"❓ {html.escape(plan.clarification_question or 'Уточни запрос, пожалуйста.')}",
@@ -493,12 +520,65 @@ async def _execute_plan(
         lead = await _resolve_lead_for_plan(
             db, plan=plan, context=context, session=session
         )
+        client_facing = str(plan.draft_kind or "") in {
+            "commercial_offer",
+            "followup_message",
+            "email",
+        }
+        language_resolution = None
+        resolved_language = plan.language
+        if client_facing:
+            language_resolution = (
+                await client_language_service.resolve_communication_language(
+                    db,
+                    lead=lead,
+                    explicit_language=plan.language,
+                )
+            )
+            resolved_language = language_resolution.language
         draft = await generation.generate_draft(
             kind=str(plan.draft_kind or "followup_message"),
             lead=tools.lead_summary_for_ai(lead),
-            language=plan.language,
+            language=resolved_language,
             manager_request=text,
         )
+        if plan.draft_kind == "followup_message" and language_resolution is not None:
+            message_record = await client_message_service.create_client_message_draft(
+                db,
+                telegram_user_id=telegram_user_id,
+                lead=lead,
+                draft=draft,
+                language_source=language_resolution.source,
+                client_id=language_resolution.client_id,
+                channel="whatsapp",
+            )
+            await memory.update_context(
+                db,
+                session=session,
+                values={
+                    "last_draft": draft,
+                    "last_draft_lead": {
+                        "id": lead.get("id"),
+                        "name": lead.get("name"),
+                        "url": lead.get("url"),
+                        "updated_at": lead.get("updated_at"),
+                    },
+                    "last_client_message_draft_id": message_record.id,
+                    "last_draft_created_at": datetime.now(timezone.utc).isoformat(),
+                },
+            )
+            return AgentReply(
+                client_message_service.format_client_message_draft(message_record),
+                reply_markup=client_message_service.message_draft_markup(message_record),
+                intent=plan.intent,
+                metadata={
+                    "lead_id": lead.get("id"),
+                    "draft_kind": plan.draft_kind,
+                    "client_message_draft_id": message_record.id,
+                    "communication_language": message_record.communication_language,
+                    "language_source": message_record.language_source,
+                },
+            )
         base_text = _draft_text(lead, draft)
         await memory.update_context(
             db,
@@ -1094,6 +1174,12 @@ async def handle_callback(
                 db, action=action, telegram_user_id=telegram_user_id
             )
             return AgentReply("❌ Действие отменено. Внешние сервисы не изменены.", intent="action_rejected")
+        actor = identity_service.current_user()
+        if actor is not None and not identity_service.can_write(actor):
+            return AgentReply(
+                "🔒 Роль Viewer не позволяет подтверждать изменения.",
+                intent="permission_denied",
+            )
         try:
             text = await execute_action(
                 db, action=action, telegram_user_id=telegram_user_id

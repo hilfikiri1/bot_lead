@@ -22,6 +22,9 @@ from app.services.communication_timeline_runtime import (
 )
 from app.services.followup_runtime import install_followup_runtime_extensions
 from app.services.lead_registry_runtime import install_lead_registry_runtime
+from app.services.operator_experience_phone_patch import (
+    install_operator_experience_phone_patch,
+)
 from app.services.operator_experience_runtime import install_operator_experience_runtime
 from app.services.runtime_extensions import install_runtime_extensions
 from app.services.supplier_workspace_runtime import install_supplier_workspace_runtime
@@ -33,7 +36,7 @@ from app.services.telegram_service import (
 )
 
 settings = get_settings()
-APP_VERSION = "5.1.0"
+APP_VERSION = "5.0.0"
 install_runtime_extensions()
 if followup_service.enabled():
     install_followup_runtime_extensions()
@@ -42,6 +45,7 @@ install_supplier_workspace_runtime()
 install_whatsapp_cloud_runtime()
 install_lead_registry_runtime()
 install_operator_experience_runtime()
+install_operator_experience_phone_patch()
 
 structlog.configure(
     processors=[

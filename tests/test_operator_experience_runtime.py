@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
+from app.services import operator_experience_phone_patch as phone_patch
 from app.services import operator_experience_runtime as runtime
 
 
@@ -51,7 +52,13 @@ def test_client_waiting_for_us_is_high_priority():
     assert result["actionable"] is True
 
 
+def test_polish_local_and_international_phone_are_equivalent():
+    assert phone_patch.phones_equivalent("+48 698 136 090", "698 136 090") is True
+    assert phone_patch.phones_equivalent("+48 698 136 090", "698 136 091") is False
+
+
 def test_lead_form_phone_matches_even_when_contact_phone_is_empty():
+    phone_patch.install_operator_experience_phone_patch()
     row = SimpleNamespace(phone="+48 698 136 090", email=None)
     details = {
         "contacts": [{"id": 10, "name": "Przemek", "phones": [], "emails": []}],

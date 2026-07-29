@@ -1,4 +1,4 @@
-"""Tests for the guarded Kommo -> Google Sheets status reconciliation."""
+"""Tests for guarded Kommo <-> Google Sheets lead registry synchronization."""
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -9,72 +9,171 @@ from app.services.google_sheets_service import SpreadsheetRow
 
 
 def _row(
-    number: str,
-    status: str,
+    number: str = "",
+    status: str = "",
     *,
     row_number: int,
     product: str = "produkt",
+    phone: str | None = None,
+    email: str | None = None,
+    client_name: str | None = "Klient",
+    comment: str | None = None,
+    budget: str | None = "$5_000_–_$10_000",
+    channel: str | None = "whats_app",
+    region: str | None = "Polska",
 ) -> SpreadsheetRow:
     return SpreadsheetRow(
         row_number=row_number,
-        phone=None,
-        email=None,
-        client_name=None,
+        phone=phone,
+        email=email,
+        client_name=client_name,
         company=None,
         product=product,
         lead_number=number,
         lead_status=status,
+        marketing_comment=comment,
+        budget=budget,
+        contact_channel=channel,
+        region=region,
     )
 
 
 def test_parse_internal_number():
     assert lead_status_sync_service.parse_internal_number("110 - Игрушки") == "110"
-    assert lead_status_sync_service.parse_internal_number(" 7- Maszyna ") == "7"
+    assert lead_status_sync_service.parse_internal_number(" 7– Maszyna ") == "7"
     assert lead_status_sync_service.parse_internal_number("Facebook №123") is None
 
 
+def test_marketing_comment_preserves_independent_status_and_reason():
+    row = _row(
+        "163",
+        "MQL",
+        row_number=10,
+        product="art party balony",
+        comment="Действующий магазин 5 лет, регулярные закупки.",
+    )
+    comment = lead_status_sync_service.build_marketing_comment(
+        row,
+        {"name": "163 - Шары", "status_name": "Получено ТЗ"},
+        [{"text": "Клиент попросил образцы качественных шаров."}],
+    )
+    assert "MQL — потенциально целевой" in comment
+    assert "Основание: Действующий магазин 5 лет" in comment
+    assert "Kommo: Получено ТЗ" in comment
+    assert "История: Клиент попросил образцы" in comment
+
+
+def test_managed_marketing_comment_is_stable():
+    row = _row(
+        "163",
+        "SQL",
+        row_number=10,
+        product="balony",
+        comment="Первичная причина.",
+    )
+    lead = {"name": "163 - Шары", "status_name": "Квалификация лида"}
+    notes = [{"text": "Ожидаем список моделей."}]
+    first = lead_status_sync_service.build_marketing_comment(row, lead, notes)
+    second = lead_status_sync_service.build_marketing_comment(
+        _row(
+            "163",
+            "SQL",
+            row_number=10,
+            product="balony",
+            comment=first,
+        ),
+        lead,
+        notes,
+    )
+    assert first == second
+
+
 @pytest.mark.asyncio
-async def test_report_classifies_updates_missing_and_duplicates():
+async def test_report_assigns_next_number_and_never_proposes_status_write():
     rows = [
-        _row("110", "MQL", row_number=2),
-        _row("111", "SQL", row_number=3),
-        _row("112", "Первый контакт", row_number=4),
-        _row("113", "MQL", row_number=5),
-        _row("113", "MQL", row_number=6),
+        _row(
+            "165",
+            "Первый контакт",
+            row_number=165,
+            product="magazyn energii",
+            phone="504051504",
+        ),
+        _row(
+            "",
+            "SQL",
+            row_number=166,
+            product="herbaty ryż mango",
+            phone="698 136 090",
+            client_name="Przemek Bryłka",
+        ),
     ]
     kommo_result = {
         "leads": [
-            {"id": 10, "name": "110 - Игрушки", "status_name": "SQL"},
-            {"id": 11, "name": "111 - Пилы", "status_name": "SQL"},
-            {"id": 14, "name": "114 - Лазер", "status_name": "MQL"},
-            {"id": 15, "name": "115 - A", "status_name": "MQL"},
-            {"id": 16, "name": "115 - B", "status_name": "SQL"},
-            {"id": 17, "name": "Facebook №17", "status_name": "Новый лид"},
+            {
+                "id": 10,
+                "name": "165 - Накопители энергии",
+                "status_name": "Первый контакт",
+            },
+            {
+                "id": 11,
+                "name": "Facebook lead",
+                "status_name": "Получен ответ",
+                "contact_id": 22,
+            },
+            {
+                "id": 12,
+                "name": "170 - Пилы",
+                "status_name": "Получено ТЗ",
+            },
         ],
         "truncated": False,
         "pipeline_id": 1,
         "pipeline_name": "Польша",
     }
-    with patch(
-        "app.services.lead_status_sync_service.google_sheets_service.get_rows",
-        return_value=rows,
-    ), patch(
-        "app.services.lead_status_sync_service.kommo_service.get_all_leads_for_status_sync",
-        new_callable=AsyncMock,
-        return_value=kommo_result,
+    enriched = {
+        **kommo_result["leads"][1],
+        "phones": ["+48 698 136 090"],
+        "emails": [],
+        "contact_name": "Przemek Bryłka",
+    }
+    with (
+        patch(
+            "app.services.lead_status_sync_service.google_sheets_service.get_rows",
+            return_value=rows,
+        ),
+        patch(
+            "app.services.lead_status_sync_service.kommo_service.get_all_leads_for_status_sync",
+            new_callable=AsyncMock,
+            return_value=kommo_result,
+        ),
+        patch(
+            "app.services.lead_status_sync_service.kommo_service.enrich_leads_with_contacts",
+            new_callable=AsyncMock,
+            return_value=[enriched],
+        ),
+        patch(
+            "app.services.lead_status_sync_service.kommo_service.get_recent_common_notes",
+            new_callable=AsyncMock,
+            return_value=[],
+        ),
+        patch(
+            "app.services.lead_status_sync_service.product_title_service.short_product_title",
+            new_callable=AsyncMock,
+            return_value="Чай",
+        ),
     ):
         report = await lead_status_sync_service.build_status_sync_report()
 
-    assert report["matching_count"] == 1
-    assert report["updates_count"] == 1
-    assert report["updates"][0]["lead_number"] == "110"
-    assert report["updates"][0]["old_status"] == "MQL"
-    assert report["updates"][0]["new_status"] == "SQL"
-    assert [item["lead_number"] for item in report["table_only"]] == ["112"]
-    assert [item["lead_number"] for item in report["kommo_only"]] == ["114"]
-    assert report["table_duplicates"][0]["lead_number"] == "113"
-    assert report["kommo_duplicates"][0]["lead_number"] == "115"
-    assert report["unnumbered_kommo_count"] == 1
+    assert report["marketing_status_preserved"] is True
+    assert report["number_assignments_count"] == 1
+    new_row = next(
+        item for item in report["sheet_updates"] if item["row_number"] == 166
+    )
+    assert new_row["old_lead_number"] == ""
+    assert new_row["new_lead_number"] == "171"
+    assert new_row["marketing_status"] == "SQL"
+    assert "new_status" not in new_row
+    assert report["kommo_renames"][0]["new_name"] == "171 - Чай"
 
 
 @pytest.mark.asyncio
@@ -82,15 +181,19 @@ async def test_confirmed_report_rejects_stale_preview():
     fresh = {
         "updates_digest": "fresh",
         "updates_count": 1,
-        "updates": [{"lead_number": "110"}],
+        "sheet_updates": [{"row_number": 166}],
+        "kommo_renames": [],
     }
-    with patch(
-        "app.services.lead_status_sync_service.build_status_sync_report",
-        new_callable=AsyncMock,
-        return_value=fresh,
-    ), patch(
-        "app.services.lead_status_sync_service.google_sheets_service.apply_status_updates"
-    ) as apply_mock:
+    with (
+        patch(
+            "app.services.lead_status_sync_service.build_status_sync_report",
+            new_callable=AsyncMock,
+            return_value=fresh,
+        ),
+        patch(
+            "app.services.lead_status_sync_service.google_sheets_service.apply_lead_registry_updates"
+        ) as apply_mock,
+    ):
         result = await lead_status_sync_service.apply_confirmed_report(
             expected_digest="old",
             expected_updates_count=1,
@@ -105,77 +208,170 @@ def test_sheet_write_is_disabled_by_default():
         google_sheets_service.settings, "google_sheets_write_enabled", False
     ):
         with pytest.raises(google_sheets_service.GoogleSheetsError, match="отключена"):
-            google_sheets_service.apply_status_updates(
+            google_sheets_service.apply_lead_registry_updates(
                 [
                     {
-                        "lead_number": "110",
-                        "row_number": 2,
-                        "old_status": "MQL",
-                        "new_status": "SQL",
+                        "row_number": 166,
+                        "old_lead_number": "",
+                        "new_lead_number": "166",
+                        "old_comment": "",
+                        "new_comment": "Клиент: Test.",
                     }
                 ]
             )
 
 
-def test_sheet_write_rechecks_old_status_and_row():
+def test_sheet_write_updates_only_x_y_and_preserves_w():
     rows = [
-        _row("110", "MQL", row_number=2),
-        _row("111", "Изменено вручную", row_number=3),
+        _row(
+            "",
+            "SQL",
+            row_number=166,
+            phone="698136090",
+            comment="",
+        ),
     ]
     mock_service = MagicMock()
-    with patch.object(
-        google_sheets_service.settings, "google_sheets_write_enabled", True
-    ), patch.object(
-        google_sheets_service.settings, "google_sheets_spreadsheet_id", "sheet-id"
-    ), patch.object(
-        google_sheets_service.settings, "google_sheets_worksheet_name", "FB"
-    ), patch.object(
-        google_sheets_service.settings, "google_sheets_status_column", "W"
-    ), patch(
-        "app.services.google_sheets_service.is_configured", return_value=True
-    ), patch(
-        "app.services.google_sheets_service.get_rows", return_value=rows
-    ), patch(
-        "app.services.google_sheets_service._sheets_service",
-        return_value=mock_service,
-    ), patch(
-        "app.services.google_sheets_service.clear_cache"
+    with (
+        patch.object(
+            google_sheets_service.settings, "google_sheets_write_enabled", True
+        ),
+        patch.object(
+            google_sheets_service.settings,
+            "google_sheets_spreadsheet_id",
+            "sheet-id",
+        ),
+        patch.object(
+            google_sheets_service.settings, "google_sheets_worksheet_name", "FB"
+        ),
+        patch.object(
+            google_sheets_service.settings, "google_sheets_comment_column", "X"
+        ),
+        patch.object(
+            google_sheets_service.settings, "google_sheets_lead_number_column", "Y"
+        ),
+        patch(
+            "app.services.google_sheets_service.is_configured", return_value=True
+        ),
+        patch("app.services.google_sheets_service.get_rows", return_value=rows),
+        patch(
+            "app.services.google_sheets_service._sheets_service",
+            return_value=mock_service,
+        ),
+        patch("app.services.google_sheets_service.clear_cache"),
     ):
-        result = google_sheets_service.apply_status_updates(
+        result = google_sheets_service.apply_lead_registry_updates(
             [
                 {
-                    "lead_number": "110",
-                    "row_number": 2,
-                    "old_status": "MQL",
-                    "new_status": "SQL",
-                },
-                {
-                    "lead_number": "111",
-                    "row_number": 3,
-                    "old_status": "SQL",
-                    "new_status": "Закрыто",
-                },
+                    "row_number": 166,
+                    "row_fingerprint": [
+                        "698136090",
+                        "",
+                        "klient",
+                        "produkt",
+                    ],
+                    "old_lead_number": "",
+                    "new_lead_number": "166",
+                    "old_comment": "",
+                    "new_comment": "Клиент: Test.",
+                }
             ]
         )
 
     assert result["updated_count"] == 1
-    assert result["skipped"] == [
-        {"lead_number": "111", "reason": "status_changed_manually"}
-    ]
     call = (
         mock_service.spreadsheets.return_value.values.return_value.batchUpdate.call_args
     )
-    assert call.kwargs["body"]["data"] == [
-        {
-            "range": "'FB'!W2",
-            "majorDimension": "ROWS",
-            "values": [["SQL"]],
-        }
-    ]
+    data = call.kwargs["body"]["data"]
+    assert {item["range"] for item in data} == {"'FB'!X166", "'FB'!Y166"}
+    assert all("W166" not in item["range"] for item in data)
+
+
+def test_sheet_write_rechecks_manual_comment():
+    rows = [_row("166", "SQL", row_number=166, comment="Изменено вручную")]
+    with (
+        patch.object(
+            google_sheets_service.settings, "google_sheets_write_enabled", True
+        ),
+        patch(
+            "app.services.google_sheets_service.is_configured", return_value=True
+        ),
+        patch("app.services.google_sheets_service.get_rows", return_value=rows),
+    ):
+        result = google_sheets_service.apply_lead_registry_updates(
+            [
+                {
+                    "row_number": 166,
+                    "old_lead_number": "166",
+                    "new_lead_number": "166",
+                    "old_comment": "Старое значение",
+                    "new_comment": "Новое значение",
+                }
+            ]
+        )
+    assert result["updated_count"] == 0
+    assert result["skipped"][0]["reason"] == "comment_changed_manually"
 
 
 @pytest.mark.asyncio
-async def test_kommo_status_sync_includes_closed_leads_and_paginates():
+async def test_confirmed_sync_writes_sheet_before_verified_kommo_rename():
+    report = {
+        "updates_digest": "same",
+        "updates_count": 2,
+        "sheet_updates": [{"row_number": 166, "new_lead_number": "166"}],
+        "kommo_renames": [
+            {
+                "kommo_lead_id": 77,
+                "row_number": 166,
+                "lead_number": "166",
+                "old_name": "Facebook lead",
+                "new_name": "166 - Чай",
+            }
+        ],
+    }
+    sheet_result = {
+        "updated_count": 1,
+        "updated_cells_count": 2,
+        "updated": [],
+        "skipped": [],
+    }
+    with (
+        patch(
+            "app.services.lead_status_sync_service.build_status_sync_report",
+            new_callable=AsyncMock,
+            return_value=report,
+        ),
+        patch(
+            "app.services.lead_status_sync_service.google_sheets_service.apply_lead_registry_updates",
+            return_value=sheet_result,
+        ) as sheet_write,
+        patch(
+            "app.services.lead_status_sync_service.google_sheets_service.get_rows",
+            return_value=[_row("166", "SQL", row_number=166)],
+        ),
+        patch(
+            "app.services.lead_status_sync_service.kommo_service.get_lead_details",
+            new_callable=AsyncMock,
+            return_value={"id": 77, "name": "Facebook lead"},
+        ),
+        patch(
+            "app.services.lead_status_sync_service.kommo_service.update_kommo_lead",
+            new_callable=AsyncMock,
+            return_value={"lead_id": 77, "lead_name": "166 - Чай"},
+        ) as rename,
+    ):
+        result = await lead_status_sync_service.apply_confirmed_report(
+            expected_digest="same",
+            expected_updates_count=2,
+        )
+
+    sheet_write.assert_called_once()
+    rename.assert_awaited_once_with(77, name="166 - Чай")
+    assert result["renamed_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_kommo_registry_sync_includes_closed_leads_contacts_and_paginates():
     first_page = {
         "_embedded": {
             "leads": [
@@ -185,6 +381,7 @@ async def test_kommo_status_sync_includes_closed_leads_and_paginates():
                     "pipeline_id": 5,
                     "status_id": 10,
                     "closed_at": None,
+                    "_embedded": {"contacts": [{"id": 101}]},
                 },
                 {
                     "id": 2,
@@ -210,27 +407,23 @@ async def test_kommo_status_sync_includes_closed_leads_and_paginates():
         }
     }
     request_mock = AsyncMock(side_effect=[first_page, second_page])
-    with patch(
-        "app.services.kommo_service._request", request_mock
-    ), patch(
-        "app.services.kommo_service.get_pipeline_index",
-        new_callable=AsyncMock,
-        return_value=(
-            {5: "Польша"},
-            {(5, 10): "MQL", (5, 20): "Закрыто", (5, 30): "Успешно"},
+    with (
+        patch("app.services.kommo_service._request", request_mock),
+        patch(
+            "app.services.kommo_service.get_pipeline_index",
+            new_callable=AsyncMock,
+            return_value=(
+                {5: "Польша"},
+                {(5, 10): "MQL", (5, 20): "Закрыто", (5, 30): "Успешно"},
+            ),
         ),
-    ), patch.object(
-        kommo_service, "PAGE_SIZE", 2
-    ), patch.object(
-        kommo_service.settings, "lead_status_sync_pipeline_id", 5
+        patch.object(kommo_service, "PAGE_SIZE", 2),
+        patch.object(kommo_service.settings, "lead_status_sync_pipeline_id", 5),
     ):
         result = await kommo_service.get_all_leads_for_status_sync(max_pages=5)
 
     assert result["count"] == 3
-    assert {lead["status_name"] for lead in result["leads"]} == {
-        "MQL",
-        "Закрыто",
-        "Успешно",
-    }
+    assert result["leads"][0]["contact_id"] == 101
     assert any(lead["closed_at"] for lead in result["leads"])
     assert request_mock.await_count == 2
+    assert request_mock.await_args_list[0].kwargs["params"]["with"] == "contacts"

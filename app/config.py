@@ -179,24 +179,29 @@ class Settings(BaseSettings):
     # When False, hide leads that already have internal name like "110 - Игрушки".
     kommo_unreviewed_hide_numbered: bool = False
 
-    # Google Sheets lead registry (read-only service account)
+    # Google Sheets marketing lead registry.
     google_sheets_spreadsheet_id: str = ""
     google_sheets_worksheet_name: str = ""
     google_sheets_service_account_json: str = ""
+    google_sheets_budget_column: str = "M"
+    google_sheets_channel_column: str = "N"
     google_sheets_phone_column: str = "O"
     google_sheets_product_column: str = "P"
+    google_sheets_region_column: str = "Q"
     google_sheets_lead_number_column: str = "Y"
     google_sheets_email_column: str = ""
     google_sheets_client_name_column: str = ""
     google_sheets_company_column: str = ""
     google_sheets_status_column: str = "W"
+    google_sheets_comment_column: str = "X"
     google_sheets_header_row: int = 1
     google_sheets_cache_ttl_seconds: int = 300
     # Spreadsheet writes stay disabled until the manager explicitly enables them
     # in Railway and confirms a concrete update from Telegram.
     google_sheets_write_enabled: bool = False
 
-    # Periodic Kommo -> Google Sheets status reconciliation.
+    # Periodic Kommo <-> Google Sheets lead registry reconciliation.
+    # Marketing status (column W) is deliberately independent from Kommo stages.
     # The scheduler is report-only; it never applies updates automatically.
     lead_status_sync_enabled: bool = False
     lead_status_sync_pipeline_id: Optional[int] = None

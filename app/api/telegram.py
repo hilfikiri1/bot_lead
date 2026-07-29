@@ -1050,7 +1050,7 @@ async def _run_status_sync(chat_id: int, user_id: int) -> None:
         return
     await telegram_service.send_message(
         chat_id,
-        "🔄 Читаю статусы Kommo и Google Sheets. Ничего не изменяю…",
+        "🔄 Читаю лиды Kommo и Google Sheets. Ничего не изменяю…",
     )
     try:
         report = await lead_status_sync_service.build_status_sync_report()
@@ -1061,10 +1061,10 @@ async def _run_status_sync(chat_id: int, user_id: int) -> None:
         )
         return
     except Exception as exc:
-        logger.exception("Lead status sync preview failed")
+        logger.exception("Lead registry sync preview failed")
         await telegram_service.send_message(
             chat_id,
-            "❌ <b>Сверка не выполнена</b>\n\n"
+            "❌ <b>Синхронизация не выполнена</b>\n\n"
             f"{html.escape(type(exc).__name__)}: проверьте Kommo и Google Sheets.",
         )
         return
@@ -1103,7 +1103,7 @@ async def _prepare_status_sync_confirmation(chat_id: int, user_id: int) -> None:
             "Сейчас бот работает только в режиме чтения и отчётов. "
             "Для разрешения подтверждаемых изменений нужно отдельно установить "
             "<code>GOOGLE_SHEETS_WRITE_ENABLED=true</code> в Railway и дать "
-            "service account право Editor.",
+            "service account право Editor. Статус W при этом не изменяется.",
         )
         return
     if int(state.get("updates_count") or 0) <= 0:
@@ -1147,7 +1147,7 @@ async def _confirm_status_sync(chat_id: int, user_id: int) -> None:
         )
         return
     except Exception as exc:
-        logger.exception("Confirmed lead status sync failed")
+        logger.exception("Confirmed lead registry sync failed")
         await telegram_service.send_message(
             chat_id,
             "❌ <b>Обновление не выполнено</b>\n\n"

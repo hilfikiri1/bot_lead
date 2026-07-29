@@ -42,6 +42,10 @@ class SpreadsheetRow:
     product: str | None
     lead_number: str | None
     lead_status: str | None = None
+    marketing_comment: str | None = None
+    budget: str | None = None
+    contact_channel: str | None = None
+    region: str | None = None
 
 
 def _has_service_account_credentials() -> bool:
@@ -156,6 +160,14 @@ def _parse_rows(values: list[list[Any]]) -> list[SpreadsheetRow]:
                 lead_status=_cell_value(
                     raw_row, settings.google_sheets_status_column
                 ),
+                marketing_comment=_cell_value(
+                    raw_row, settings.google_sheets_comment_column
+                ),
+                budget=_cell_value(raw_row, settings.google_sheets_budget_column),
+                contact_channel=_cell_value(
+                    raw_row, settings.google_sheets_channel_column
+                ),
+                region=_cell_value(raw_row, settings.google_sheets_region_column),
             )
         )
     return parsed
@@ -286,12 +298,22 @@ def _quoted_sheet_name(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
-def apply_status_updates(updates: list[dict[str, Any]]) -> dict[str, Any]:
-    """Apply confirmed status changes after checking every source row again.
+def _row_fingerprint(row: SpreadsheetRow) -> tuple[str, str, str, str]:
+    return (
+        _normalized_cell_text(row.phone),
+        _normalized_cell_text(row.email),
+        _normalized_cell_text(row.client_name),
+        _normalized_cell_text(row.product),
+    )
 
-    Each update must contain ``lead_number``, ``row_number``, ``old_status`` and
-    ``new_status``. A row is skipped if its lead number, position or current
-    status changed after the preview was generated.
+
+def apply_lead_registry_updates(updates: list[dict[str, Any]]) -> dict[str, Any]:
+    """Write confirmed lead numbers/comments without touching marketing status.
+
+    Every target row is re-read and checked against the preview. Number writes
+    are allowed only when the current Y value still equals ``old_lead_number``;
+    comment writes follow the same rule for X. Column W is never included in
+    the request.
     """
     if not settings.google_sheets_write_enabled:
         raise GoogleSheetsError(
@@ -305,89 +327,99 @@ def apply_status_updates(updates: list[dict[str, Any]]) -> dict[str, Any]:
     if len(updates) > 500:
         raise GoogleSheetsError("Слишком много изменений за один запуск.")
 
-    # Validate the configured column before constructing any API request.
-    column_letter_to_index(settings.google_sheets_status_column)
+    number_column = settings.google_sheets_lead_number_column.strip().upper()
+    comment_column = settings.google_sheets_comment_column.strip().upper()
+    column_letter_to_index(number_column)
+    column_letter_to_index(comment_column)
     current_rows = get_rows(force_refresh=True)
-    rows_by_number: dict[str, list[SpreadsheetRow]] = {}
-    for row in current_rows:
-        lead_number = str(row.lead_number or "").strip()
-        if lead_number:
-            rows_by_number.setdefault(lead_number, []).append(row)
+    rows_by_position = {row.row_number: row for row in current_rows}
 
-    safe_updates: list[dict[str, Any]] = []
+    safe_cells: list[dict[str, Any]] = []
+    updated_rows: dict[int, dict[str, Any]] = {}
     skipped: list[dict[str, Any]] = []
     for item in updates:
-        lead_number = str(item.get("lead_number") or "").strip()
-        new_status = " ".join(str(item.get("new_status") or "").split())
-        candidates = rows_by_number.get(lead_number) or []
-        if len(candidates) != 1:
+        row_number = int(item.get("row_number") or 0)
+        row = rows_by_position.get(row_number)
+        if row is None:
             skipped.append(
                 {
-                    "lead_number": lead_number,
-                    "reason": "row_not_unique",
+                    "row_number": row_number,
+                    "reason": "row_missing",
                 }
             )
             continue
 
-        row = candidates[0]
-        expected_row = int(item.get("row_number") or 0)
-        if row.row_number != expected_row:
+        expected_fingerprint = tuple(item.get("row_fingerprint") or ())
+        if expected_fingerprint and _row_fingerprint(row) != expected_fingerprint:
             skipped.append(
                 {
-                    "lead_number": lead_number,
-                    "reason": "row_moved",
-                }
-            )
-            continue
-        if _normalized_cell_text(row.lead_status) != _normalized_cell_text(
-            item.get("old_status")
-        ):
-            skipped.append(
-                {
-                    "lead_number": lead_number,
-                    "reason": "status_changed_manually",
-                }
-            )
-            continue
-        if not new_status:
-            skipped.append(
-                {
-                    "lead_number": lead_number,
-                    "reason": "empty_new_status",
-                }
-            )
-            continue
-        if _normalized_cell_text(row.lead_status) == _normalized_cell_text(new_status):
-            skipped.append(
-                {
-                    "lead_number": lead_number,
-                    "reason": "already_current",
+                    "row_number": row_number,
+                    "reason": "row_changed",
                 }
             )
             continue
 
-        safe_updates.append(
-            {
-                **item,
-                "row_number": row.row_number,
-                "lead_number": lead_number,
-                "new_status": new_status,
-            }
-        )
+        old_number = str(item.get("old_lead_number") or "").strip()
+        new_number = str(item.get("new_lead_number") or "").strip()
+        current_number = str(row.lead_number or "").strip()
+        old_comment = str(item.get("old_comment") or "").strip()
+        new_comment = " ".join(str(item.get("new_comment") or "").split())
+        current_comment = str(row.marketing_comment or "").strip()
 
-    if not safe_updates:
+        if current_number != old_number:
+            skipped.append(
+                {
+                    "row_number": row_number,
+                    "lead_number": current_number,
+                    "reason": "lead_number_changed_manually",
+                }
+            )
+            continue
+        if _normalized_cell_text(current_comment) != _normalized_cell_text(old_comment):
+            skipped.append(
+                {
+                    "row_number": row_number,
+                    "lead_number": current_number,
+                    "reason": "comment_changed_manually",
+                }
+            )
+            continue
+
+        row_result = {
+            **item,
+            "row_number": row_number,
+            "new_lead_number": new_number,
+            "new_comment": new_comment,
+        }
+        if new_number and new_number != current_number:
+            safe_cells.append(
+                {
+                    "range": f"{number_column}{row_number}",
+                    "value": new_number,
+                }
+            )
+            updated_rows[row_number] = row_result
+        if new_comment and new_comment != current_comment:
+            safe_cells.append(
+                {
+                    "range": f"{comment_column}{row_number}",
+                    "value": new_comment,
+                }
+            )
+            updated_rows[row_number] = row_result
+
+    if not safe_cells:
         return {"updated_count": 0, "updated": [], "skipped": skipped}
 
     worksheet = settings.google_sheets_worksheet_name.strip()
     sheet_ref = _quoted_sheet_name(worksheet)
-    status_column = settings.google_sheets_status_column.strip().upper()
     data = [
         {
-            "range": f"{sheet_ref}!{status_column}{item['row_number']}",
+            "range": f"{sheet_ref}!{cell['range']}",
             "majorDimension": "ROWS",
-            "values": [[item["new_status"]]],
+            "values": [[cell["value"]]],
         }
-        for item in safe_updates
+        for cell in safe_cells
     ]
 
     try:
@@ -413,11 +445,14 @@ def apply_status_updates(updates: list[dict[str, Any]]) -> dict[str, Any]:
             raise GoogleSheetsError(
                 "Google Sheets отклонил запись. " + share_hint
             ) from exc
-        raise GoogleSheetsError("Не удалось обновить статусы в Google Sheets.") from exc
+        raise GoogleSheetsError(
+            "Не удалось обновить номера и комментарии в Google Sheets."
+        ) from exc
 
     clear_cache()
     return {
-        "updated_count": len(safe_updates),
-        "updated": safe_updates,
+        "updated_count": len(updated_rows),
+        "updated_cells_count": len(safe_cells),
+        "updated": list(updated_rows.values()),
         "skipped": skipped,
     }

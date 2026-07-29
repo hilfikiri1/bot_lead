@@ -83,6 +83,7 @@ def match_lead_to_rows(
     company: str | None,
     product_hint: str | None,
     rows: list[SpreadsheetRow],
+    require_lead_number: bool = True,
 ) -> MatchResult:
     phone_set = {
         normalized
@@ -101,7 +102,9 @@ def match_lead_to_rows(
     candidates: list[MatchCandidate] = []
 
     for row in rows:
-        if not row.lead_number or not str(row.lead_number).strip():
+        if require_lead_number and (
+            not row.lead_number or not str(row.lead_number).strip()
+        ):
             continue
         if not row.product or not str(row.product).strip():
             continue

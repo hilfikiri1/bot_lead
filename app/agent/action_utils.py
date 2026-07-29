@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import datetime, timezone
 from typing import Any
 
 
@@ -11,8 +10,9 @@ def stable_json(payload: dict[str, Any]) -> str:
 
 
 def action_key(*, telegram_user_id: int, action_type: str, payload: dict[str, Any]) -> str:
-    bucket = datetime.now(timezone.utc).strftime("%Y%m%d%H%M")
-    raw = f"{telegram_user_id}:{action_type}:{bucket}:{stable_json(payload)}"
+    # Stable across webhook retries. stage_action() already mints a fresh key
+    # after executed/rejected/failed/expired rows so legitimate repeats still work.
+    raw = f"{telegram_user_id}:{action_type}:{stable_json(payload)}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 

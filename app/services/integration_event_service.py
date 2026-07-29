@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from sqlalchemy import desc, select
@@ -12,13 +13,30 @@ from app.models.integration_event import IntegrationEvent
 logger = logging.getLogger(__name__)
 
 
+def _safe_error_message(value: str | None, limit: int = 4000) -> str | None:
+    if value is None:
+        return None
+    text = str(value)[:limit]
+    text = re.sub(
+        r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+",
+        r"\1***",
+        text,
+    )
+    text = re.sub(
+        r"(?i)\b(token|secret|password|api[_-]?key|authorization)\b\s*[:=]\s*[^\s,;]+",
+        lambda match: f"{match.group(1)}=***",
+        text,
+    )
+    return text
+
+
 def _safe_dict(value: dict[str, Any] | None, limit: int = 20_000) -> dict[str, Any] | None:
     if not value:
         return value
     clean: dict[str, Any] = {}
     for key, item in value.items():
         lowered = key.lower()
-        if any(secret in lowered for secret in ("token", "secret", "password", "authorization")):
+        if any(secret in lowered for secret in ("token", "secret", "password", "authorization", "api_key")):
             clean[key] = "***"
         else:
             text = str(item)
@@ -48,7 +66,7 @@ async def record(
         duration_ms=duration_ms,
         payload=_safe_dict(payload),
         result=_safe_dict(result),
-        error_message=error_message or None,
+        error_message=_safe_error_message(error_message),
     )
     try:
         db.add(event)

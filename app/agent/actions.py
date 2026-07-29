@@ -42,7 +42,20 @@ async def stage_action(
         if expires_at.tzinfo is None:
             expires_at = expires_at.replace(tzinfo=timezone.utc)
         if existing.status == "executing":
-            return existing
+            started_at = existing.approved_at or existing.updated_at
+            if started_at is not None:
+                started = started_at if started_at.tzinfo else started_at.replace(tzinfo=timezone.utc)
+                age = (now - started).total_seconds()
+                if age < 120:
+                    return existing
+                existing.status = "failed"
+                existing.error_message = (
+                    "Исполнение прервано (таймаут executing). Проверь внешний сервис "
+                    "перед повторной командой."
+                )
+                await db.commit()
+            else:
+                return existing
         if existing.status in {"pending", "approved"} and expires_at >= now:
             return existing
         if existing.status in {"pending", "approved"} and expires_at < now:

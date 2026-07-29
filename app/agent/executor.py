@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.agent import audit, notion_gateway
+from app.agent.security import sanitize_text
 from app.models.pending_agent_action import PendingAgentAction
 from app.models.ai_report import AIReport
 from app.models.lead import Lead
@@ -24,6 +25,10 @@ from app.services import (
     notion_service,
 )
 from app.services.calendar_event_builder import ScheduledEventDraft
+
+# If a worker dies after marking the row `executing`, recover after this window so
+# the manager can stage a fresh confirmation instead of being stuck forever.
+_STALE_EXECUTING_SECONDS = 120
 
 
 def _aware(value: datetime) -> datetime:
@@ -65,6 +70,21 @@ async def execute_action(
     if action.status == "executed":
         return "ℹ️ Это действие уже было выполнено."
     if action.status == "executing":
+        started_at = action.approved_at or action.updated_at
+        if started_at is not None:
+            age = (datetime.now(timezone.utc) - _aware(started_at)).total_seconds()
+            if age < _STALE_EXECUTING_SECONDS:
+                return "⏳ Это действие уже выполняется. Не нажимай кнопку повторно."
+            action.status = "failed"
+            action.error_message = sanitize_text(
+                "Исполнение прервано (таймаут executing). Проверь внешний сервис "
+                "перед повторной командой."
+            )
+            await db.commit()
+            return (
+                "⚠️ Предыдущее выполнение зависло и помечено как ошибка. "
+                "Проверь Kommo/Notion/Gmail/Calendar и при необходимости повтори команду."
+            )
         return "⏳ Это действие уже выполняется. Не нажимай кнопку повторно."
     if action.status == "rejected":
         return "ℹ️ Действие уже отменено."
@@ -101,7 +121,7 @@ async def execute_action(
         return str(result.get("text") or "✅ Выполнено.")
     except Exception as exc:
         action.status = "failed"
-        action.error_message = str(exc)[:4000]
+        action.error_message = sanitize_text(str(exc), limit=4000)
         await db.commit()
         await audit.record_event(
             db,
@@ -166,6 +186,7 @@ async def _execute(db: AsyncSession, action: PendingAgentAction) -> dict[str, An
             transcript=voice_note.transcript,
             audio_url=voice_note.audio_url,
             analysis=raw,
+            force=True,
         )
         await crm_service.save_notion_mapping(
             db,

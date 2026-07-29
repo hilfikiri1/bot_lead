@@ -15,6 +15,7 @@ def test_report_has_separate_notion_confirmation_button():
     source = (ROOT / "app/services/telegram_service.py").read_text(encoding="utf-8")
     assert '"📓 Сохранить анализ в Notion"' in source
     assert 'f"agent:ok:{notion_action_id}"' in source
+    assert 'f"agent:no:{notion_action_id}"' in source
 
 
 def test_migration_continues_from_current_head():

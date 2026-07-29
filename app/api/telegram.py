@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.celery_app import celery_app
 from app.agent import service as agent_service
+from app.agent.security import sanitize_text
 from app.config import get_settings
 from app.database import get_db
 from app.services import (
@@ -92,6 +93,22 @@ async def _claim_audio_message(user_id: int, message_id: int) -> bool:
         return bool(claimed)
     except Exception as exc:
         logger.warning("Could not claim Telegram audio message in Redis: %s", exc)
+        return True
+    finally:
+        await redis.aclose()
+
+
+async def _claim_telegram_update(update_id: int | None) -> bool:
+    """Ignore duplicate Telegram webhook deliveries for the same update_id."""
+    if update_id is None:
+        return True
+    redis = Redis.from_url(settings.redis_url, decode_responses=True)
+    key = f"telegram:update:claimed:{int(update_id)}"
+    try:
+        claimed = await redis.set(key, "1", nx=True, ex=24 * 60 * 60)
+        return bool(claimed)
+    except Exception as exc:
+        logger.warning("Could not claim Telegram update_id in Redis: %s", exc)
         return True
     finally:
         await redis.aclose()
@@ -2615,6 +2632,11 @@ async def telegram_webhook(
     except Exception:
         return {"ok": True}
 
+    update_id = body.get("update_id")
+    if not await _claim_telegram_update(update_id if isinstance(update_id, int) else None):
+        logger.info("Duplicate Telegram update ignored: update_id=%s", update_id)
+        return {"ok": True}
+
     logger.debug("Telegram update keys: %s", list(body.keys()))
 
     try:
@@ -2670,9 +2692,10 @@ async def telegram_webhook(
                 )
             except Exception as exc:
                 logger.exception("Callback handling failed")
+                safe_error = sanitize_text(str(exc), limit=500) or exc.__class__.__name__
                 await telegram_service.send_message(
                     chat_id,
-                    f"❌ Ошибка выполнения действия: {html.escape(str(exc)[:500])}",
+                    f"❌ Ошибка выполнения действия: {html.escape(safe_error)}",
                 )
             return {"ok": True}
 

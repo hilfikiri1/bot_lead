@@ -518,10 +518,19 @@ async def send_report(
         ],
     ]
     if notion_action_id:
-        rows.insert(1, [{
-            "text": "📓 Сохранить анализ в Notion",
-            "callback_data": f"agent:ok:{notion_action_id}",
-        }])
+        rows.insert(
+            1,
+            [
+                {
+                    "text": "📓 Сохранить анализ в Notion",
+                    "callback_data": f"agent:ok:{notion_action_id}",
+                },
+                {
+                    "text": "❌ Не сохранять",
+                    "callback_data": f"agent:no:{notion_action_id}",
+                },
+            ],
+        )
     keyboard = {"inline_keyboard": rows}
     return await send_message(chat_id, report_text, reply_markup=keyboard)
 

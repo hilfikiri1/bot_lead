@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import html
 import logging
+import os
 import re
 from datetime import datetime, timezone
 from typing import Any
@@ -18,10 +19,10 @@ settings = get_settings()
 
 
 def verify_meta_signature(raw_body: bytes, signature_header: str | None) -> bool:
-    """Validate ``X-Hub-Signature-256`` when an app secret is configured."""
-    secret = str(getattr(settings, "whatsapp_app_secret", "") or "").strip()
+    """Validate ``X-Hub-Signature-256``; fail closed until configured."""
+    secret = os.getenv("WHATSAPP_APP_SECRET", "").strip()
     if not secret:
-        return True
+        return False
     supplied = str(signature_header or "").strip()
     if not supplied.startswith("sha256="):
         return False
@@ -37,7 +38,9 @@ def extract_incoming_messages(payload: dict[str, Any]) -> list[dict[str, Any]]:
             value = change.get("value") or {}
             contacts = value.get("contacts") or []
             contact_by_wa_id = {
-                str(item.get("wa_id") or ""): item for item in contacts if item.get("wa_id")
+                str(item.get("wa_id") or ""): item
+                for item in contacts
+                if item.get("wa_id")
             }
             metadata = value.get("metadata") or {}
             for message in value.get("messages") or []:
@@ -52,7 +55,11 @@ def extract_incoming_messages(payload: dict[str, Any]) -> list[dict[str, Any]]:
                     text = str((message.get("button") or {}).get("text") or "").strip()
                 elif message_type == "interactive":
                     interactive = message.get("interactive") or {}
-                    reply = interactive.get("button_reply") or interactive.get("list_reply") or {}
+                    reply = (
+                        interactive.get("button_reply")
+                        or interactive.get("list_reply")
+                        or {}
+                    )
                     text = str(reply.get("title") or reply.get("id") or "").strip()
                 else:
                     media = message.get(message_type) or {}
@@ -67,7 +74,11 @@ def extract_incoming_messages(payload: dict[str, Any]) -> list[dict[str, Any]]:
                         "name": profile.get("name"),
                         "message_type": message_type,
                         "text": text,
-                        "timestamp": int(timestamp) if str(timestamp or "").isdigit() else None,
+                        "timestamp": (
+                            int(timestamp)
+                            if str(timestamp or "").isdigit()
+                            else None
+                        ),
                         "phone_number_id": metadata.get("phone_number_id"),
                         "display_phone_number": metadata.get("display_phone_number"),
                     }
@@ -100,7 +111,9 @@ def _message_time(item: dict[str, Any]) -> str:
     if not isinstance(timestamp, int):
         return "сейчас"
     try:
-        return datetime.fromtimestamp(timestamp, tz=timezone.utc).strftime("%d.%m.%Y %H:%M UTC")
+        return datetime.fromtimestamp(timestamp, tz=timezone.utc).strftime(
+            "%d.%m.%Y %H:%M UTC"
+        )
     except Exception:
         return "сейчас"
 
@@ -113,7 +126,9 @@ async def _log_to_kommo(lead: dict[str, Any], item: dict[str, Any]) -> None:
     marker = f"[BBS-WA-IN-{message_id}]" if message_id else "[BBS-WA-IN]"
     try:
         recent = await kommo_service.get_recent_common_notes(lead_id, limit=50)
-        if message_id and any(marker in str(note.get("text") or "") for note in recent):
+        if message_id and any(
+            marker in str(note.get("text") or "") for note in recent
+        ):
             return
         note = (
             f"{marker}\n"
@@ -129,11 +144,15 @@ async def _log_to_kommo(lead: dict[str, Any], item: dict[str, Any]) -> None:
         logger.warning("Could not log WhatsApp message to Kommo lead %s: %s", lead_id, exc)
 
 
-def _notification_markup(item: dict[str, Any], lead: dict[str, Any] | None) -> dict[str, Any]:
+def _notification_markup(
+    item: dict[str, Any], lead: dict[str, Any] | None
+) -> dict[str, Any]:
     digits = re.sub(r"\D", "", str(item.get("phone") or ""))
     rows: list[list[dict[str, str]]] = []
     if digits:
-        rows.append([{"text": "💬 Открыть WhatsApp", "url": f"https://wa.me/{digits}"}])
+        rows.append(
+            [{"text": "💬 Открыть WhatsApp", "url": f"https://wa.me/{digits}"}]
+        )
     if lead and lead.get("url"):
         rows.append([{"text": "🔗 Открыть Kommo", "url": str(lead.get("url"))}])
     return {"inline_keyboard": rows}
@@ -152,8 +171,9 @@ async def notify_incoming_message(item: dict[str, Any]) -> None:
         f"Сделка: {html.escape(lead_name)}\n"
         + (f"Kommo ID: <code>{lead_id}</code>\n" if lead_id else "")
         + f"Время: {_message_time(item)}\n\n"
-        + f"<b>Сообщение</b>\n{html.escape(str(item.get('text') or '[без текста]')[:2500])}\n\n"
-        + "Анализ: клиент написал последним — теперь он ждёт наш ответ."
+        + f"<b>Сообщение</b>\n"
+        + html.escape(str(item.get("text") or "[без текста]")[:2500])
+        + "\n\nАнализ: клиент написал последним — теперь он ждёт наш ответ."
     )
     for chat_id in settings.get_allowed_user_ids():
         try:

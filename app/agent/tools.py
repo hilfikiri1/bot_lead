@@ -154,7 +154,8 @@ async def resolve_leads(
 
 
 def format_candidates(candidates: list[dict[str, Any]]) -> str:
-    lines = ["<b>Нашёл несколько сделок</b>", "", "Выбери нужную карточку кнопкой:"]
+    title = "Нашёл одну сделку" if len(candidates) == 1 else "Нашёл несколько сделок"
+    lines = [f"<b>{title}</b>", "", "Выбери нужную карточку кнопкой:"]
     for item in candidates[:8]:
         lead_id = item.get("id") or item.get("kommo_lead_id")
         internal = extract_internal_lead_number(item) or item.get("internal_lead_number")
@@ -166,7 +167,11 @@ def format_candidates(candidates: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def candidates_markup(candidates: list[dict[str, Any]]) -> dict[str, Any] | None:
+def candidates_markup(
+    candidates: list[dict[str, Any]],
+    *,
+    next_intent: str | None = None,
+) -> dict[str, Any] | None:
     rows: list[list[dict[str, str]]] = []
     for item in candidates[:8]:
         lead_id = item.get("id") or item.get("kommo_lead_id")
@@ -177,11 +182,14 @@ def candidates_markup(candidates: list[dict[str, Any]]) -> dict[str, Any] | None
         label = raw_name[:36] + ("…" if len(raw_name) > 36 else "")
         if internal:
             label = f"№{internal} · {label}"
+        callback_data = f"agent:lead:{lead_id}"
+        if next_intent:
+            callback_data = f"{callback_data}:{next_intent}"
         rows.append(
             [
                 {
                     "text": label[:64],
-                    "callback_data": f"agent:lead:{lead_id}",
+                    "callback_data": callback_data,
                 }
             ]
         )

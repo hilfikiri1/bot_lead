@@ -5,7 +5,7 @@ Base: `hilfikiri1/bot_lead` commit `95749d1` (`main`).
 ## Completed checks
 
 - Python bytecode compilation: `python -m compileall -q app migrations` — passed.
-- Alembic chain: `006_calendar_events -> 007_unified_agent_v3` — one head.
+- Alembic chain: `006_calendar_events -> 007_operational_agent_v2 -> 007_unified_agent_v3` — one head.
 - Focused agent suite — **24 passed**.
 - Complete repository suite — **111 passed** in the build environment.
 

@@ -87,7 +87,7 @@ alembic upgrade head
 Новая цепочка:
 
 ```text
-006_calendar_events -> 007_unified_agent_v3
+006_calendar_events -> 007_operational_agent_v2 -> 007_unified_agent_v3
 ```
 
 ## Коммит и Pull Request

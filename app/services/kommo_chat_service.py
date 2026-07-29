@@ -1,13 +1,8 @@
-"""Read external Facebook/WhatsApp chat context linked to a Kommo lead.
-
-Kommo exposes conversation metadata to regular CRM API users. Message history for
-channels created by other integrations requires the ``External chat history``
-integration scope and an eligible Kommo plan. Failures are converted to a safe
-availability status so a lead card still works when the scope is not granted.
-"""
+"""Read external Facebook/WhatsApp chat context linked to a Kommo lead."""
 from __future__ import annotations
 
 import logging
+import os
 from datetime import datetime, timezone
 from typing import Any
 
@@ -17,8 +12,16 @@ from app.config import get_settings
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
-
 _TIMEOUT = 20.0
+
+
+def _enabled() -> bool:
+    return os.getenv("KOMMO_CHAT_CONTEXT_ENABLED", "false").strip().casefold() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 def _headers() -> dict[str, str]:
@@ -73,11 +76,7 @@ async def get_lead_talks(lead_id: int, *, limit: int = 20) -> list[dict[str, Any
     return talks
 
 
-async def get_talk_messages(
-    talk_id: int,
-    *,
-    limit: int = 50,
-) -> list[dict[str, Any]]:
+async def get_talk_messages(talk_id: int, *, limit: int = 50) -> list[dict[str, Any]]:
     data = await _get(
         f"/api/v4/talks/{int(talk_id)}/messages",
         params={"limit": max(1, min(int(limit), 250))},
@@ -150,12 +149,10 @@ def _analyse(messages: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 async def get_lead_chat_context(
-    lead_id: int,
-    *,
-    message_limit: int = 12,
+    lead_id: int, *, message_limit: int = 12
 ) -> dict[str, Any]:
     """Return latest external chat messages and a simple next-action analysis."""
-    if not getattr(settings, "kommo_chat_context_enabled", False):
+    if not _enabled():
         return {
             "enabled": False,
             "available": False,
@@ -176,6 +173,14 @@ async def get_lead_chat_context(
             }
         latest = talks[0]
         talk_id = int(latest.get("talk_id") or 0)
+        if not talk_id:
+            return {
+                "enabled": True,
+                "available": False,
+                "reason": "missing_talk_id",
+                "talks": talks[:5],
+                "messages": [],
+            }
         messages = await get_talk_messages(talk_id, limit=max(message_limit, 20))
         messages = messages[-max(1, min(message_limit, 30)) :]
         return {

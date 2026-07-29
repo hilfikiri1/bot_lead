@@ -37,6 +37,7 @@ class Settings(BaseSettings):
         "kommo_unreviewed_pipeline_id",
         "kommo_unreviewed_status_id",
         "lead_status_sync_pipeline_id",
+        "kommo_internal_lead_number_field_id",
         mode="before",
     )
     @classmethod
@@ -153,6 +154,7 @@ class Settings(BaseSettings):
     audio_queue_fallback_seconds: int = 45
     manager_timezone: str = "Europe/Warsaw"
     kommo_default_task_type_id: int = 1
+    kommo_internal_lead_number_field_id: Optional[int] = None
     kommo_unreviewed_pipeline_id: Optional[int] = None
     kommo_unreviewed_status_id: Optional[int] = None
     # Used when status_id is not set explicitly. Default Kommo stage: Incoming leads.

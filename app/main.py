@@ -26,7 +26,7 @@ from app.services.telegram_service import (
 )
 
 settings = get_settings()
-APP_VERSION = "5.1.0"
+APP_VERSION = "5.0.0"
 install_runtime_extensions()
 if followup_service.enabled():
     install_followup_runtime_extensions()
@@ -179,7 +179,7 @@ async def version():
     return {
         "version": APP_VERSION,
         "service": "buy-bring-crm-assistant",
-        "agent": "v5.1-automatic-followup",
+        "agent": "v5.0-automatic-followup",
     }
 
 

@@ -1,14 +1,18 @@
-"""Synchronize the marketing lead registry with Kommo identities and history.
+"""Manual onboarding of new Google Sheets leads into existing Kommo deals.
 
-Google Sheets column W is a marketing classification and is intentionally
-independent from the operational Kommo pipeline. This service never compares
-or writes W. Confirmed writes are limited to:
+The spreadsheet and Kommo receive the same advertising lead independently.
+This service never creates Kommo deals. It only processes spreadsheet rows where
+column Y is empty, finds one reliable existing Kommo deal, assigns the next
+internal number, renames the deal and prepares the first operational actions.
 
-* X — concise marketing history/comment;
-* Y — sequential internal lead number;
-* Kommo lead name — ``<number> - <short product>``.
+Confirmed writes are limited to:
+* Google Sheets column Y — sequential internal lead number;
+* Kommo lead name — ``<number> - <short product in Russian>``;
+* optionally moving an incoming/unreviewed deal to ``Первый контакт``;
+* one initial analysis note and one qualification task.
+
+Column W and the manager's comment in X are never changed here.
 """
-
 from __future__ import annotations
 
 import asyncio
@@ -16,15 +20,12 @@ import hashlib
 import json
 import logging
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from app.config import get_settings
-from app.services import (
-    google_sheets_service,
-    kommo_service,
-    product_title_service,
-)
+from app.services import google_sheets_service, kommo_service, product_title_service
 from app.services.google_sheets_service import SpreadsheetRow
 from app.services.lead_matching_service import match_lead_to_rows
 from app.services.unreviewed_leads_service import build_proposed_name
@@ -32,10 +33,9 @@ from app.services.unreviewed_leads_service import build_proposed_name
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
-INTERNAL_NUMBER_RE = re.compile(r"^\s*(\d+)\s*[-–—]\s*.+$")
-_MANAGED_COMMENT_PREFIX = "Клиент:"
-_COMMENT_LIMIT = 1200
-_NOTE_LIMIT = 20
+# Accept both ``118 - Карнизы`` and the historical ``118 Карнизы`` format.
+INTERNAL_NUMBER_RE = re.compile(r"^\s*(\d+)\s*(?:[-–—]\s*|\s+).+$")
+_GENERIC_TITLES = {"товар", "новый товар"}
 _NOTE_CONCURRENCY = 8
 
 
@@ -48,10 +48,6 @@ def _clean(value: Any) -> str:
     return " ".join(str(value or "").split()).strip()
 
 
-def _number_sort_key(value: str) -> tuple[int, str]:
-    return (int(value), value) if value.isdigit() else (10**12, value)
-
-
 def _row_fingerprint(row: SpreadsheetRow) -> list[str]:
     return [
         _clean(row.phone).casefold(),
@@ -61,92 +57,8 @@ def _row_fingerprint(row: SpreadsheetRow) -> list[str]:
     ]
 
 
-def _marketing_status_text(value: str | None) -> str:
-    status = _clean(value)
-    labels = {
-        "sql": "SQL — целевой B2B-лид",
-        "mql": "MQL — потенциально целевой, требуется квалификация",
-        "нецелевой": "Нецелевой",
-        "недозвон": "Недозвон",
-        "игнор": "Игнор / нет ответа",
-        "первый контакт": "Первый контакт",
-        "сделка / продажа": "Сделка / продажа",
-    }
-    return labels.get(status.casefold(), status or "пока не определена")
-
-
-def _manual_basis(comment: str | None) -> str:
-    clean = _clean(comment)
-    if not clean:
-        return ""
-    if not clean.startswith(_MANAGED_COMMENT_PREFIX):
-        return clean[:600]
-    match = re.search(
-        r"(?:^|\. )Основание: (.*?)(?=\. (?:Kommo|История):|$)",
-        clean,
-    )
-    return _clean(match.group(1))[:600] if match else ""
-
-
-def _note_excerpt(note: dict[str, Any]) -> str:
-    text = _clean(note.get("text"))
-    if not text:
-        return ""
-    for marker in ("КРАТКОЕ РЕЗЮМЕ", "Краткое резюме:"):
-        if marker in text:
-            text = text.split(marker, 1)[1].strip(" :-")
-            break
-    text = re.sub(r"\s*(?:ПОЛНАЯ РАСШИФРОВКА|ЗАДАЧА|РИСКИ)\b.*$", "", text)
-    return _clean(text)[:220]
-
-
-def build_marketing_comment(
-    row: SpreadsheetRow,
-    lead: dict[str, Any],
-    notes: list[dict[str, Any]],
-) -> str:
-    """Build a stable manager-readable snapshot for marketing reporting."""
-    client_name = _clean(row.client_name) or "не указан"
-    product = _clean(row.product) or _clean(lead.get("name")) or "не указан"
-    parts = [
-        f"Клиент: {client_name}",
-        f"Запрос: {product}",
-    ]
-
-    context = []
-    if _clean(row.budget):
-        context.append(f"бюджет {_clean(row.budget)}")
-    if _clean(row.contact_channel):
-        context.append(f"канал {_clean(row.contact_channel)}")
-    if _clean(row.region):
-        context.append(f"регион {_clean(row.region)}")
-    if context:
-        parts.append("Параметры: " + ", ".join(context))
-
-    parts.append(
-        "Маркетинговая оценка: " + _marketing_status_text(row.lead_status)
-    )
-    basis = _manual_basis(row.marketing_comment)
-    if basis:
-        parts.append("Основание: " + basis)
-
-    kommo_status = _clean(lead.get("status_name"))
-    if kommo_status:
-        parts.append("Kommo: " + kommo_status)
-
-    excerpts: list[str] = []
-    recent_notes = list(notes[:4])
-    for note in reversed(recent_notes):
-        excerpt = _note_excerpt(note)
-        if excerpt and excerpt.casefold() not in {item.casefold() for item in excerpts}:
-            excerpts.append(excerpt)
-        if len(excerpts) >= 4:
-            break
-    if excerpts:
-        parts.append("История: " + " → ".join(excerpts))
-
-    comment = ". ".join(part.rstrip(" .") for part in parts if part) + "."
-    return comment[:_COMMENT_LIMIT].rstrip()
+def _number_sort_key(value: str) -> tuple[int, str]:
+    return (int(value), value) if value.isdigit() else (10**12, value)
 
 
 def _updates_digest(report: dict[str, Any]) -> str:
@@ -154,52 +66,165 @@ def _updates_digest(report: dict[str, Any]) -> str:
         "sheet_updates": [
             {
                 "row_number": item.get("row_number"),
-                "old_lead_number": item.get("old_lead_number") or "",
-                "new_lead_number": item.get("new_lead_number") or "",
-                "old_comment": item.get("old_comment") or "",
-                "new_comment": item.get("new_comment") or "",
+                "new_lead_number": item.get("new_lead_number"),
                 "kommo_lead_id": item.get("kommo_lead_id"),
             }
             for item in report.get("sheet_updates") or []
         ],
-        "kommo_renames": [
+        "onboarding_actions": [
             {
-                "kommo_lead_id": item.get("kommo_lead_id"),
                 "row_number": item.get("row_number"),
-                "old_name": item.get("old_name") or "",
-                "new_name": item.get("new_name") or "",
-                "lead_number": item.get("lead_number") or "",
+                "kommo_lead_id": item.get("kommo_lead_id"),
+                "lead_number": item.get("lead_number"),
+                "old_name": item.get("old_name"),
+                "new_name": item.get("new_name"),
+                "target_status_id": item.get("target_status_id"),
+                "task_text": item.get("task_text"),
+                "task_due_at": item.get("task_due_at"),
             }
-            for item in report.get("kommo_renames") or []
+            for item in report.get("onboarding_actions") or []
         ],
     }
     payload = json.dumps(stable, ensure_ascii=False, sort_keys=True)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:20]
 
 
-async def _load_notes(pairs: list[dict[str, Any]]) -> None:
-    semaphore = asyncio.Semaphore(_NOTE_CONCURRENCY)
-
-    async def load(pair: dict[str, Any]) -> None:
-        lead_id = int(pair["lead"]["id"])
-        async with semaphore:
-            try:
-                pair["notes"] = await kommo_service.get_recent_common_notes(
-                    lead_id, limit=_NOTE_LIMIT
-                )
-            except Exception as exc:
-                logger.warning("Could not load notes for sync lead %s: %s", lead_id, exc)
-                pair["notes"] = []
-
-    await asyncio.gather(*(load(pair) for pair in pairs))
+def _incoming_status(name: str | None) -> bool:
+    lowered = _clean(name).casefold()
+    return any(
+        token in lowered
+        for token in (
+            "incoming",
+            "неразобран",
+            "входящ",
+            "новый лид",
+            "new lead",
+        )
+    )
 
 
-async def _match_unresolved_pairs(
+async def _first_contact_status_id(pipeline_id: int | None) -> int | None:
+    if not isinstance(pipeline_id, int):
+        return settings.kommo_default_status_id
+    try:
+        statuses = await kommo_service.get_pipeline_statuses(pipeline_id)
+    except Exception as exc:
+        logger.warning("Could not load Kommo stages for onboarding: %s", exc)
+        return settings.kommo_default_status_id
+    preferred = (
+        "первый контакт",
+        "first contact",
+        "pierwszy kontakt",
+    )
+    for wanted in preferred:
+        for status in statuses:
+            if _clean(status.get("name")).casefold() == wanted:
+                return int(status["id"])
+    return settings.kommo_default_status_id
+
+
+def _task_due_timestamp() -> int:
+    try:
+        tz = ZoneInfo(settings.manager_timezone or "Europe/Warsaw")
+    except Exception:
+        tz = ZoneInfo("Europe/Warsaw")
+    now = datetime.now(tz)
+    due = now + timedelta(hours=4)
+    if due.hour >= 18:
+        due = (due + timedelta(days=1)).replace(
+            hour=10, minute=0, second=0, microsecond=0
+        )
+    while due.weekday() >= 5:
+        due = (due + timedelta(days=1)).replace(
+            hour=10, minute=0, second=0, microsecond=0
+        )
+    return int(due.timestamp())
+
+
+def _recommended_action(row: SpreadsheetRow, lead_number: str, product: str) -> str:
+    client = _clean(row.client_name) or "клиенту"
+    if _clean(row.phone):
+        return f"Позвонить {client} по лиду №{lead_number}: {product}"
+    if _clean(row.email):
+        return f"Связаться с {client} по лиду №{lead_number}: {product}"
+    return f"Открыть переписку и квалифицировать лид №{lead_number}: {product}"
+
+
+def _initial_assessment(row: SpreadsheetRow) -> str:
+    explicit = _clean(row.lead_status)
+    if explicit:
+        return explicit
+    budget = _clean(row.budget).casefold()
+    if "20_000" in budget or "20000" in budget or "powyżej" in budget:
+        return "Высокий потенциальный бюджет; требуется квалификация"
+    return "Новый лид; требуется квалификация"
+
+
+def _analysis_note(
+    *,
+    row: SpreadsheetRow,
+    lead: dict[str, Any],
+    lead_number: str,
+    product_ru: str,
+    matched_by: str,
+    task_text: str,
+) -> str:
+    marker = f"[BBS-ONBOARD-{lead_number}-{int(lead['id'])}]"
+    lines = [
+        marker,
+        "ПЕРВИЧНЫЙ АНАЛИЗ НОВОГО ЛИДА",
+        "",
+        f"Внутренний номер: №{lead_number}",
+        f"Клиент: {_clean(row.client_name) or 'не указан'}",
+        f"Запрос из рекламы: {_clean(row.product) or 'не указан'}",
+        f"Краткое название: {product_ru}",
+        f"Телефон: {_clean(row.phone) or 'не указан'}",
+        f"Email: {_clean(row.email) or 'не указан'}",
+        f"Регион: {_clean(row.region) or 'не указан'}",
+        f"Бюджет: {_clean(row.budget) or 'не указан'}",
+        f"Канал: {_clean(row.contact_channel) or 'не указан'}",
+        f"Сопоставление Sheets ↔ Kommo: {matched_by}",
+        "",
+        f"Предварительная оценка: {_initial_assessment(row)}.",
+        f"Следующий шаг: {task_text}.",
+        "",
+        "Статус маркетинговой оценки W не изменён.",
+    ]
+    return "\n".join(lines)[:13_500]
+
+
+async def _safe_product_title(row: SpreadsheetRow, lead: dict[str, Any]) -> str:
+    try:
+        title = _clean(await product_title_service.short_product_title(row.product))
+    except Exception as exc:
+        logger.warning(
+            "Product title failed for onboarding row %s (%s): %s",
+            row.row_number,
+            (row.product or "")[:80],
+            exc,
+        )
+        title = ""
+    if title and title.casefold() not in _GENERIC_TITLES:
+        return title[:50]
+
+    # Never replace a meaningful Kommo title with the destructive fallback "Товар".
+    current_name = _clean(lead.get("name"))
+    current_name = re.sub(r"^\s*\d+\s*(?:[-–—]\s*|\s+)", "", current_name)
+    if current_name and current_name.casefold() not in {
+        "просьба о контакте",
+        "lead",
+        "new lead",
+    }:
+        return current_name[:50]
+    return "Новый запрос"
+
+
+async def _match_new_rows(
     rows: list[SpreadsheetRow],
     leads: list[dict[str, Any]],
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+) -> tuple[list[dict[str, Any]], list[SpreadsheetRow]]:
     if not rows or not leads:
-        return [], leads
+        return [], rows
     enriched = await kommo_service.enrich_leads_with_contacts(leads)
     candidates_by_row: dict[int, list[dict[str, Any]]] = {}
     for lead in enriched:
@@ -224,24 +249,23 @@ async def _match_unresolved_pairs(
         )
 
     pairs: list[dict[str, Any]] = []
-    used_lead_ids: set[int] = set()
-    for items in candidates_by_row.values():
-        if len(items) != 1:
+    paired_rows: set[int] = set()
+    used_leads: set[int] = set()
+    for row_number, candidates in candidates_by_row.items():
+        if len(candidates) != 1:
             continue
-        pair = items[0]
-        lead_id = int(pair["lead"]["id"])
-        if lead_id in used_lead_ids:
+        pair = candidates[0]
+        lead_id = int(pair["lead"].get("id") or 0)
+        if not lead_id or lead_id in used_leads:
             continue
-        used_lead_ids.add(lead_id)
+        used_leads.add(lead_id)
+        paired_rows.add(row_number)
         pairs.append(pair)
-    unmatched = [
-        lead for lead in enriched if int(lead.get("id") or 0) not in used_lead_ids
-    ]
-    return pairs, unmatched
+    return pairs, [row for row in rows if row.row_number not in paired_rows]
 
 
 async def build_status_sync_report() -> dict[str, Any]:
-    """Read both systems and prepare a non-mutating registry sync preview."""
+    """Build a dry-run preview for manually onboarding rows with empty Y."""
     rows, kommo_result = await asyncio.gather(
         asyncio.to_thread(google_sheets_service.get_rows, force_refresh=True),
         kommo_service.get_all_leads_for_status_sync(),
@@ -253,15 +277,14 @@ async def build_status_sync_report() -> dict[str, Any]:
         number = _clean(row.lead_number)
         if number:
             table_by_number.setdefault(number, []).append(row)
-
     kommo_by_number: dict[str, list[dict[str, Any]]] = {}
-    unnumbered_kommo: list[dict[str, Any]] = []
+    unnumbered_leads: list[dict[str, Any]] = []
     for lead in kommo_leads:
         number = parse_internal_number(lead.get("name"))
         if number:
             kommo_by_number.setdefault(number, []).append(lead)
         else:
-            unnumbered_kommo.append(lead)
+            unnumbered_leads.append(lead)
 
     table_duplicates = [
         {
@@ -280,46 +303,13 @@ async def build_status_sync_report() -> dict[str, Any]:
         for number, duplicate_leads in kommo_by_number.items()
         if len(duplicate_leads) > 1
     ]
-    duplicate_numbers = {
-        item["lead_number"] for item in table_duplicates + kommo_duplicates
-    }
 
-    pairs: list[dict[str, Any]] = []
-    paired_rows: set[int] = set()
-    paired_leads: set[int] = set()
-    for number, matching_rows in table_by_number.items():
-        matching_leads = kommo_by_number.get(number) or []
-        if (
-            number in duplicate_numbers
-            or len(matching_rows) != 1
-            or len(matching_leads) != 1
-        ):
-            continue
-        row = matching_rows[0]
-        lead = matching_leads[0]
-        pairs.append({"row": row, "lead": lead, "matched_by": "number"})
-        paired_rows.add(row.row_number)
-        paired_leads.add(int(lead["id"]))
-
-    unresolved_rows = [
+    new_rows = [
         row
         for row in rows
-        if row.row_number not in paired_rows
-        and _clean(row.product)
-        and _clean(row.lead_number) not in duplicate_numbers
+        if _clean(row.product) and not _clean(row.lead_number)
     ]
-    unresolved_leads = [
-        lead
-        for lead in unnumbered_kommo
-        if int(lead.get("id") or 0) not in paired_leads
-    ]
-    contact_pairs, remaining_unnumbered = await _match_unresolved_pairs(
-        unresolved_rows, unresolved_leads
-    )
-    for pair in contact_pairs:
-        pairs.append(pair)
-        paired_rows.add(pair["row"].row_number)
-        paired_leads.add(int(pair["lead"]["id"]))
+    pairs, unmatched_new_rows = await _match_new_rows(new_rows, unnumbered_leads)
 
     used_numbers = {
         int(number)
@@ -328,149 +318,145 @@ async def build_status_sync_report() -> dict[str, Any]:
     }
     next_number = max(used_numbers, default=0) + 1
     for pair in sorted(pairs, key=lambda item: item["row"].row_number):
-        row = pair["row"]
-        old_number = _clean(row.lead_number)
-        if old_number:
-            pair["lead_number"] = old_number
-            pair["new_number"] = False
-            continue
         while next_number in used_numbers:
             next_number += 1
         pair["lead_number"] = str(next_number)
-        pair["new_number"] = True
         used_numbers.add(next_number)
         next_number += 1
 
-    await _load_notes(pairs)
-
+    status_cache: dict[int, int | None] = {}
     sheet_updates: list[dict[str, Any]] = []
     kommo_renames: list[dict[str, Any]] = []
+    onboarding_actions: list[dict[str, Any]] = []
+
     for pair in pairs:
         row: SpreadsheetRow = pair["row"]
         lead = pair["lead"]
+        lead_id = int(lead["id"])
         lead_number = str(pair["lead_number"])
-        old_number = _clean(row.lead_number)
+        product_ru = await _safe_product_title(row, lead)
+        new_name = build_proposed_name(lead_number, product_ru)
+        old_name = _clean(lead.get("name"))
+        task_text = _recommended_action(row, lead_number, product_ru)
+        due_at = _task_due_timestamp()
+
+        pipeline_id = lead.get("pipeline_id")
+        target_status_id = None
+        if _incoming_status(lead.get("status_name")):
+            if isinstance(pipeline_id, int) and pipeline_id not in status_cache:
+                status_cache[pipeline_id] = await _first_contact_status_id(pipeline_id)
+            target_status_id = (
+                status_cache.get(pipeline_id)
+                if isinstance(pipeline_id, int)
+                else settings.kommo_default_status_id
+            )
+            if target_status_id == lead.get("status_id"):
+                target_status_id = None
+
         old_comment = _clean(row.marketing_comment)
-        new_comment = build_marketing_comment(
-            row, lead, list(pair.get("notes") or [])
+        sheet_updates.append(
+            {
+                "row_number": row.row_number,
+                "row_fingerprint": _row_fingerprint(row),
+                "old_lead_number": "",
+                "new_lead_number": lead_number,
+                "old_comment": old_comment,
+                "new_comment": old_comment,
+                "marketing_status": row.lead_status,
+                "product": row.product,
+                "kommo_lead_id": lead_id,
+                "matched_by": pair.get("matched_by"),
+            }
         )
-        if old_number != lead_number or old_comment != new_comment:
-            sheet_updates.append(
+        if old_name != new_name:
+            kommo_renames.append(
                 {
+                    "kommo_lead_id": lead_id,
                     "row_number": row.row_number,
-                    "row_fingerprint": _row_fingerprint(row),
-                    "old_lead_number": old_number,
-                    "new_lead_number": lead_number,
-                    "old_comment": old_comment,
-                    "new_comment": new_comment,
-                    "marketing_status": row.lead_status,
-                    "product": row.product,
-                    "kommo_lead_id": lead.get("id"),
-                    "matched_by": pair.get("matched_by"),
+                    "lead_number": lead_number,
+                    "old_name": old_name,
+                    "new_name": new_name,
+                    "short_product_ru": product_ru,
+                    "url": lead.get("url"),
                 }
             )
 
-        if pair.get("matched_by") != "number":
-            try:
-                short_product = await product_title_service.short_product_title(
-                    row.product
-                )
-            except Exception as exc:
-                logger.warning(
-                    "Product title failed for sheet row %s (%s): %s",
-                    row.row_number,
-                    (row.product or "")[:80],
-                    exc,
-                )
-                short_product = "Товар"
-            proposed_name = build_proposed_name(lead_number, short_product)
-            current_name = _clean(lead.get("name"))
-            if current_name != proposed_name:
-                kommo_renames.append(
-                    {
-                        "kommo_lead_id": int(lead["id"]),
-                        "row_number": row.row_number,
-                        "lead_number": lead_number,
-                        "old_name": current_name,
-                        "new_name": proposed_name,
-                        "short_product_ru": short_product,
-                        "url": lead.get("url"),
-                    }
-                )
-
-    unmatched_table_rows = [
-        {
-            "row_number": row.row_number,
-            "lead_number": row.lead_number,
-            "product": row.product,
-            "client_name": row.client_name,
-        }
-        for row in rows
-        if row.row_number not in paired_rows
-    ]
-    kommo_only = [
-        {
-            "lead_number": number,
-            "kommo_lead_id": lead.get("id"),
-            "name": lead.get("name"),
-            "status_name": lead.get("status_name"),
-            "url": lead.get("url"),
-        }
-        for number, matching_leads in kommo_by_number.items()
-        if number not in duplicate_numbers
-        for lead in matching_leads
-        if int(lead.get("id") or 0) not in paired_leads
-    ]
+        onboarding_actions.append(
+            {
+                "kommo_lead_id": lead_id,
+                "row_number": row.row_number,
+                "lead_number": lead_number,
+                "old_name": old_name,
+                "new_name": new_name,
+                "short_product_ru": product_ru,
+                "matched_by": pair.get("matched_by"),
+                "target_status_id": target_status_id,
+                "task_text": task_text,
+                "task_due_at": due_at,
+                "analysis_note": _analysis_note(
+                    row=row,
+                    lead=lead,
+                    lead_number=lead_number,
+                    product_ru=product_ru,
+                    matched_by=str(pair.get("matched_by") or "unknown"),
+                    task_text=task_text,
+                ),
+                "contact_card": {
+                    "name": _clean(row.client_name) or _clean(lead.get("contact_name")),
+                    "phone": _clean(row.phone) or (list(lead.get("phones") or [""])[0]),
+                    "email": _clean(row.email) or (list(lead.get("emails") or [""])[0]),
+                    "product": product_ru,
+                    "lead_number": lead_number,
+                    "kommo_lead_id": lead_id,
+                },
+                "url": lead.get("url"),
+            }
+        )
 
     sheet_updates.sort(key=lambda item: item["row_number"])
     kommo_renames.sort(key=lambda item: item["row_number"])
+    onboarding_actions.sort(key=lambda item: item["row_number"])
     table_duplicates.sort(key=lambda item: _number_sort_key(item["lead_number"]))
     kommo_duplicates.sort(key=lambda item: _number_sort_key(item["lead_number"]))
 
-    report = {
+    report: dict[str, Any] = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "spreadsheet_rows_count": len(rows),
         "kommo_leads_count": len(kommo_leads),
-        "matched_count": len(pairs),
+        "matched_count": len(onboarding_actions),
+        "new_rows_count": len(new_rows),
         "sheet_updates": sheet_updates,
-        "comment_updates_count": sum(
-            1
-            for item in sheet_updates
-            if _clean(item.get("old_comment")) != _clean(item.get("new_comment"))
-        ),
-        "number_assignments_count": sum(
-            1
-            for item in sheet_updates
-            if _clean(item.get("old_lead_number"))
-            != _clean(item.get("new_lead_number"))
-        ),
+        "comment_updates_count": 0,
+        "number_assignments_count": len(sheet_updates),
         "kommo_renames": kommo_renames,
         "kommo_renames_count": len(kommo_renames),
-        "unmatched_table_rows": unmatched_table_rows,
-        "kommo_only": kommo_only,
-        "unnumbered_kommo": [
+        "onboarding_actions": onboarding_actions,
+        "unmatched_table_rows": [
             {
-                "kommo_lead_id": lead.get("id"),
-                "name": lead.get("name"),
-                "status_name": lead.get("status_name"),
-                "url": lead.get("url"),
+                "row_number": row.row_number,
+                "lead_number": row.lead_number,
+                "product": row.product,
+                "client_name": row.client_name,
+                "reason": "no_unique_kommo_match",
             }
-            for lead in remaining_unnumbered
+            for row in unmatched_new_rows
         ],
+        # The manual command intentionally does not report all historical Kommo-only leads.
+        "kommo_only": [],
+        "unnumbered_kommo": [],
         "table_duplicates": table_duplicates,
         "kommo_duplicates": kommo_duplicates,
         "kommo_truncated": bool(kommo_result.get("truncated")),
         "pipeline_id": kommo_result.get("pipeline_id"),
         "pipeline_name": kommo_result.get("pipeline_name"),
         "marketing_status_preserved": True,
+        "manual_onboarding_only": True,
     }
-    report["updates_count"] = len(sheet_updates) + len(kommo_renames)
+    report["updates_count"] = len(onboarding_actions)
     report["updates_digest"] = _updates_digest(report)
     report["has_differences"] = bool(
-        report["updates_count"]
-        or unmatched_table_rows
-        or kommo_only
-        or remaining_unnumbered
+        onboarding_actions
+        or unmatched_new_rows
         or table_duplicates
         or kommo_duplicates
     )
@@ -482,7 +468,7 @@ async def apply_confirmed_report(
     expected_digest: str,
     expected_updates_count: int,
 ) -> dict[str, Any]:
-    """Rebuild the preview, write X/Y, then rename verified Kommo leads."""
+    """Rebuild preview, write Y and onboard only the verified matched deals."""
     fresh_report = await build_status_sync_report()
     if (
         fresh_report.get("updates_digest") != expected_digest
@@ -505,82 +491,88 @@ async def apply_confirmed_report(
     )
     rows_by_position = {row.row_number: row for row in rows_after_write}
 
-    renamed: list[dict[str, Any]] = []
-    rename_skipped: list[dict[str, Any]] = []
-    for item in fresh_report.get("kommo_renames") or []:
-        row = rows_by_position.get(int(item["row_number"]))
-        if row is None or _clean(row.lead_number) != _clean(item["lead_number"]):
-            rename_skipped.append({**item, "reason": "sheet_number_not_applied"})
+    completed: list[dict[str, Any]] = []
+    skipped_actions: list[dict[str, Any]] = []
+    contact_cards: list[dict[str, Any]] = []
+    renamed_count = 0
+    moved_count = 0
+    note_count = 0
+    task_count = 0
+
+    for action in fresh_report.get("onboarding_actions") or []:
+        row = rows_by_position.get(int(action["row_number"]))
+        if row is None or _clean(row.lead_number) != _clean(action["lead_number"]):
+            skipped_actions.append({**action, "reason": "sheet_number_not_applied"})
             continue
+        lead_id = int(action["kommo_lead_id"])
         try:
-            lead = await kommo_service.get_lead_details(int(item["kommo_lead_id"]))
-            if _clean(lead.get("name")) != _clean(item.get("old_name")):
-                rename_skipped.append({**item, "reason": "kommo_name_changed"})
+            details = await kommo_service.get_lead_details(lead_id)
+            current_name = _clean(details.get("name"))
+            current_number = parse_internal_number(current_name)
+            if current_name != _clean(action.get("old_name")) and current_number != _clean(
+                action.get("lead_number")
+            ):
+                skipped_actions.append({**action, "reason": "kommo_name_changed"})
                 continue
-            result = await kommo_service.update_kommo_lead(
-                int(item["kommo_lead_id"]),
-                name=str(item["new_name"]),
-            )
-            renamed.append({**item, **result})
+
+            update_kwargs: dict[str, Any] = {}
+            if current_name != _clean(action.get("new_name")):
+                update_kwargs["name"] = str(action["new_name"])
+            target_status_id = action.get("target_status_id")
+            if isinstance(target_status_id, int) and details.get("status_id") != target_status_id:
+                update_kwargs["status_id"] = target_status_id
+            if update_kwargs:
+                await kommo_service.update_kommo_lead(lead_id, **update_kwargs)
+                if "name" in update_kwargs:
+                    renamed_count += 1
+                if "status_id" in update_kwargs:
+                    moved_count += 1
+
+            marker = f"[BBS-ONBOARD-{action['lead_number']}-{lead_id}]"
+            recent_notes = await kommo_service.get_recent_common_notes(lead_id, limit=50)
+            if not any(marker in _clean(note.get("text")) for note in recent_notes):
+                await kommo_service.add_common_note(
+                    lead_id, str(action.get("analysis_note") or "")
+                )
+                note_count += 1
+
+            tasks = await kommo_service.get_open_lead_tasks(lead_id, limit=50)
+            task_marker = f"№{action['lead_number']}"
+            if not any(task_marker in _clean(task.get("text")) for task in tasks):
+                await kommo_service.create_lead_task(
+                    lead_id=lead_id,
+                    text=str(action.get("task_text") or "Квалифицировать новый лид"),
+                    complete_till=int(action.get("task_due_at") or _task_due_timestamp()),
+                )
+                task_count += 1
+
+            card = dict(action.get("contact_card") or {})
+            if _clean(card.get("phone")):
+                contact_cards.append(card)
+            completed.append(action)
         except Exception as exc:
-            logger.warning(
-                "Could not rename Kommo lead %s during registry sync: %s",
-                item.get("kommo_lead_id"),
-                exc,
-            )
-            rename_skipped.append(
-                {**item, "reason": "kommo_update_failed", "error": type(exc).__name__}
+            logger.warning("Could not onboard Kommo lead %s: %s", lead_id, exc)
+            skipped_actions.append(
+                {**action, "reason": "kommo_onboarding_failed", "error": type(exc).__name__}
             )
 
     return {
         "stale": False,
         "report": fresh_report,
         **sheet_result,
-        "renamed_count": len(renamed),
-        "renamed": renamed,
-        "rename_skipped": rename_skipped,
+        "renamed_count": renamed_count,
+        "renamed": completed,
+        "status_moved_count": moved_count,
+        "note_count": note_count,
+        "task_count": task_count,
+        "contact_cards": contact_cards,
+        "rename_skipped": skipped_actions,
     }
 
 
 async def periodic_status_sync_loop() -> None:
-    """Send read-only registry discrepancy notifications on a schedule."""
-    from app.services import telegram_service
-
-    delay = max(10, int(settings.lead_status_sync_initial_delay_seconds or 90))
-    interval = max(15, int(settings.lead_status_sync_interval_minutes or 180))
-    await asyncio.sleep(delay)
-
-    while True:
-        chat_ids = settings.get_allowed_user_ids()
-        if not chat_ids:
-            logger.warning(
-                "Lead registry sync scheduler is enabled but "
-                "ALLOWED_TELEGRAM_USER_IDS is empty"
-            )
-        else:
-            try:
-                report = await build_status_sync_report()
-                should_notify = (
-                    report.get("has_differences")
-                    or not settings.lead_status_sync_notify_only_on_differences
-                )
-                if should_notify:
-                    for chat_id in chat_ids:
-                        await telegram_service.send_status_sync_notification(
-                            chat_id, report
-                        )
-            except Exception:
-                logger.exception("Periodic lead registry sync failed")
-                for chat_id in chat_ids:
-                    try:
-                        await telegram_service.send_message(
-                            chat_id,
-                            "❌ <b>Синхронизация лидов не выполнена</b>\n\n"
-                            "Проверьте Kommo и Google Sheets.",
-                        )
-                    except Exception:
-                        logger.exception(
-                            "Could not send lead registry sync failure notification"
-                        )
-
-        await asyncio.sleep(interval * 60)
+    """Periodic onboarding is intentionally disabled; the Telegram button is manual."""
+    logger.info(
+        "Periodic lead registry sync is disabled by design; use the Telegram sync button."
+    )
+    return

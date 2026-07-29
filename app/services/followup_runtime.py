@@ -127,7 +127,7 @@ async def _handle_followup_callback(
             reason="manager_confirmed_client_reply",
             waiting_on="us",
             action_text="Ответить клиенту",
-            incoming_at=followup_service._utcnow(),
+            incoming_at=followup_service.utcnow(),
         )
         await telegram_service.send_message(
             chat_id,

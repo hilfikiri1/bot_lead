@@ -117,13 +117,21 @@ async def create_client_message_draft(
     else:
         recipient = resolved.email
     if channel == "whatsapp" and not recipient:
-        # Last-chance: scan raw contact phones again (display forms).
-        for phone in contact.get("phones") or []:
+        language = str(draft.get("language") or None)
+        # Last-chance: contact phones, then lead custom fields (form questions).
+        candidates: list[str] = [str(p) for p in (contact.get("phones") or [])]
+        custom = lead.get("custom_fields") or []
+        if isinstance(custom, dict):
+            candidates.extend(str(v) for v in custom.values() if v)
+        elif isinstance(custom, list):
+            candidates.extend(
+                str(field.get("value") or "")
+                for field in custom
+                if field.get("value")
+            )
+        for phone in candidates:
             try:
-                recipient = normalize_whatsapp_phone(
-                    str(phone),
-                    language=str(draft.get("language") or None),
-                )
+                recipient = normalize_whatsapp_phone(str(phone), language=language)
                 break
             except ValueError:
                 continue

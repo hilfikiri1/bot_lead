@@ -1044,9 +1044,24 @@ def _contact_channels(contact: dict[str, Any]) -> tuple[list[str], list[str]]:
             if not value:
                 continue
             is_phone = code == "PHONE" or (
-                any(token in name for token in ("phone", "телефон", "мобил", "tel", "mobile", "whatsapp"))
+                any(
+                    token in name
+                    for token in (
+                        "phone",
+                        "телефон",
+                        "мобил",
+                        "tel",
+                        "mobile",
+                        "whatsapp",
+                        "telefon",
+                        "numer telefon",
+                        "numer tel",
+                        "swój numer",
+                        "swoj numer",
+                    )
+                )
                 and (
-                    field_type in {"phone", "multitext", ""}
+                    field_type in {"phone", "multitext", "text", ""}
                     or code in {"", "PHONE"}
                 )
             )

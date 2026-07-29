@@ -9,6 +9,12 @@ import pytest
 from app.services import kaizen_journal_service
 
 
+@pytest.fixture(autouse=True)
+def _simple_namespace_jsonb_flag(monkeypatch):
+    """Flow tests use lightweight records; production keeps SQLAlchemy flag_modified."""
+    monkeypatch.setattr(kaizen_journal_service, "flag_modified", lambda *_args, **_kwargs: None)
+
+
 def _daily_entry(*, raw_text: str | None = None, status: str = "open"):
     return SimpleNamespace(
         id=7,

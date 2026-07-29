@@ -1,5 +1,8 @@
 """Tests for guarded Kommo <-> Google Sheets lead registry synchronization."""
 
+from __future__ import annotations
+
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -38,58 +41,15 @@ def _row(
     )
 
 
-def test_parse_internal_number():
+def test_parse_internal_number_accepts_dash_and_historical_space_format():
     assert lead_status_sync_service.parse_internal_number("110 - Игрушки") == "110"
     assert lead_status_sync_service.parse_internal_number(" 7– Maszyna ") == "7"
+    assert lead_status_sync_service.parse_internal_number("68 Пилы") == "68"
     assert lead_status_sync_service.parse_internal_number("Facebook №123") is None
 
 
-def test_marketing_comment_preserves_independent_status_and_reason():
-    row = _row(
-        "163",
-        "MQL",
-        row_number=10,
-        product="art party balony",
-        comment="Действующий магазин 5 лет, регулярные закупки.",
-    )
-    comment = lead_status_sync_service.build_marketing_comment(
-        row,
-        {"name": "163 - Шары", "status_name": "Получено ТЗ"},
-        [{"text": "Клиент попросил образцы качественных шаров."}],
-    )
-    assert "MQL — потенциально целевой" in comment
-    assert "Основание: Действующий магазин 5 лет" in comment
-    assert "Kommo: Получено ТЗ" in comment
-    assert "История: Клиент попросил образцы" in comment
-
-
-def test_managed_marketing_comment_is_stable():
-    row = _row(
-        "163",
-        "SQL",
-        row_number=10,
-        product="balony",
-        comment="Первичная причина.",
-    )
-    lead = {"name": "163 - Шары", "status_name": "Квалификация лида"}
-    notes = [{"text": "Ожидаем список моделей."}]
-    first = lead_status_sync_service.build_marketing_comment(row, lead, notes)
-    second = lead_status_sync_service.build_marketing_comment(
-        _row(
-            "163",
-            "SQL",
-            row_number=10,
-            product="balony",
-            comment=first,
-        ),
-        lead,
-        notes,
-    )
-    assert first == second
-
-
 @pytest.mark.asyncio
-async def test_report_assigns_next_number_and_never_proposes_status_write():
+async def test_report_assigns_next_number_and_preserves_existing_x_and_w():
     rows = [
         _row(
             "165",
@@ -105,6 +65,7 @@ async def test_report_assigns_next_number_and_never_proposes_status_write():
             product="herbaty ryż mango",
             phone="698 136 090",
             client_name="Przemek Bryłka",
+            comment="Существующий комментарий X",
         ),
     ]
     kommo_result = {
@@ -152,11 +113,6 @@ async def test_report_assigns_next_number_and_never_proposes_status_write():
             return_value=[enriched],
         ),
         patch(
-            "app.services.lead_status_sync_service.kommo_service.get_recent_common_notes",
-            new_callable=AsyncMock,
-            return_value=[],
-        ),
-        patch(
             "app.services.lead_status_sync_service.product_title_service.short_product_title",
             new_callable=AsyncMock,
             return_value="Чай",
@@ -165,15 +121,20 @@ async def test_report_assigns_next_number_and_never_proposes_status_write():
         report = await lead_status_sync_service.build_status_sync_report()
 
     assert report["marketing_status_preserved"] is True
+    assert report["comment_updates_count"] == 0
     assert report["number_assignments_count"] == 1
-    new_row = next(
-        item for item in report["sheet_updates"] if item["row_number"] == 166
-    )
+    assert report["updates_count"] == 1
+
+    new_row = report["sheet_updates"][0]
+    assert new_row["row_number"] == 166
     assert new_row["old_lead_number"] == ""
     assert new_row["new_lead_number"] == "171"
     assert new_row["marketing_status"] == "SQL"
+    assert new_row["old_comment"] == "Существующий комментарий X"
+    assert new_row["new_comment"] == "Существующий комментарий X"
     assert "new_status" not in new_row
     assert report["kommo_renames"][0]["new_name"] == "171 - Чай"
+    assert report["onboarding_actions"][0]["lead_number"] == "171"
 
 
 @pytest.mark.asyncio
@@ -182,7 +143,7 @@ async def test_confirmed_report_rejects_stale_preview():
         "updates_digest": "fresh",
         "updates_count": 1,
         "sheet_updates": [{"row_number": 166}],
-        "kommo_renames": [],
+        "onboarding_actions": [],
     }
     with (
         patch(
@@ -215,21 +176,21 @@ def test_sheet_write_is_disabled_by_default():
                         "old_lead_number": "",
                         "new_lead_number": "166",
                         "old_comment": "",
-                        "new_comment": "Клиент: Test.",
+                        "new_comment": "",
                     }
                 ]
             )
 
 
-def test_sheet_write_updates_only_x_y_and_preserves_w():
+def test_manual_onboarding_sheet_write_updates_only_y_and_preserves_x_w():
     rows = [
         _row(
             "",
             "SQL",
             row_number=166,
             phone="698136090",
-            comment="",
-        ),
+            comment="Существующий X",
+        )
     ]
     mock_service = MagicMock()
     with (
@@ -272,18 +233,20 @@ def test_sheet_write_updates_only_x_y_and_preserves_w():
                     ],
                     "old_lead_number": "",
                     "new_lead_number": "166",
-                    "old_comment": "",
-                    "new_comment": "Клиент: Test.",
+                    "old_comment": "Существующий X",
+                    "new_comment": "Существующий X",
                 }
             ]
         )
 
     assert result["updated_count"] == 1
+    assert result["updated_cells_count"] == 1
     call = (
         mock_service.spreadsheets.return_value.values.return_value.batchUpdate.call_args
     )
     data = call.kwargs["body"]["data"]
-    assert {item["range"] for item in data} == {"'FB'!X166", "'FB'!Y166"}
+    assert {item["range"] for item in data} == {"'FB'!Y166"}
+    assert all("X166" not in item["range"] for item in data)
     assert all("W166" not in item["range"] for item in data)
 
 
@@ -305,7 +268,7 @@ def test_sheet_write_rechecks_manual_comment():
                     "old_lead_number": "166",
                     "new_lead_number": "166",
                     "old_comment": "Старое значение",
-                    "new_comment": "Новое значение",
+                    "new_comment": "Старое значение",
                 }
             ]
         )
@@ -314,24 +277,30 @@ def test_sheet_write_rechecks_manual_comment():
 
 
 @pytest.mark.asyncio
-async def test_confirmed_sync_writes_sheet_before_verified_kommo_rename():
+async def test_confirmed_onboarding_writes_y_then_updates_verified_kommo_lead():
+    due_at = int(time.time()) + 3600
     report = {
         "updates_digest": "same",
-        "updates_count": 2,
+        "updates_count": 1,
         "sheet_updates": [{"row_number": 166, "new_lead_number": "166"}],
-        "kommo_renames": [
+        "onboarding_actions": [
             {
                 "kommo_lead_id": 77,
                 "row_number": 166,
                 "lead_number": "166",
                 "old_name": "Facebook lead",
                 "new_name": "166 - Чай",
+                "target_status_id": None,
+                "analysis_note": "[BBS-ONBOARD-166-77]\nАнализ",
+                "task_text": "Позвонить клиенту по лиду №166: Чай",
+                "task_due_at": due_at,
+                "contact_card": {},
             }
         ],
     }
     sheet_result = {
         "updated_count": 1,
-        "updated_cells_count": 2,
+        "updated_cells_count": 1,
         "updated": [],
         "skipped": [],
     }
@@ -352,22 +321,48 @@ async def test_confirmed_sync_writes_sheet_before_verified_kommo_rename():
         patch(
             "app.services.lead_status_sync_service.kommo_service.get_lead_details",
             new_callable=AsyncMock,
-            return_value={"id": 77, "name": "Facebook lead"},
+            return_value={"id": 77, "name": "Facebook lead", "status_id": 10},
         ),
         patch(
             "app.services.lead_status_sync_service.kommo_service.update_kommo_lead",
             new_callable=AsyncMock,
             return_value={"lead_id": 77, "lead_name": "166 - Чай"},
         ) as rename,
+        patch(
+            "app.services.lead_status_sync_service.kommo_service.get_recent_common_notes",
+            new_callable=AsyncMock,
+            return_value=[],
+        ),
+        patch(
+            "app.services.lead_status_sync_service.kommo_service.add_common_note",
+            new_callable=AsyncMock,
+        ) as add_note,
+        patch(
+            "app.services.lead_status_sync_service.kommo_service.get_open_lead_tasks",
+            new_callable=AsyncMock,
+            return_value=[],
+        ),
+        patch(
+            "app.services.lead_status_sync_service.kommo_service.create_lead_task",
+            new_callable=AsyncMock,
+        ) as create_task,
     ):
         result = await lead_status_sync_service.apply_confirmed_report(
             expected_digest="same",
-            expected_updates_count=2,
+            expected_updates_count=1,
         )
 
     sheet_write.assert_called_once()
     rename.assert_awaited_once_with(77, name="166 - Чай")
+    add_note.assert_awaited_once()
+    create_task.assert_awaited_once_with(
+        lead_id=77,
+        text="Позвонить клиенту по лиду №166: Чай",
+        complete_till=due_at,
+    )
     assert result["renamed_count"] == 1
+    assert result["note_count"] == 1
+    assert result["task_count"] == 1
 
 
 @pytest.mark.asyncio

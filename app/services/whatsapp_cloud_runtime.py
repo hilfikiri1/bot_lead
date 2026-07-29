@@ -23,9 +23,9 @@ def _assert_writer() -> None:
 
 def _cloud_button(record: Any) -> dict[str, str] | None:
     if (
-        record.channel == "whatsapp"
-        and record.recipient
-        and record.status not in {"sent", "cancelled"}
+        getattr(record, "channel", None) == "whatsapp"
+        and getattr(record, "recipient", None)
+        and getattr(record, "status", "prepared") not in {"sent", "cancelled"}
         and whatsapp_cloud_service.enabled()
     ):
         return {
@@ -59,7 +59,7 @@ def install_whatsapp_cloud_runtime() -> None:
 
     def format_with_cloud_status(record: Any) -> str:
         text = original_format(record)
-        if record.channel != "whatsapp":
+        if getattr(record, "channel", None) != "whatsapp":
             return text
         if whatsapp_cloud_service.enabled():
             text = text.replace(

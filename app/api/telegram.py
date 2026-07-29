@@ -3095,6 +3095,7 @@ async def telegram_webhook(
                     db,
                     callback_data=callback_data,
                     telegram_user_id=user_id,
+                    chat_id=chat_id,
                 )
                 if agent_reply is not None:
                     await telegram_service.send_message(

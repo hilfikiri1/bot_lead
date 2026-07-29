@@ -130,6 +130,84 @@ def test_drive_preview_lists_subfolders():
     assert "подтверждения" in text.casefold()
 
 
+@pytest.mark.asyncio
+async def test_drive_project_candidate_selection_continues_to_confirmation():
+    from app.agent import service as agent_service
+
+    session = SimpleNamespace()
+    lead = {
+        "id": 12496715,
+        "name": "135 - Кормушки",
+        "contacts": [{"name": "Artur Cukrowski", "phones": ["+48607783552"]}],
+    }
+    preview = {
+        "project_key": "BBS-PL-0135",
+        "kommo_lead_id": 12496715,
+        "kommo_lead_name": "135 - Кормушки",
+        "client_name": "Artur Cukrowski",
+        "country_code": "PL",
+        "folder_name": "BBS-PL-0135 — Кормушки",
+        "subfolders": list(PROJECT_SUBFOLDERS),
+        "warnings": [],
+    }
+    with (
+        patch.object(
+            agent_service.memory,
+            "get_or_create_session",
+            new=AsyncMock(return_value=session),
+        ),
+        patch.object(
+            agent_service.memory,
+            "build_context",
+            new=AsyncMock(return_value={}),
+        ),
+        patch.object(
+            agent_service.memory,
+            "set_active_lead",
+            new=AsyncMock(),
+        ),
+        patch.object(
+            agent_service.memory,
+            "update_context",
+            new=AsyncMock(),
+        ),
+        patch.object(
+            agent_service.kommo_service,
+            "get_lead_details",
+            new=AsyncMock(return_value=lead),
+        ),
+        patch.object(
+            agent_service.project_drive,
+            "build_drive_project_preview",
+            new=AsyncMock(return_value=preview),
+        ),
+        patch.object(
+            agent_service.project_drive,
+            "format_drive_project_preview",
+            return_value="<b>Создать проект BBS-PL-0135?</b>",
+        ),
+        patch.object(
+            agent_service.actions,
+            "stage_action",
+            new=AsyncMock(return_value=SimpleNamespace(id=77)),
+        ) as stage_action,
+    ):
+        reply = await agent_service.handle_callback(
+            AsyncMock(),
+            callback_data="agent:lead:12496715:create_drive_project",
+            telegram_user_id=99,
+            chat_id=456,
+        )
+
+    assert reply is not None
+    assert reply.intent == "create_drive_project"
+    assert reply.metadata == {"action_id": 77}
+    assert reply.reply_markup is not None
+    stage_action.assert_awaited_once()
+    assert stage_action.await_args.kwargs["chat_id"] == 456
+    assert stage_action.await_args.kwargs["action_type"] == "create_drive_project"
+
+
 def test_link_preview_mentions_notion_and_drive():
     data = {
         "project_key": "BBS-PL-0120",

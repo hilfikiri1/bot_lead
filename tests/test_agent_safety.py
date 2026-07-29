@@ -64,3 +64,17 @@ def test_lead_candidate_buttons_use_compact_callbacks():
     assert rows[0][0]["callback_data"] == "agent:lead:123456"
     assert rows[1][0]["callback_data"] == "agent:lead:654321"
     assert len(rows[0][0]["callback_data"].encode("utf-8")) <= 64
+
+
+def test_lead_candidate_button_can_continue_drive_project_intent():
+    from app.agent.tools import candidates_markup
+
+    markup = candidates_markup(
+        [{"id": 12496715, "name": "135 - Кормушки"}],
+        next_intent="create_drive_project",
+    )
+
+    assert markup is not None
+    callback_data = markup["inline_keyboard"][0][0]["callback_data"]
+    assert callback_data == "agent:lead:12496715:create_drive_project"
+    assert len(callback_data.encode("utf-8")) <= 64

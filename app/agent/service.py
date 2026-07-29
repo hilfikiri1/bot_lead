@@ -296,6 +296,7 @@ async def handle_message(
                 )
             return reply
 
+    plan: AgentPlan | None = None
     try:
         plan = await planner.plan_message(text, context=context)
         if plan.intent == "cancel_clarification" or clarification.is_cancel_command(text):
@@ -325,9 +326,17 @@ async def handle_message(
         )
     except tools.LeadResolutionError as exc:
         if exc.candidates:
+            next_intent = (
+                plan.intent
+                if plan and plan.intent in {"create_drive_project"}
+                else None
+            )
             reply = AgentReply(
                 tools.format_candidates(exc.candidates),
-                reply_markup=tools.candidates_markup(exc.candidates),
+                reply_markup=tools.candidates_markup(
+                    exc.candidates,
+                    next_intent=next_intent,
+                ),
                 intent="lead_disambiguation",
             )
         else:
@@ -1023,6 +1032,7 @@ async def handle_callback(
     *,
     callback_data: str,
     telegram_user_id: int,
+    chat_id: int | None = None,
 ) -> AgentReply | None:
     if not callback_data.startswith("agent:"):
         return None
@@ -1040,23 +1050,45 @@ async def handle_callback(
 
     if command == "lead" and parts[2].isdigit():
         try:
-            lead = await kommo_service.get_lead_details(int(parts[2]))
+            lead_id = int(parts[2])
+            next_intent = parts[3] if len(parts) >= 4 else None
+            lead = await kommo_service.get_lead_details(lead_id)
             internal = extract_internal_lead_number(lead)
             await memory.set_active_lead(
                 db,
                 session=session,
-                kommo_lead_id=int(parts[2]),
+                kommo_lead_id=lead_id,
                 lead_name=str(lead.get("name") or ""),
             )
             if internal:
                 await memory.update_context(
                     db, session=session, values={"active_internal_lead_number": internal}
                 )
+            if next_intent == "create_drive_project":
+                if chat_id is None:
+                    return AgentReply(
+                        "❌ Не удалось продолжить создание проекта: отсутствует Telegram chat ID.",
+                        intent="callback_error",
+                    )
+                return await _execute_plan(
+                    db,
+                    plan=AgentPlan(
+                        intent="create_drive_project",
+                        mode="write",
+                        lead_id=lead_id,
+                    ),
+                    text="Создай проект в Drive",
+                    chat_id=chat_id,
+                    telegram_user_id=telegram_user_id,
+                    source="callback",
+                    context=context,
+                    session=session,
+                )
             return AgentReply(
                 tools.format_lead_summary(lead),
                 reply_markup=tools.lead_card_actions_markup(lead),
                 intent="lead_selected",
-                metadata={"lead_id": int(parts[2])},
+                metadata={"lead_id": lead_id},
             )
         except Exception as exc:
             logger.exception("Could not select Kommo lead from agent callback")

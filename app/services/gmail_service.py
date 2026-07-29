@@ -2,7 +2,6 @@
 gmail_service.py
 Creates Gmail drafts using the Gmail API. Never sends automatically.
 """
-
 from __future__ import annotations
 
 import base64
@@ -24,6 +23,9 @@ settings = get_settings()
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.compose",
     "https://www.googleapis.com/auth/calendar",
+    # The same manager OAuth identity can upload project documents into the
+    # existing My Drive hierarchy. Service accounts have no binary storage quota.
+    "https://www.googleapis.com/auth/drive",
 ]
 
 
@@ -73,14 +75,15 @@ def create_draft(
             service.users()
             .drafts()
             .create(
-                userId="me",
+                userId=sender,
                 body={"message": {"raw": raw}},
             )
             .execute()
         )
-        draft_id = draft["id"]
-        logger.info("Gmail draft created: %s", draft_id)
+        draft_id = draft.get("id")
+        if not draft_id:
+            raise RuntimeError("Gmail API did not return a draft id")
         return draft_id
-    except HttpError as e:
-        logger.error("Gmail API error: %s", e)
-        raise
+    except HttpError as exc:
+        logger.exception("Gmail draft creation failed")
+        raise RuntimeError("Не удалось создать черновик Gmail.") from exc

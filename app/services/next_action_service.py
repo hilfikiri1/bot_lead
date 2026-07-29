@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import html
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import flag_modified
 
 from app.config import get_settings
 from app.models.agent_v5 import NextActionState
@@ -54,6 +55,12 @@ def stale_threshold_days(*, pipeline: str | None = None, grade: str | None = Non
     return configured
 
 
+def _aware(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
 def evaluate_lead_next_action(
     lead: dict[str, Any],
     *,
@@ -61,6 +68,8 @@ def evaluate_lead_next_action(
     grade: str | None = None,
     waiting_on: str | None = None,
     action_text: str | None = None,
+    stored_due_at: datetime | None = None,
+    stored_stale_reason: str | None = None,
 ) -> NextActionView:
     now = now or datetime.now(timezone.utc)
     now_ts = int(now.timestamp())
@@ -75,9 +84,9 @@ def evaluate_lead_next_action(
     except Exception:
         internal = None
 
-    due_at = None
+    due_at = _aware(stored_due_at)
     status = "ok"
-    stale_reason = None
+    stale_reason = stored_stale_reason
     category = "ready"
     recommended = action_text
 
@@ -90,21 +99,33 @@ def evaluate_lead_next_action(
         category = "waiting_client"
         recommended = recommended or "Дождаться ответа клиента"
 
-    if closest is None and not action_text:
+    effective_due_ts = None
+    if due_at is not None:
+        effective_due_ts = int(due_at.timestamp())
+    elif isinstance(closest, (int, float)):
+        effective_due_ts = int(closest)
+        due_at = datetime.fromtimestamp(effective_due_ts, tz=timezone.utc)
+
+    if effective_due_ts is not None and effective_due_ts < now_ts:
+        status = "overdue"
+        category = "overdue"
+        stale_reason = stale_reason or (
+            "клиент не ответил к сроку follow-up"
+            if waiting_on == "client"
+            else "задача просрочена"
+        )
+        recommended = recommended or (
+            "Подготовить follow-up"
+            if waiting_on == "client"
+            else "Закрыть или перенести просроченную задачу"
+        )
+    elif closest is None and not action_text and waiting_on not in {"us", "client"}:
         status = "missing"
         category = "without_next"
         stale_reason = "нет следующей задачи"
         recommended = "Создать следующее действие"
-    elif isinstance(closest, (int, float)) and int(closest) < now_ts:
-        status = "overdue"
-        category = "overdue"
-        due_at = datetime.fromtimestamp(int(closest), tz=timezone.utc)
-        stale_reason = "задача просрочена"
-        recommended = recommended or "Закрыть или перенести просроченную задачу"
-    elif isinstance(closest, (int, float)):
-        due_at = datetime.fromtimestamp(int(closest), tz=timezone.utc)
-        if not action_text:
-            recommended = "Выполнить задачу в срок"
+    elif effective_due_ts is not None and not action_text:
+        recommended = "Выполнить задачу в срок"
 
     threshold = stale_threshold_days(pipeline=str(lead.get("pipeline_name") or ""), grade=grade)
     if age_days >= threshold and status not in {"overdue"}:
@@ -148,11 +169,26 @@ async def upsert_next_action_state(
     row.due_at = view.due_at
     row.responsible_user_id = responsible_user_id
     row.stale_reason = view.stale_reason
-    row.metadata_json = {"category": view.category, "age_days": view.age_days}
+    metadata = dict(row.metadata_json or {})
+    metadata.update({"category": view.category, "age_days": view.age_days})
+    row.metadata_json = metadata
+    try:
+        flag_modified(row, "metadata_json")
+    except Exception:
+        pass
     row.updated_at = datetime.now(timezone.utc)
     await db.commit()
     await db.refresh(row)
     return row
+
+
+def _stored_state_is_meaningful(row: NextActionState | None) -> bool:
+    if row is None:
+        return False
+    followup = dict((row.metadata_json or {}).get("followup") or {})
+    if followup.get("status") in {"scheduled", "reminded"}:
+        return True
+    return row.waiting_on in {"us", "client"}
 
 
 async def build_inbox(
@@ -163,11 +199,32 @@ async def build_inbox(
 ) -> InboxResult:
     open_result = await kommo_service.get_all_open_leads()
     leads = open_result.get("leads") or []
+    lead_ids = [int(lead.get("id") or 0) for lead in leads if int(lead.get("id") or 0)]
+    stored_by_lead: dict[int, NextActionState] = {}
+    if lead_ids:
+        stored_rows = list(
+            (
+                await db.execute(
+                    select(NextActionState).where(NextActionState.kommo_lead_id.in_(lead_ids))
+                )
+            ).scalars().all()
+        )
+        stored_by_lead = {int(row.kommo_lead_id): row for row in stored_rows}
+
     inbox = InboxResult()
     for lead in leads:
         if responsible_user_id and int(lead.get("responsible_user_id") or 0) != int(responsible_user_id):
             continue
-        view = evaluate_lead_next_action(lead)
+        lead_id = int(lead.get("id") or 0)
+        stored = stored_by_lead.get(lead_id)
+        use_stored = _stored_state_is_meaningful(stored)
+        view = evaluate_lead_next_action(
+            lead,
+            waiting_on=stored.waiting_on if use_stored and stored else None,
+            action_text=stored.action_text if use_stored and stored else None,
+            stored_due_at=stored.due_at if use_stored and stored else None,
+            stored_stale_reason=stored.stale_reason if use_stored and stored else None,
+        )
         try:
             await upsert_next_action_state(
                 db,

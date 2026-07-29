@@ -39,6 +39,13 @@ def test_whatsapp_signature_verification():
 
 
 def test_extract_whatsapp_text_message():
+    raw_message = {
+        "id": "wamid.1",
+        "from": "48600100200",
+        "timestamp": "1785320000",
+        "type": "text",
+        "text": {"body": "Proszę o ofertę"},
+    }
     payload = {
         "entry": [
             {
@@ -52,15 +59,7 @@ def test_extract_whatsapp_text_message():
                                     "profile": {"name": "Jan Kowalski"},
                                 }
                             ],
-                            "messages": [
-                                {
-                                    "id": "wamid.1",
-                                    "from": "48600100200",
-                                    "timestamp": "1785320000",
-                                    "type": "text",
-                                    "text": {"body": "Proszę o ofertę"},
-                                }
-                            ],
+                            "messages": [raw_message],
                         }
                     }
                 ]
@@ -78,6 +77,9 @@ def test_extract_whatsapp_text_message():
             "timestamp": 1785320000,
             "phone_number_id": "123",
             "display_phone_number": None,
+            "context_message_id": None,
+            "media": None,
+            "raw": raw_message,
         }
     ]
 

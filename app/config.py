@@ -243,12 +243,19 @@ class Settings(BaseSettings):
     google_drive_projects_folder_id: str = ""
     google_drive_project_template_folder_id: str = ""
 
-    # Scheduled agent digests (Agent v4)
+    # Scheduled agent digests and kaizen reflection
     agent_morning_digest_enabled: bool = False
     agent_morning_digest_hour: int = 8
     agent_evening_digest_enabled: bool = False
     agent_evening_digest_hour: int = 19
     agent_digest_timezone: str = "Europe/Warsaw"
+    agent_evening_reflection_enabled: bool = False
+    agent_evening_reflection_hour: int = 19
+    agent_evening_reflection_reminder_hours: int = 1
+    agent_weekly_review_enabled: bool = False
+    agent_weekly_review_weekday: int = 6
+    agent_weekly_review_hour: int = 19
+    agent_weekly_review_min_daily_entries: int = 2
 
     # AI usage budgets (0 = no blocking)
     agent_daily_ai_budget_usd: float = 0

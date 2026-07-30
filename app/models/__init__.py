@@ -22,6 +22,7 @@ from app.models.project_event import ProjectEvent
 from app.models.supplier_workspace import ProjectSupplier, SupplierInquiry, SupplierOffer
 from app.models.whatsapp_cloud_message import WhatsAppCloudMessage
 from app.models.kaizen_journal_entry import KaizenJournalEntry
+from app.models.goal_qa import BusinessGoal, QAAttachment, QAIssue
 from app.models.agent_v5 import (
     DocumentExtraction,
     IntegrationOperation,
@@ -58,6 +59,9 @@ __all__ = [
     "SupplierOffer",
     "WhatsAppCloudMessage",
     "KaizenJournalEntry",
+    "BusinessGoal",
+    "QAIssue",
+    "QAAttachment",
     "ProjectMemory",
     "LeadAssessment",
     "NextActionState",

@@ -24,6 +24,7 @@ from app.agent import tools as agent_tools
 from app.agent.security import sanitize_text
 from app.config import get_settings
 from app.database import get_db
+from app.api import lead_intake_telegram
 from app.services import (
     approval_service,
     calendar_event_builder,
@@ -1604,7 +1605,7 @@ async def _handle_manager_callback(
     if (
         actor is not None
         and actor.lead_access_scope == "assigned"
-        and callback_data.startswith(("menu:unrev", "unrev:", "sync:"))
+        and callback_data.startswith(("menu:unrev", "unrev:", "sync:", "lp:"))
     ):
         await telegram_service.send_message(
             chat_id,
@@ -1612,6 +1613,11 @@ async def _handle_manager_callback(
             "Менеджер работает только с назначенными ему сделками.",
         )
         return True
+
+    if callback_data.startswith("lp:"):
+        return await lead_intake_telegram.handle_callback(
+            callback_data=callback_data, chat_id=chat_id, user_id=user_id, db=db
+        )
 
     if callback_data == "sync:run":
         await _run_status_sync(chat_id, user_id)
@@ -2622,6 +2628,15 @@ def _legacy_callback_requires_write(callback_data: str) -> bool:
             "caltime:",
             "caldur:",
             "calrem:",
+            "lp:apply:",
+            "lp:skip:",
+            "lp:wa_sent:",
+            "lp:pick:",
+            "lp:edit_field:",
+            "lp:call_ok:",
+            "lp:call_na:",
+            "lp:call_later:",
+            "lp:call_bad:",
         )
     )
 
@@ -2649,6 +2664,10 @@ async def _handle_text_state(
             chat_id, "🔒 Роль Viewer позволяет только просматривать данные."
         )
         return True
+    if mode == "lead_intake_edit_field":
+        return await lead_intake_telegram.handle_text_reply(
+            db, chat_id=chat_id, user_id=user_id, text=text
+        )
     if mode == "edit_client_message":
         draft_id = int(state.get("client_message_draft_id") or 0)
         record = await client_message_service.get_draft(db, draft_id)
@@ -3271,6 +3290,16 @@ async def telegram_webhook(
                 await _run_status_sync(chat_id, user_id)
             return {"ok": True}
 
+        if text.startswith("/new_leads"):
+            if actor.role not in {"owner", "admin"}:
+                await telegram_service.send_message(
+                    chat_id,
+                    "🔒 Обработка новых лидов Facebook доступна Owner/Admin.",
+                )
+            else:
+                await lead_intake_telegram.show_next_job(db, chat_id, user_id)
+            return {"ok": True}
+
         if text.startswith("/calendar_test_write"):
             await telegram_service.send_message(
                 chat_id,
@@ -3341,6 +3370,7 @@ async def telegram_webhook(
                     "/bind_kommo",
                     "/kommo_test",
                     "/status_sync",
+                    "/new_leads",
                     "/calendar_test",
                     "/notion_test",
                     "/jobs",

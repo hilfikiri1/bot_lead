@@ -33,6 +33,7 @@ from app.models.agent_v5 import (
     UndoOperation,
     UserNotificationPreference,
 )
+from app.models.lead_processing_job import LeadNumberCounter, LeadProcessingJob
 
 __all__ = [
     "Client",
@@ -70,4 +71,6 @@ __all__ = [
     "SheetsLeadLink",
     "DocumentExtraction",
     "UndoOperation",
+    "LeadProcessingJob",
+    "LeadNumberCounter",
 ]

@@ -30,6 +30,13 @@ _DETERMINISTIC_RULES: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\bdron", re.I), "Дроны"),
     (re.compile(r"klejenia drewna|tartaczn|drewn", re.I), "Деревообработка"),
     (re.compile(r"tamborki|hafciark", re.I), "Пяльцы для вышивки"),
+    (re.compile(r"\bnarz[eę]dzi", re.I), "Инструменты"),
+    (re.compile(r"fotele?\s+autobusow", re.I), "Автобусные сиденья"),
+    (re.compile(r"pokry(?:cia|wa)\s+pod[lł]ogow", re.I), "Напольные покрытия"),
+    (
+        re.compile(r"karmnik\w*\s+i\s+poid[lł]\w*|poid[lł]\w*\s+i\s+karmnik\w*", re.I),
+        "Кормушки и поилки для птицы",
+    ),
 ]
 
 

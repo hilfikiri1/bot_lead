@@ -507,6 +507,7 @@ async def update_kommo_lead(
     name: str | None = None,
     price: int | None = None,
     status_id: int | None = None,
+    pipeline_id: int | None = None,
 ) -> dict[str, Any]:
     """Update an existing Kommo lead after manager confirmation."""
     if lead_id <= 0:
@@ -522,6 +523,8 @@ async def update_kommo_lead(
         payload["price"] = max(0, int(price))
     if status_id is not None:
         payload["status_id"] = int(status_id)
+    if pipeline_id is not None:
+        payload["pipeline_id"] = int(pipeline_id)
 
     if len(payload) == 1:
         raise ValueError("Нет полей для обновления.")
@@ -734,6 +737,21 @@ async def get_all_leads_for_status_sync(
 
 
 def _normalize_phone(value: str | None) -> str:
+    """Digits-only phone comparator, country-code aware.
+
+    Historically this stripped everything but digits and nothing else, so a
+    Facebook form value like ``728387128`` (no country code) never matched a
+    spreadsheet value stored as ``+48 728 387 128`` even though they are the
+    same number. That mismatch is a primary cause of Kommo matches being
+    missed ("Надёжно найдено в Kommo: 0"). Delegate to the shared
+    ``phone_utils`` normalizer (Poland default) and fall back to a plain
+    digit strip only when that normalizer cannot make sense of the value.
+    """
+    from app.services import phone_utils
+
+    normalized = phone_utils.normalize_phone(value)
+    if normalized:
+        return normalized
     return re.sub(r"\D", "", value or "")
 
 

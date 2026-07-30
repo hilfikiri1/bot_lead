@@ -207,6 +207,16 @@ Sheets используется как маркетинговый реестр, 
 
 При этом колонка `W` не изменяется. Отдельная `/comment_sync` обновляет только комментарий `X` после preview и повторной проверки.
 
+### Приём новых лидов Facebook (`/new_leads`)
+
+Отдельный, надёжный конвейер обрабатывает входящие/неразобранные сделки
+Kommo с названием `Facebook #...` или `Facebook №...` по одной штуке:
+находит permanent Kommo ID, сопоставляет по телефону/email/Facebook Lead ID,
+безопасно резервирует внутренний номер через PostgreSQL, формирует
+структурированный AI-анализ и показывает preview с кнопками `Apply` /
+`Edit` / `Skip`. Подробности, доступные статусы, чекпоинты и переменные
+окружения — в [`LEAD_INTAKE.md`](LEAD_INTAKE.md).
+
 ---
 
 ## Личный Kaizen Journal
@@ -314,7 +324,8 @@ Sheets используется как маркетинговый реестр, 
 | `/evening` | Вечерняя рефлексия |
 | `/week` | Недельный Kaizen-анализ |
 | `/jobs` | Статус аудио |
-| `/status_sync` | Onboarding Sheets ↔ Kommo |
+| `/status_sync` | Onboarding Sheets ↔ Kommo (весь реестр) |
+| `/new_leads` | Обработать новые лиды Facebook по одному, с AI-анализом |
 | `/comment_sync` | Preview обновления комментариев X |
 | `/drive_status` | Диагностика Google Drive |
 | `/diag` | Полный read-only диагностический пакет |
@@ -478,7 +489,7 @@ AGENT_DIGEST_TIMEZONE=Europe/Warsaw
 2. Сделать backup PostgreSQL.
 3. Deploy с kaizen flags `false`.
 4. Применить `alembic upgrade head`.
-5. Проверить единственный head `014_kaizen_journal_entries`.
+5. Проверить единственный head `016_lead_processing_jobs`.
 6. Проверить `/health`, `/ready`, `/version`, `/diag`.
 7. Выполнить ручной text/voice smoke `/evening`.
 8. Только затем включить evening reflection.
@@ -542,7 +553,8 @@ Unit/regression tests не заменяют smoke-тест реальных Rail
 - [`KAIZEN_JOURNAL.md`](KAIZEN_JOURNAL.md) — дневник, weekly review и Notion Board;
 - [`RAILWAY_AGENT_V5.md`](RAILWAY_AGENT_V5.md) — production rollout;
 - [`AGENT_V4_IDENTITY_LANGUAGE_WHATSAPP.md`](AGENT_V4_IDENTITY_LANGUAGE_WHATSAPP.md) — роли, языки и WhatsApp;
-- [`STATUS_SYNC_SETUP.md`](STATUS_SYNC_SETUP.md) — Sheets и внутренняя нумерация;
+- [`STATUS_SYNC_SETUP.md`](STATUS_SYNC_SETUP.md) — Sheets и внутренняя нумерация (весь реестр);
+- [`LEAD_INTAKE.md`](LEAD_INTAKE.md) — приём новых лидов Facebook по одному, с AI-квалификацией;
 - [`SYSTEM_DIAGNOSTICS.md`](SYSTEM_DIAGNOSTICS.md) — единый диагностический пакет.
 
 ---

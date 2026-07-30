@@ -38,6 +38,7 @@ COMMANDS = [
     {"command": "week", "description": "Итоги и улучшения недели"},
     {"command": "jobs", "description": "Статус обработки аудио"},
     {"command": "status_sync", "description": "Обработать новые лиды Sheets"},
+    {"command": "new_leads", "description": "Обработать новые лиды Facebook"},
     {"command": "comment_sync", "description": "Сверить комментарии X с Kommo"},
     {"command": "drive_status", "description": "Диагностика Google Drive"},
     {"command": "diag", "description": "Полная диагностика системы"},

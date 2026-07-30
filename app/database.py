@@ -42,7 +42,7 @@ async def init_db():
         integration_check, integration_event, lead, pending_agent_action,
         spreadsheet_lead_mapping, voice_note, agent_user, agent_invite,
         client_message_draft, project_artifact, supplier_workspace,
-        whatsapp_cloud_message, kaizen_journal_entry,
+        whatsapp_cloud_message, kaizen_journal_entry, lead_processing_job,
     )
 
     async with engine.begin() as conn:

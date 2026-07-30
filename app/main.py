@@ -28,6 +28,7 @@ from app.services.diagnostic_runtime import install_diagnostic_runtime
 from app.services.facebook_lead_onboarding_runtime import (
     install_smart_lead_onboarding_runtime,
 )
+from app.services.final_compat_runtime import install_final_compat_runtime
 from app.services.followup_runtime import install_followup_runtime_extensions
 from app.services.goals_qa_runtime import install_goals_qa_runtime
 from app.services.qa_projection_runtime import install_qa_projection_runtime
@@ -72,6 +73,7 @@ install_kaizen_notion_guard_runtime()
 install_goals_qa_runtime()
 install_qa_projection_runtime()
 install_smart_lead_onboarding_runtime()
+install_final_compat_runtime()
 
 structlog.configure(
     processors=[

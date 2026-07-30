@@ -28,6 +28,9 @@ from app.services.diagnostic_runtime import install_diagnostic_runtime
 from app.services.facebook_lead_onboarding_hardening_runtime import (
     install_facebook_lead_onboarding_hardening_runtime,
 )
+from app.services.facebook_lead_onboarding_identity_runtime import (
+    install_facebook_lead_onboarding_identity_runtime,
+)
 from app.services.facebook_lead_onboarding_runtime import (
     install_smart_lead_onboarding_runtime,
 )
@@ -83,9 +86,10 @@ install_goals_qa_runtime()
 install_qa_projection_runtime()
 install_smart_lead_onboarding_runtime()
 install_final_compat_runtime()
-# Final production safeguards: read Meta form fields and write the final title only
-# after First contact robots, notes and the qualification task have completed.
+# Final production safeguards: write the title only after First contact robots,
+# then replace the identity snapshot with a non-recursive Meta-form-aware version.
 install_facebook_lead_onboarding_hardening_runtime()
+install_facebook_lead_onboarding_identity_runtime()
 install_onboarding_call_checkin_runtime()
 install_onboarding_call_result_runtime()
 

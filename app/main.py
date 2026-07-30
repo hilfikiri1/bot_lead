@@ -25,6 +25,9 @@ from app.services.context_intelligence_runtime import (
     install_context_intelligence_runtime,
 )
 from app.services.diagnostic_runtime import install_diagnostic_runtime
+from app.services.facebook_lead_onboarding_runtime import (
+    install_smart_lead_onboarding_runtime,
+)
 from app.services.followup_runtime import install_followup_runtime_extensions
 from app.services.goals_qa_runtime import install_goals_qa_runtime
 from app.services.qa_projection_runtime import install_qa_projection_runtime
@@ -60,7 +63,7 @@ install_whatsapp_cloud_runtime()
 install_lead_registry_runtime()
 install_operator_experience_runtime()
 install_operator_experience_phone_patch()
-# Install last so diagnostics, kaizen and goals/QA wrap final production behavior.
+# Install last so diagnostics, kaizen, goals/QA and lead onboarding wrap final behavior.
 install_diagnostic_runtime()
 install_kaizen_diagnostics_runtime()
 install_kaizen_source_guard_runtime()
@@ -68,6 +71,7 @@ install_context_intelligence_runtime()
 install_kaizen_notion_guard_runtime()
 install_goals_qa_runtime()
 install_qa_projection_runtime()
+install_smart_lead_onboarding_runtime()
 
 structlog.configure(
     processors=[

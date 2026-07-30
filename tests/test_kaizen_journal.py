@@ -71,6 +71,26 @@ def test_append_diary_extracts_body():
     assert body == "ещё потерял час на поиск прайса"
 
 
+def test_explicit_kaizen_capture_never_routes_to_kommo():
+    matched, body, kind = kaizen_runtime._extract_kaizen_capture(
+        "Добавь в Kaizen задачу недели: поговорить с дядей Женей и обсудить "
+        "оплату Notion и OpenAI"
+    )
+    assert matched is True
+    assert "дядей Женей" in body
+    assert kind == "План"
+    assert kaizen_runtime._kaizen_title(body, kind).startswith("поговорить")
+
+
+def test_kaizen_capture_understands_thought_and_trailing_destination():
+    matched, body, kind = kaizen_runtime._extract_kaizen_capture(
+        "Мысль: объединить прайсы производителей в одном месте в Кайдзен"
+    )
+    assert matched is True
+    assert body.startswith("Мысль:")
+    assert kind == "Идея / мысль"
+
+
 def test_slash_command_is_not_intercepted_by_pending_reflection():
     assert kaizen_runtime._explicit_command_during_reflection("/today", {}) is True
     assert kaizen_runtime._explicit_command_during_reflection("/diag 135", {}) is True

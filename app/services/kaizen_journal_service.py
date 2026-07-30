@@ -1013,6 +1013,92 @@ async def create_notion_improvement_page(
     }
 
 
+async def create_notion_kaizen_item(
+    *,
+    title: str,
+    details: str,
+    item_kind: str,
+    external_id: str,
+) -> dict[str, Any]:
+    """Create one explicitly confirmed voice/text capture in the Kaizen board."""
+    source_id = settings.notion_tasks_data_source_id
+    source = await notion_gateway.retrieve_data_source(source_id)
+    properties_meta = source.get("properties") or {}
+    title_name = next(
+        (
+            name
+            for name in ("Задача", "Name", "Название")
+            if str((properties_meta.get(name) or {}).get("type")) == "title"
+        ),
+        None,
+    ) or next(
+        (name for name, prop in properties_meta.items() if prop.get("type") == "title"),
+        None,
+    )
+    if not title_name:
+        raise notion_gateway.OperationalNotionError("В базе Tasks нет title-свойства.")
+
+    ext_prop_name = next(
+        (name for name in ("External ID", "External ID ") if name in properties_meta),
+        None,
+    )
+    if ext_prop_name and properties_meta[ext_prop_name].get("type") == "rich_text":
+        existing = await notion_gateway.query_by_text(source_id, ext_prop_name, external_id)
+        if existing:
+            page = existing[0]
+            return {
+                "id": page.get("id"),
+                "url": page.get("url")
+                or notion_gateway.notion_page_url(str(page.get("id") or "")),
+                "created": False,
+                "external_id": external_id,
+            }
+
+    properties: dict[str, Any] = {
+        title_name: notion_gateway._title(title[:200])  # noqa: SLF001
+    }
+    for names, value in (
+        (("Тип", "Type"), "Improvement"),
+        (("Статус", "Status"), "Todo"),
+        (("Источник", "Source"), "Kaizen"),
+    ):
+        name = next((candidate for candidate in names if candidate in properties_meta), None)
+        if name:
+            payload = _property_payload(properties_meta[name], value)
+            if payload:
+                properties[name] = payload
+    if ext_prop_name:
+        payload = _property_payload(properties_meta[ext_prop_name], external_id)
+        if payload:
+            properties[ext_prop_name] = payload
+
+    data = await notion_gateway._request(  # noqa: SLF001
+        "POST",
+        "/pages",
+        json={
+            "parent": {
+                "type": "data_source_id",
+                "data_source_id": notion_gateway._data_source_id(source_id),  # noqa: SLF001
+            },
+            "properties": properties,
+            "children": [
+                _heading("Категория"),
+                _paragraph(item_kind),
+                _heading("Запись"),
+                _paragraph(details),
+                _heading("Источник"),
+                _paragraph("Голосовая или текстовая команда менеджера → Kaizen"),
+            ],
+        },
+    )
+    return {
+        "id": data["id"],
+        "url": data.get("url") or notion_gateway.notion_page_url(data["id"]),
+        "created": True,
+        "external_id": external_id,
+    }
+
+
 async def claim_evening_invitation(
     db: AsyncSession,
     *,

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import html
+import hashlib
 import logging
 import re
 from datetime import date
@@ -42,6 +43,7 @@ _APPEND_PREFIXES = (
     "еще в дневник",
     "ещё в дневник",
 )
+_KAIZEN_WORDS = ("kaizen", "кайдзен", "кайзен")
 
 
 def _normal(value: str) -> str:
@@ -77,6 +79,61 @@ def _extract_append_text(text: str) -> tuple[bool, str]:
             ).strip()
             return True, tail
     return False, ""
+
+
+def _extract_kaizen_capture(text: str) -> tuple[bool, str, str]:
+    """Recognise an explicit Kaizen destination before Kommo intent routing."""
+    raw = str(text or "").strip()
+    normalized = _normal(raw)
+    if not any(word in normalized for word in _KAIZEN_WORDS):
+        return False, "", ""
+    if _is_daily_request(raw) or _is_weekly_request(raw):
+        return False, "", ""
+
+    body = re.sub(
+        r"^\s*(?:добавь|добавить|запиши|записать|создай|поставь|сохрани)?\s*"
+        r"(?:в|на)?\s*(?:kaizen|кайдзен|кайзен)\s*[:—-]?\s*",
+        "",
+        raw,
+        count=1,
+        flags=re.I,
+    ).strip()
+    if body == raw:
+        body = re.sub(
+            r"\s+(?:в|на)\s+(?:kaizen|кайдзен|кайзен)\s*$",
+            "",
+            raw,
+            count=1,
+            flags=re.I,
+        ).strip()
+    if not body or _normal(body) in _KAIZEN_WORDS:
+        return True, "", "Запись"
+
+    normal_body = _normal(body)
+    if any(token in normal_body for token in ("мысль", "идея", "наблюдение")):
+        kind = "Идея / мысль"
+    elif any(token in normal_body for token in ("улучш", "оптимиз", "изменить процесс")):
+        kind = "Улучшение"
+    elif any(
+        token in normal_body
+        for token in ("план", "задача недели", "задачу недели", "на неделе", "на неделю")
+    ):
+        kind = "План"
+    else:
+        kind = "Задача"
+    return True, body, kind
+
+
+def _kaizen_title(body: str, kind: str) -> str:
+    clean = re.sub(
+        r"^\s*(?:задач[ау]?\s+недели|задач[ау]?|мысль|идея|улучшение|план(?:\s+недели)?|"
+        r"отч[её]т(?:\s+недели)?)\s*[:—-]?\s*",
+        "",
+        body,
+        count=1,
+        flags=re.I,
+    ).strip()
+    return (clean or f"Kaizen — {kind}")[:200]
 
 
 def _active_context_plan(text: str, context: dict[str, Any]) -> AgentPlan | None:
@@ -416,6 +473,25 @@ async def _execute_notion_improvements(db: Any, action: Any) -> dict[str, Any]:
     }
 
 
+async def _execute_notion_kaizen_item(db: Any, action: Any) -> dict[str, Any]:
+    payload = dict(action.payload or {})
+    if int(payload.get("telegram_user_id") or 0) != int(action.telegram_user_id):
+        raise PermissionError("Kaizen action owner mismatch.")
+    page = await kaizen_journal_service.create_notion_kaizen_item(
+        title=str(payload.get("title") or "Kaizen"),
+        details=str(payload.get("details") or ""),
+        item_kind=str(payload.get("item_kind") or "Задача"),
+        external_id=str(payload.get("external_id") or f"kaizen-action:{action.id}"),
+    )
+    return {
+        "text": (
+            "✅ Добавлено в Kaizen: "
+            + html.escape(str(payload.get("title") or "Запись"))
+        ),
+        "data": page,
+    }
+
+
 def install_kaizen_runtime() -> None:
     global _INSTALLED
     if _INSTALLED:
@@ -449,6 +525,60 @@ def install_kaizen_runtime() -> None:
         )
         if active_kommo_lead_id is not None:
             context["active_kommo_lead_id"] = int(active_kommo_lead_id)
+
+        is_kaizen_capture, capture_body, capture_kind = _extract_kaizen_capture(text)
+        if is_kaizen_capture:
+            if not capture_body:
+                reply = AgentReply(
+                    "Что именно добавить в Kaizen: задачу, план, мысль или улучшение?",
+                    intent="kaizen_capture_clarify",
+                )
+                return await _remember_reply(
+                    db, session=session, text=text, source=source, reply=reply
+                )
+            if not kaizen_journal_service.notion_improvements_available():
+                reply = AgentReply(
+                    "⚠️ База Tasks Notion недоступна. Проверь /notion_test.",
+                    intent="kaizen_capture_unavailable",
+                )
+                return await _remember_reply(
+                    db, session=session, text=text, source=source, reply=reply
+                )
+            title = _kaizen_title(capture_body, capture_kind)
+            external_seed = (
+                f"{telegram_user_id}:{capture_kind}:{capture_body.casefold()}".encode("utf-8")
+            )
+            external_id = "kaizen-capture:" + hashlib.sha256(external_seed).hexdigest()[:24]
+            preview = (
+                "<b>Добавить в Kaizen?</b>\n\n"
+                f"Категория: <b>{html.escape(capture_kind)}</b>\n"
+                f"Задача: {html.escape(title)}\n"
+                f"Описание: {html.escape(capture_body)}\n\n"
+                "Notion: Тип=Improvement · Статус=Todo · Источник=Kaizen"
+            )
+            action = await actions.stage_action(
+                db,
+                telegram_user_id=telegram_user_id,
+                chat_id=int(chat_id or telegram_user_id),
+                action_type="create_notion_kaizen_item",
+                payload={
+                    "telegram_user_id": int(telegram_user_id),
+                    "title": title,
+                    "details": capture_body,
+                    "item_kind": capture_kind,
+                    "external_id": external_id,
+                },
+                preview_text=preview,
+            )
+            reply = AgentReply(
+                preview,
+                reply_markup=actions.approval_markup(action.id),
+                intent="kaizen_capture_preview",
+                metadata={"action_id": int(action.id)},
+            )
+            return await _remember_reply(
+                db, session=session, text=text, source=source, reply=reply
+            )
 
         append, append_text = _extract_append_text(text)
         if append:
@@ -656,6 +786,8 @@ def install_kaizen_runtime() -> None:
     async def execute_with_kaizen(db: Any, action: Any) -> dict[str, Any]:
         if action.action_type == "create_notion_improvements_batch":
             return await _execute_notion_improvements(db, action)
+        if action.action_type == "create_notion_kaizen_item":
+            return await _execute_notion_kaizen_item(db, action)
         return await original_execute(db, action)
 
     executor._execute = execute_with_kaizen

@@ -44,6 +44,9 @@ from app.services.operator_experience_phone_patch import (
 from app.services.operator_experience_runtime import install_operator_experience_runtime
 from app.services.request_trace import install_request_tracing
 from app.services.runtime_extensions import install_runtime_extensions
+from app.services.sequential_lead_onboarding_runtime import (
+    install_sequential_lead_onboarding_runtime,
+)
 from app.services.supplier_workspace_runtime import install_supplier_workspace_runtime
 from app.services.telegram_command_catalog import set_bot_commands
 from app.services.telegram_service import delete_webhook, register_webhook
@@ -68,6 +71,8 @@ install_context_intelligence_runtime()
 install_kaizen_notion_guard_runtime()
 install_goals_qa_runtime()
 install_qa_projection_runtime()
+# The lead queue patches Telegram callbacks after all earlier operator runtimes.
+install_sequential_lead_onboarding_runtime()
 
 structlog.configure(
     processors=[
@@ -76,7 +81,7 @@ structlog.configure(
         structlog.dev.ConsoleRenderer(),
     ],
     wrapper_class=structlog.BoundLogger,
-    logger_factory=structlog.PrintLoggerFactory(),
+    logger_factory=structlog.PrintLoggerFactory,
 )
 logging.basicConfig(level=settings.log_level)
 logging.getLogger("httpx").setLevel(logging.WARNING)

@@ -76,10 +76,19 @@ def build_kommo_note(
         _clean(snapshot.product) or "не указано",
     ]
 
-    lines.extend(["", "ЛИЧНЫЙ АНАЛИЗ", "", qualification.lead_analysis_ru, ""])
+    lines.extend(["", "О ЧЁМ ЗАЯВКА / ЛИЧНЫЙ АНАЛИЗ", "", qualification.lead_analysis_ru, ""])
     lines.append(f"Потенциал: {_POTENTIAL_RU.get(qualification.potential, qualification.potential)}")
     lines.append(f"Готовность: {_READINESS_RU.get(qualification.readiness, qualification.readiness)}")
     lines.append(f"Приоритет: {qualification.priority} — {qualification.priority_label_ru}")
+
+    if qualification.call_script:
+        script = qualification.call_script
+        lines.extend(["", "ЦЕЛЬ ЗВОНКА", "", _clean(script.objective) or "Квалифицировать запрос"])
+        if script.questions:
+            lines.extend(["", "О ЧЁМ ГОВОРИТЬ", ""])
+            lines.extend(f"– {question}" for question in script.questions[:10] if _clean(question))
+        if script.opening_phrase:
+            lines.extend(["", "ОТКРЫТИЕ (язык клиента)", "", script.opening_phrase])
 
     if qualification.main_risks_ru:
         lines.extend(["", "ОСНОВНЫЕ РИСКИ", ""])
@@ -88,6 +97,10 @@ def build_kommo_note(
     if qualification.missing_information_ru:
         lines.extend(["", "ЧТО НУЖНО ПОЛУЧИТЬ", ""])
         lines.extend(f"– {item};" for item in qualification.missing_information_ru)
+
+    if qualification.next_steps_ru and not qualification.call_script:
+        lines.extend(["", "О ЧЁМ ГОВОРИТЬ / СЛЕДУЮЩИЕ ШАГИ", ""])
+        lines.extend(f"– {step}" for step in qualification.next_steps_ru[:8] if _clean(step))
 
     lines.extend(
         [

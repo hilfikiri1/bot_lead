@@ -9,6 +9,7 @@ import pytest
 
 from app.services import google_sheets_service, kommo_service, lead_status_sync_service
 from app.services.google_sheets_service import SpreadsheetRow
+from app.services.onboarding_briefing_service import OnboardingBriefing
 
 
 def _row(
@@ -113,9 +114,14 @@ async def test_report_assigns_row_number_and_preserves_existing_x_and_w():
             return_value=[enriched],
         ),
         patch(
-            "app.services.lead_status_sync_service.product_title_service.short_product_title",
+            "app.services.lead_status_sync_service._safe_briefing",
             new_callable=AsyncMock,
-            return_value="Чай",
+            return_value=OnboardingBriefing(
+                short_product_ru="Чай",
+                about_ru="Клиент интересуется чаем.",
+                talk_points_ru=["Уточнить сорт", "Спросить объём"],
+                call_goal_ru="Квалифицировать запрос по чаю.",
+            ),
         ),
     ):
         report = await lead_status_sync_service.build_status_sync_report()
@@ -128,13 +134,15 @@ async def test_report_assigns_row_number_and_preserves_existing_x_and_w():
     new_row = report["sheet_updates"][0]
     assert new_row["row_number"] == 166
     assert new_row["old_lead_number"] == ""
-    assert new_row["new_lead_number"] == "166"
+    # Sequential allocator: max(existing 165, 170) + 1.
+    assert new_row["new_lead_number"] == "171"
     assert new_row["marketing_status"] == "SQL"
     assert new_row["old_comment"] == "Существующий комментарий X"
     assert new_row["new_comment"] == "Существующий комментарий X"
     assert "new_status" not in new_row
-    assert report["kommo_renames"][0]["new_name"] == "166 - Чай"
-    assert report["onboarding_actions"][0]["lead_number"] == "166"
+    assert report["kommo_renames"][0]["new_name"] == "171 - Чай"
+    assert report["onboarding_actions"][0]["lead_number"] == "171"
+    assert "О ЧЁМ ЗАЯВКА" in report["onboarding_actions"][0]["analysis_note"]
 
 
 @pytest.mark.asyncio

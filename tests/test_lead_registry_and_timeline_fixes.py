@@ -73,11 +73,11 @@ async def test_row_number_policy_fills_y_even_without_kommo_match(monkeypatch):
     assert [
         (item["row_number"], item["new_lead_number"])
         for item in result["sheet_updates"]
-    ] == [(165, "165"), (166, "166")]
+    ] == [(166, "166"), (165, "165")]
     assert result["onboarding_actions"] == []
     assert [item["row_number"] for item in result["unmatched_table_rows"]] == [
-        165,
         166,
+        165,
     ]
 
 

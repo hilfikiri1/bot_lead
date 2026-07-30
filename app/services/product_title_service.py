@@ -37,6 +37,14 @@ _DETERMINISTIC_RULES: list[tuple[re.Pattern[str], str]] = [
         re.compile(r"karmnik\w*\s+i\s+poid[lł]\w*|poid[lł]\w*\s+i\s+karmnik\w*", re.I),
         "Кормушки и поилки для птицы",
     ),
+    (
+        re.compile(
+            r"artyku[lł]y?\s+elektrycz|elektro\s*towar|electrical\s+article|"
+            r"electrical\s+goods|электротовар",
+            re.I,
+        ),
+        "Электротовары",
+    ),
 ]
 
 

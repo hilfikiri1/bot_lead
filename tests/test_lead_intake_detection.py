@@ -44,7 +44,7 @@ def test_extract_facebook_lead_id_falls_back_to_title():
 
 
 @pytest.mark.asyncio
-async def test_find_candidate_leads_filters_by_title_and_sorts_oldest_first():
+async def test_find_candidate_leads_filters_by_title_and_sorts_newest_first():
     unreviewed = {
         "leads": [
             {"id": 1, "name": "Facebook #2", "created_at": 200},
@@ -57,7 +57,7 @@ async def test_find_candidate_leads_filters_by_title_and_sorts_oldest_first():
         new=AsyncMock(return_value=unreviewed),
     ):
         candidates = await detection.find_candidate_leads()
-    assert [item["id"] for item in candidates] == [3, 1]
+    assert [item["id"] for item in candidates] == [1, 3]
 
 
 @pytest.mark.asyncio

@@ -42,7 +42,7 @@ Existing Drive, Sheets, Kommo and Notion variables remain required as in v4.2. T
 ## 3. Deploy order
 
 1. Deploy code with both kaizen flags still `false`.
-2. Run `alembic upgrade head` and verify head `014_kaizen_journal_entries`.
+2. Run `alembic upgrade head` and verify head `016_lead_processing_jobs`.
 3. Verify `/health` reports version `5.0.0`.
 4. Run `/diag` and `/notion_test` read-only.
 5. Smoke `/plan`, `/inbox`, `/evening` and `/week` manually.

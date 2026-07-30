@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import html
+import json
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -13,9 +16,10 @@ from sqlalchemy.orm.attributes import flag_modified
 
 from app.config import get_settings
 from app.models.agent_v5 import NextActionState
-from app.services import kommo_service
+from app.services import ai_analysis_service, kommo_service
 
 settings = get_settings()
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -29,6 +33,8 @@ class NextActionView:
     due_at: datetime | None
     stale_reason: str | None
     recommended_action: str | None
+    action_reason: str | None = None
+    suggested_message: str | None = None
     age_days: int = 0
     category: str = "without_next"
 
@@ -243,7 +249,143 @@ async def build_inbox(
         }.get(view.category, inbox.without_next)
         if len(bucket) < limit_per_section:
             bucket.append(view)
+    await enrich_recommended_actions(inbox)
     return inbox
+
+
+_NEXT_ACTION_PROMPT = """Ты — коммерческий ассистент Buy & Bring Solutions.
+По каждой сделке предложи ОДНО конкретное действие менеджера на сегодня.
+Используй только переданные название, этап, открытую задачу и заметки Kommo.
+Не выдумывай цену, обещания, договорённости, сроки или характеристики.
+Если данных недостаточно, предложи вопрос, который восстановит контекст.
+Если клиент ждёт нас — действие должно закрывать наше обещание.
+Если мы ждём клиента — подготовь короткий follow-up.
+Текст клиенту пиши на языке последних сообщений, иначе по-русски.
+Верни только JSON:
+{"items":[{"lead_id":1,"action":"что именно сделать","reason":"зачем сейчас",
+"message":"готовый текст клиенту или null","confidence":0.0}]}"""
+
+
+def _fallback_recommendation(
+    view: NextActionView,
+    *,
+    tasks: list[dict[str, Any]],
+    notes: list[dict[str, Any]],
+) -> None:
+    task_text = next(
+        (str(item.get("text") or "").strip() for item in tasks if item.get("text")),
+        "",
+    )
+    if task_text:
+        view.recommended_action = task_text
+        view.action_reason = (
+            "Это ближайшая незавершённая задача Kommo; её нужно выполнить "
+            "или назначить новый реальный срок."
+        )
+        return
+    if view.waiting_on == "us":
+        view.recommended_action = "Проверить последнее обещание клиенту и дать результат"
+        view.action_reason = "Клиент ждёт действие с нашей стороны."
+    elif view.waiting_on == "client":
+        view.recommended_action = "Отправить клиенту короткий follow-up по последнему вопросу"
+        view.action_reason = "Нужно получить ответ или согласовать новый срок контакта."
+    elif notes:
+        view.recommended_action = "Прочитать последнюю заметку и зафиксировать конкретный следующий шаг"
+        view.action_reason = "В Kommo нет открытой задачи, но история общения сохранена."
+    else:
+        view.recommended_action = "Восстановить контекст сделки и решить: продолжать или закрыть"
+        view.action_reason = "В Kommo недостаточно данных для обоснованного сообщения клиенту."
+
+
+async def enrich_recommended_actions(inbox: InboxResult) -> None:
+    """Turn technical inbox flags into evidence-backed manager actions.
+
+    One bounded AI call analyses all visible plan items. Kommo/OpenAI failures
+    preserve a useful deterministic plan instead of breaking /today.
+    """
+    candidates = (
+        inbox.overdue + inbox.waiting_us + inbox.without_next + inbox.stale
+    )[:10]
+    if not candidates:
+        return
+
+    semaphore = asyncio.Semaphore(4)
+
+    async def load(view: NextActionView) -> tuple[NextActionView, dict[str, Any], list[dict[str, Any]]]:
+        async with semaphore:
+            details_result, tasks_result = await asyncio.gather(
+                kommo_service.get_lead_details(view.kommo_lead_id),
+                kommo_service.get_open_lead_tasks(view.kommo_lead_id, limit=5),
+                return_exceptions=True,
+            )
+        details = details_result if isinstance(details_result, dict) else {}
+        tasks = tasks_result if isinstance(tasks_result, list) else []
+        _fallback_recommendation(
+            view,
+            tasks=tasks,
+            notes=list(details.get("notes") or []),
+        )
+        return view, details, tasks
+
+    loaded = await asyncio.gather(*(load(view) for view in candidates))
+    payload = []
+    for view, details, tasks in loaded:
+        payload.append(
+            {
+                "lead_id": view.kommo_lead_id,
+                "name": view.name,
+                "status": details.get("status_name"),
+                "category": view.category,
+                "waiting_on": view.waiting_on,
+                "age_days": view.age_days,
+                "open_tasks": [
+                    {
+                        "text": str(task.get("text") or "")[:500],
+                        "complete_till": task.get("complete_till"),
+                    }
+                    for task in tasks[:3]
+                ],
+                "recent_notes": [
+                    {
+                        "text": str(note.get("text") or "")[:1200],
+                        "created_at": note.get("created_at"),
+                    }
+                    for note in list(details.get("notes") or [])[:5]
+                ],
+            }
+        )
+    try:
+        response = await ai_analysis_service._client.chat.completions.create(  # noqa: SLF001
+            model=settings.agent_writer_model or settings.openai_model,
+            messages=[
+                {"role": "system", "content": _NEXT_ACTION_PROMPT},
+                {
+                    "role": "user",
+                    "content": json.dumps(payload, ensure_ascii=False, default=str),
+                },
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.1,
+        )
+        parsed = json.loads(response.choices[0].message.content or "{}")
+        by_id = {
+            int(item.get("lead_id")): item
+            for item in parsed.get("items") or []
+            if isinstance(item, dict) and str(item.get("lead_id") or "").isdigit()
+        }
+        for view in candidates:
+            item = by_id.get(view.kommo_lead_id) or {}
+            action = str(item.get("action") or "").strip()
+            reason = str(item.get("reason") or "").strip()
+            message = str(item.get("message") or "").strip()
+            if action:
+                view.recommended_action = action[:500]
+            if reason:
+                view.action_reason = reason[:500]
+            if message and message.casefold() not in {"null", "none"}:
+                view.suggested_message = message[:1200]
+    except Exception as exc:
+        logger.warning("Smart next-action analysis unavailable: %s", exc.__class__.__name__)
 
 
 def _item_lines(items: list[NextActionView], *, emoji: str, title: str) -> list[str]:
@@ -289,7 +431,14 @@ def format_plan(inbox: InboxResult) -> str:
     for index, item in enumerate(combined, 1):
         label = f"№{item.internal_number}" if item.internal_number else str(item.kommo_lead_id)
         lines.append(f"<b>{index}. {html.escape(label)} — {html.escape(item.name[:50])}</b>")
-        lines.append(html.escape(str(item.recommended_action or item.stale_reason or "—")[:160]))
+        lines.append(
+            "Что сделать: "
+            + html.escape(str(item.recommended_action or item.stale_reason or "—")[:500])
+        )
+        if item.action_reason:
+            lines.append("Почему: " + html.escape(item.action_reason[:500]))
+        if item.suggested_message:
+            lines.append("Что написать: «" + html.escape(item.suggested_message[:1200]) + "»")
         lines.append("")
     return "\n".join(lines)
 

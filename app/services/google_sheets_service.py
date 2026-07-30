@@ -46,6 +46,7 @@ class SpreadsheetRow:
     budget: str | None = None
     contact_channel: str | None = None
     region: str | None = None
+    facebook_lead_id: str | None = None
 
 
 def _has_service_account_credentials() -> bool:
@@ -168,6 +169,11 @@ def _parse_rows(values: list[list[Any]]) -> list[SpreadsheetRow]:
                     raw_row, settings.google_sheets_channel_column
                 ),
                 region=_cell_value(raw_row, settings.google_sheets_region_column),
+                facebook_lead_id=_cell_value(
+                    raw_row, settings.google_sheets_facebook_lead_id_column
+                )
+                if settings.google_sheets_facebook_lead_id_column.strip()
+                else None,
             )
         )
     return parsed
@@ -305,6 +311,96 @@ def _row_fingerprint(row: SpreadsheetRow) -> tuple[str, str, str, str]:
         _normalized_cell_text(row.client_name),
         _normalized_cell_text(row.product),
     )
+
+
+def write_internal_lead_number(
+    *,
+    row_number: int,
+    expected_row_fingerprint: tuple[str, str, str, str] | None,
+    new_number: str,
+) -> dict[str, Any]:
+    """Write the internal lead number for one row and re-read it to verify.
+
+    Touches only the configured internal-ID column (``Y`` by default). Columns
+    ``W`` and ``X`` are never referenced by this function under any
+    circumstances.
+    """
+    if not settings.google_sheets_write_enabled:
+        raise GoogleSheetsError(
+            "Запись в Google Sheets отключена. Установите "
+            "GOOGLE_SHEETS_WRITE_ENABLED=true, чтобы разрешить запись номера."
+        )
+    if not is_configured():
+        raise GoogleSheetsError("Google Sheets не настроен.")
+
+    number_column = settings.google_sheets_lead_number_column.strip().upper()
+    column_letter_to_index(number_column)
+    new_number = str(new_number).strip()
+    if not new_number:
+        raise GoogleSheetsError("Пустой внутренний номер лида.")
+
+    current_rows = get_rows(force_refresh=True)
+    row = next((item for item in current_rows if item.row_number == row_number), None)
+    if row is None:
+        return {"written": False, "reason": "row_missing", "verified": False}
+
+    if expected_row_fingerprint and _row_fingerprint(row) != tuple(
+        expected_row_fingerprint
+    ):
+        return {"written": False, "reason": "row_changed", "verified": False}
+
+    current_number = str(row.lead_number or "").strip()
+    if current_number and current_number != new_number:
+        return {
+            "written": False,
+            "reason": "row_already_has_different_number",
+            "current_number": current_number,
+            "verified": False,
+        }
+    if current_number == new_number:
+        # Already written by a previous attempt: idempotent no-op.
+        return {"written": False, "reason": "already_written", "verified": True}
+
+    worksheet = settings.google_sheets_worksheet_name.strip()
+    sheet_ref = _quoted_sheet_name(worksheet)
+    try:
+        service = _sheets_service(readonly=False)
+        (
+            service.spreadsheets()
+            .values()
+            .update(
+                spreadsheetId=settings.google_sheets_spreadsheet_id.strip(),
+                range=f"{sheet_ref}!{number_column}{row_number}",
+                valueInputOption="USER_ENTERED",
+                body={"values": [[new_number]]},
+            )
+            .execute()
+        )
+    except Exception as exc:
+        message = str(exc)
+        if "403" in message or "permission" in message.lower():
+            email = service_account_email()
+            share_hint = (
+                f"Дайте аккаунту {email} право Editor."
+                if email
+                else "Дайте service account право Editor."
+            )
+            raise GoogleSheetsError(
+                "Google Sheets отклонил запись номера. " + share_hint
+            ) from exc
+        raise GoogleSheetsError(
+            "Не удалось записать внутренний номер в Google Sheets."
+        ) from exc
+
+    clear_cache()
+    verify_rows = get_rows(force_refresh=True)
+    verify_row = next(
+        (item for item in verify_rows if item.row_number == row_number), None
+    )
+    verified = bool(
+        verify_row and str(verify_row.lead_number or "").strip() == new_number
+    )
+    return {"written": True, "verified": verified, "row_number": row_number}
 
 
 def apply_lead_registry_updates(updates: list[dict[str, Any]]) -> dict[str, Any]:

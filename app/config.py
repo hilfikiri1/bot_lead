@@ -39,6 +39,9 @@ class Settings(BaseSettings):
         "lead_status_sync_pipeline_id",
         "kommo_internal_lead_number_field_id",
         "telegram_owner_user_id",
+        "kommo_poland_pipeline_id",
+        "kommo_first_contact_status_id",
+        "telegram_approval_chat_id",
         mode="before",
     )
     @classmethod
@@ -199,6 +202,31 @@ class Settings(BaseSettings):
     # Spreadsheet writes stay disabled until the manager explicitly enables them
     # in Railway and confirms a concrete update from Telegram.
     google_sheets_write_enabled: bool = False
+
+    # Google Sheets column holding the Facebook Lead Ads ID, when the sheet
+    # captures it. Optional: leave empty if the sheet does not track it, in
+    # which case matching falls back to phone/email.
+    google_sheets_facebook_lead_id_column: str = ""
+
+    # Facebook lead intake: one-lead-at-a-time processing of "Facebook #..."
+    # incoming/unsorted Kommo leads (see LEAD_INTAKE.md).
+    # Target pipeline/status for the "first contact" move after a new lead is
+    # qualified. Falls back to kommo_unreviewed_pipeline_id / kommo_default_*
+    # when unset so existing single-pipeline setups keep working unmodified.
+    kommo_poland_pipeline_id: Optional[int] = None
+    kommo_first_contact_status_id: Optional[int] = None
+    kommo_first_contact_status_name: str = "Первый контакт"
+    # Chat that receives the one-lead-at-a-time approval preview. Falls back
+    # to the chat that issued the /new_leads command when unset.
+    telegram_approval_chat_id: Optional[int] = None
+    lead_processing_dry_run: bool = False
+    # Falls back to manager_timezone when empty.
+    lead_processing_timezone: str = ""
+    lead_processing_business_start: str = "09:00"
+    lead_processing_business_end: str = "18:00"
+    # Bump when the note/task template or AI schema changes, so historical
+    # jobs can be told apart from freshly generated ones.
+    lead_processing_version: int = 1
 
     # Periodic Kommo <-> Google Sheets lead registry reconciliation.
     # Marketing status (column W) is deliberately independent from Kommo stages.

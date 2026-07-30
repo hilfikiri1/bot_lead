@@ -115,9 +115,10 @@ async def test_discovery_starts_from_unsorted_facebook_and_matches_sheet_by_phon
 
 
 @pytest.mark.asyncio
-async def test_apply_writes_y_before_kommo_and_deduplicates_note_and_task():
+async def test_apply_writes_y_then_stage_note_task_and_final_title():
     row = _row()
-    details = _details()
+    state = {"name": "Facebook №1479023253985582", "status_id": 100}
+    base_details = _details()
     events: list[str] = []
 
     def write_sheet(updates):
@@ -126,44 +127,64 @@ async def test_apply_writes_y_before_kommo_and_deduplicates_note_and_task():
         assert updates[0]["new_comment"] == ""
         return {"updated_count": 1, "updated": updates, "skipped": []}
 
+    async def get_details(_lead_id):
+        details = _details(name=str(state["name"]))
+        details["status_id"] = state["status_id"]
+        return details
+
     async def update_lead(lead_id, **changes):
-        events.append("kommo")
         assert lead_id == 15402709
-        assert changes == {"name": "167 - Инструменты", "status_id": 200}
+        if "status_id" in changes:
+            events.append("stage")
+            state["status_id"] = changes["status_id"]
+        if "name" in changes:
+            events.append("name")
+            state["name"] = changes["name"]
+
+    async def add_note(_lead_id, _text):
+        events.append("note")
+
+    async def add_task(**_kwargs):
+        events.append("task")
+
+    async def no_sleep(_seconds):
+        return None
 
     preview = {
         "lead_id": 15402709,
         "row_number": 167,
         "lead_number": "167",
+        "old_name": "Facebook №1479023253985582",
         "product_ru": "Инструменты",
         "row_fingerprint": onboarding._fingerprint(row),
-        "digest": onboarding._digest(row, details, "167", "Инструменты"),
+        "digest": onboarding._digest(row, base_details, "167", "Инструменты"),
         "new_name": "167 - Инструменты",
         "target_status_id": 200,
+        "matched_by": "phone",
         "analysis_note": "[BBS-SMART-ONBOARD-167-15402709]\nПолный анализ",
         "task_text": "Написать Andrzej и получить перечень · №167",
         "task_due_at": 1_800_000_000,
-        "kommo_url": details["url"],
+        "kommo_url": base_details["url"],
     }
 
     with (
         patch.object(onboarding.google_sheets_service, "get_rows", return_value=[row]),
         patch.object(onboarding.google_sheets_service, "apply_lead_registry_updates", side_effect=write_sheet),
-        patch.object(onboarding.kommo_service, "get_lead_details", new_callable=AsyncMock, return_value=details),
-        patch.object(onboarding.kommo_service, "update_kommo_lead", new_callable=AsyncMock, side_effect=update_lead),
+        patch.object(onboarding.kommo_service, "get_lead_details", side_effect=get_details),
+        patch.object(onboarding.kommo_service, "update_kommo_lead", side_effect=update_lead),
         patch.object(onboarding.kommo_service, "get_recent_common_notes", new_callable=AsyncMock, return_value=[]),
-        patch.object(onboarding.kommo_service, "add_common_note", new_callable=AsyncMock) as add_note,
+        patch.object(onboarding.kommo_service, "add_common_note", side_effect=add_note),
         patch.object(onboarding.kommo_service, "get_open_lead_tasks", new_callable=AsyncMock, return_value=[]),
-        patch.object(onboarding.kommo_service, "create_lead_task", new_callable=AsyncMock) as add_task,
+        patch.object(onboarding.kommo_service, "create_lead_task", side_effect=add_task),
+        patch("app.services.facebook_lead_onboarding_hardening_runtime.asyncio.sleep", side_effect=no_sleep),
     ):
         result = await onboarding.apply(preview)
 
-    assert events[:2] == ["sheet", "kommo"]
+    assert events == ["sheet", "stage", "note", "task", "name"]
     assert result["stale"] is False
     assert result["note_added"] is True
     assert result["task_added"] is True
-    add_note.assert_awaited_once()
-    add_task.assert_awaited_once()
+    assert state["name"] == "167 - Инструменты"
 
 
 @pytest.mark.asyncio
@@ -174,6 +195,7 @@ async def test_apply_stops_when_sheet_and_kommo_contact_no_longer_match():
         "lead_id": 15402709,
         "row_number": 167,
         "lead_number": "167",
+        "old_name": "Facebook №1479023253985582",
         "product_ru": "Инструменты",
         "row_fingerprint": onboarding._fingerprint(row),
         "digest": onboarding._digest(row, details, "167", "Инструменты"),

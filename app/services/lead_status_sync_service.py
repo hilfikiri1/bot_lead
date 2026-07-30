@@ -25,9 +25,14 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from app.config import get_settings
-from app.services import google_sheets_service, kommo_service, product_title_service
+from app.services import google_sheets_service, kommo_service
 from app.services.google_sheets_service import SpreadsheetRow
 from app.services.lead_matching_service import match_lead_to_rows
+from app.services.onboarding_briefing_service import (
+    OnboardingBriefing,
+    build_heuristic_briefing,
+    build_onboarding_briefing,
+)
 from app.services.unreviewed_leads_service import build_proposed_name
 
 logger = logging.getLogger(__name__)
@@ -37,6 +42,7 @@ settings = get_settings()
 INTERNAL_NUMBER_RE = re.compile(r"^\s*(\d+)\s*(?:[-–—]\s*|\s+).+$")
 _GENERIC_TITLES = {"товар", "новый товар"}
 _NOTE_CONCURRENCY = 8
+_BRIEFING_CONCURRENCY = 5
 
 
 def parse_internal_number(name: str | None) -> str | None:
@@ -168,8 +174,17 @@ def _analysis_note(
     product_ru: str,
     matched_by: str,
     task_text: str,
+    briefing: OnboardingBriefing | None = None,
 ) -> str:
     marker = f"[BBS-ONBOARD-{lead_number}-{int(lead['id'])}]"
+    brief = briefing or build_heuristic_briefing(
+        product=row.product,
+        product_ru=product_ru,
+        budget=row.budget,
+        channel=row.contact_channel,
+        region=row.region,
+        client_name=row.client_name,
+    )
     lines = [
         marker,
         "ПЕРВИЧНЫЙ АНАЛИЗ НОВОГО ЛИДА",
@@ -185,25 +200,47 @@ def _analysis_note(
         f"Канал: {_clean(row.contact_channel) or 'не указан'}",
         f"Сопоставление Sheets ↔ Kommo: {matched_by}",
         "",
-        f"Предварительная оценка: {_initial_assessment(row)}.",
-        f"Следующий шаг: {task_text}.",
+        "О ЧЁМ ЗАЯВКА",
         "",
-        "Статус маркетинговой оценки W не изменён.",
+        brief.about_ru,
+        "",
+        "ЦЕЛЬ ПЕРВОГО КОНТАКТА",
+        "",
+        brief.call_goal_ru or task_text,
+        "",
+        "О ЧЁМ ГОВОРИТЬ",
+        "",
     ]
+    for point in brief.talk_points_ru:
+        lines.append(f"– {point}")
+    lines.extend(
+        [
+            "",
+            f"Предварительная оценка: {_initial_assessment(row)}.",
+            f"Следующий шаг: {task_text}.",
+            "",
+            "Статус маркетинговой оценки W не изменён.",
+        ]
+    )
     return "\n".join(lines)[:13_500]
 
 
-async def _safe_product_title(row: SpreadsheetRow, lead: dict[str, Any]) -> str:
-    try:
-        title = _clean(await product_title_service.short_product_title(row.product))
-    except Exception as exc:
-        logger.warning(
-            "Product title failed for onboarding row %s (%s): %s",
-            row.row_number,
-            (row.product or "")[:80],
-            exc,
-        )
-        title = ""
+def _newest_new_rows(rows: list[SpreadsheetRow]) -> list[SpreadsheetRow]:
+    """Return only the newest empty-Y product rows for this manual run."""
+    new_rows = [
+        row
+        for row in rows
+        if _clean(row.product) and not _clean(row.lead_number)
+    ]
+    new_rows.sort(key=lambda item: item.row_number, reverse=True)
+    limit = max(1, int(settings.lead_status_sync_max_new_rows or 5))
+    return new_rows[:limit]
+
+
+def _title_from_briefing(
+    briefing: OnboardingBriefing, lead: dict[str, Any]
+) -> str:
+    title = _clean(briefing.short_product_ru)
     if title and title.casefold() not in _GENERIC_TITLES:
         return title[:50]
 
@@ -217,6 +254,37 @@ async def _safe_product_title(row: SpreadsheetRow, lead: dict[str, Any]) -> str:
     }:
         return current_name[:50]
     return "Новый запрос"
+
+
+async def _safe_briefing(row: SpreadsheetRow) -> OnboardingBriefing:
+    try:
+        return await build_onboarding_briefing(
+            product=row.product,
+            budget=row.budget,
+            channel=row.contact_channel,
+            region=row.region,
+            client_name=row.client_name,
+            lead_status=row.lead_status,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Onboarding briefing failed for row %s (%s): %s",
+            row.row_number,
+            (row.product or "")[:80],
+            exc,
+        )
+        return build_heuristic_briefing(
+            product=row.product,
+            budget=row.budget,
+            channel=row.contact_channel,
+            region=row.region,
+            client_name=row.client_name,
+        )
+
+
+async def _safe_product_title(row: SpreadsheetRow, lead: dict[str, Any]) -> str:
+    briefing = await _safe_briefing(row)
+    return _title_from_briefing(briefing, lead)
 
 
 async def _match_new_rows(
@@ -304,11 +372,7 @@ async def build_status_sync_report() -> dict[str, Any]:
         if len(duplicate_leads) > 1
     ]
 
-    new_rows = [
-        row
-        for row in rows
-        if _clean(row.product) and not _clean(row.lead_number)
-    ]
+    new_rows = _newest_new_rows(rows)
     pairs, unmatched_new_rows = await _match_new_rows(new_rows, unnumbered_leads)
 
     used_numbers = {
@@ -317,7 +381,10 @@ async def build_status_sync_report() -> dict[str, Any]:
         if str(number).isdigit()
     }
     next_number = max(used_numbers, default=0) + 1
-    for pair in sorted(pairs, key=lambda item: item["row"].row_number):
+    # Newest spreadsheet rows first so fresh Facebook leads get numbers/analysis
+    # before older empty-Y backlog rows.
+    pairs.sort(key=lambda item: item["row"].row_number, reverse=True)
+    for pair in pairs:
         while next_number in used_numbers:
             next_number += 1
         pair["lead_number"] = str(next_number)
@@ -329,12 +396,20 @@ async def build_status_sync_report() -> dict[str, Any]:
     kommo_renames: list[dict[str, Any]] = []
     onboarding_actions: list[dict[str, Any]] = []
 
-    for pair in pairs:
+    semaphore = asyncio.Semaphore(_BRIEFING_CONCURRENCY)
+
+    async def _brief_pair(pair: dict[str, Any]) -> OnboardingBriefing:
+        async with semaphore:
+            return await _safe_briefing(pair["row"])
+
+    briefings = await asyncio.gather(*[_brief_pair(pair) for pair in pairs])
+
+    for pair, briefing in zip(pairs, briefings):
         row: SpreadsheetRow = pair["row"]
         lead = pair["lead"]
         lead_id = int(lead["id"])
         lead_number = str(pair["lead_number"])
-        product_ru = await _safe_product_title(row, lead)
+        product_ru = _title_from_briefing(briefing, lead)
         new_name = build_proposed_name(lead_number, product_ru)
         old_name = _clean(lead.get("name"))
         task_text = _recommended_action(row, lead_number, product_ru)
@@ -393,6 +468,11 @@ async def build_status_sync_report() -> dict[str, Any]:
                 "target_status_id": target_status_id,
                 "task_text": task_text,
                 "task_due_at": due_at,
+                "briefing": {
+                    "about_ru": briefing.about_ru,
+                    "talk_points_ru": list(briefing.talk_points_ru),
+                    "call_goal_ru": briefing.call_goal_ru,
+                },
                 "analysis_note": _analysis_note(
                     row=row,
                     lead=lead,
@@ -400,6 +480,7 @@ async def build_status_sync_report() -> dict[str, Any]:
                     product_ru=product_ru,
                     matched_by=str(pair.get("matched_by") or "unknown"),
                     task_text=task_text,
+                    briefing=briefing,
                 ),
                 "contact_card": {
                     "name": _clean(row.client_name) or _clean(lead.get("contact_name")),
@@ -413,9 +494,10 @@ async def build_status_sync_report() -> dict[str, Any]:
             }
         )
 
-    sheet_updates.sort(key=lambda item: item["row_number"])
-    kommo_renames.sort(key=lambda item: item["row_number"])
-    onboarding_actions.sort(key=lambda item: item["row_number"])
+    # Keep newest-first order in the Telegram preview / apply payload.
+    sheet_updates.sort(key=lambda item: item["row_number"], reverse=True)
+    kommo_renames.sort(key=lambda item: item["row_number"], reverse=True)
+    onboarding_actions.sort(key=lambda item: item["row_number"], reverse=True)
     table_duplicates.sort(key=lambda item: _number_sort_key(item["lead_number"]))
     kommo_duplicates.sort(key=lambda item: _number_sort_key(item["lead_number"]))
 
@@ -425,6 +507,8 @@ async def build_status_sync_report() -> dict[str, Any]:
         "kommo_leads_count": len(kommo_leads),
         "matched_count": len(onboarding_actions),
         "new_rows_count": len(new_rows),
+        "newest_first": True,
+        "max_new_rows": max(1, int(settings.lead_status_sync_max_new_rows or 5)),
         "sheet_updates": sheet_updates,
         "comment_updates_count": 0,
         "number_assignments_count": len(sheet_updates),
@@ -439,7 +523,9 @@ async def build_status_sync_report() -> dict[str, Any]:
                 "client_name": row.client_name,
                 "reason": "no_unique_kommo_match",
             }
-            for row in unmatched_new_rows
+            for row in sorted(
+                unmatched_new_rows, key=lambda item: item.row_number, reverse=True
+            )
         ],
         # The manual command intentionally does not report all historical Kommo-only leads.
         "kommo_only": [],

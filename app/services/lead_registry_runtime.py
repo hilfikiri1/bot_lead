@@ -149,6 +149,32 @@ def _select_unique_contact_lead(
     return best[0] if len(best) == 1 else None
 
 
+def _briefing_from_action(action: dict[str, Any], row: SpreadsheetRow, product_ru: str):
+    from app.services.onboarding_briefing_service import (
+        OnboardingBriefing,
+        build_heuristic_briefing,
+    )
+
+    raw = action.get("briefing") if isinstance(action.get("briefing"), dict) else None
+    if raw and _clean(raw.get("about_ru")) and raw.get("talk_points_ru"):
+        return OnboardingBriefing(
+            short_product_ru=product_ru,
+            about_ru=_clean(raw.get("about_ru")),
+            talk_points_ru=[
+                _clean(item) for item in (raw.get("talk_points_ru") or []) if _clean(item)
+            ],
+            call_goal_ru=_clean(raw.get("call_goal_ru")),
+        )
+    return build_heuristic_briefing(
+        product=row.product,
+        product_ru=product_ru,
+        budget=row.budget,
+        channel=row.contact_channel,
+        region=row.region,
+        client_name=row.client_name,
+    )
+
+
 def _rewrite_action_for_row(
     row: SpreadsheetRow, action: dict[str, Any]
 ) -> dict[str, Any]:
@@ -171,6 +197,7 @@ def _rewrite_action_for_row(
         "id": int(result.get("kommo_lead_id") or 0),
         "name": old_name,
     }
+    briefing = _briefing_from_action(result, row, product_ru)
     analysis_note = lead_status_sync_service._analysis_note(
         row=row,
         lead=lead_stub,
@@ -178,6 +205,7 @@ def _rewrite_action_for_row(
         product_ru=product_ru,
         matched_by=matched_by,
         task_text=task_text,
+        briefing=briefing,
     )
     if number_conflict:
         analysis_note += (
@@ -199,6 +227,11 @@ def _rewrite_action_for_row(
             "new_name": new_name,
             "short_product_ru": product_ru,
             "task_text": task_text,
+            "briefing": {
+                "about_ru": briefing.about_ru,
+                "talk_points_ru": list(briefing.talk_points_ru),
+                "call_goal_ru": briefing.call_goal_ru,
+            },
             "analysis_note": analysis_note[:13_500],
             "contact_card": card,
             "number_conflict": (
@@ -215,7 +248,8 @@ async def _action_from_direct_match(
     row: SpreadsheetRow, lead: dict[str, Any]
 ) -> dict[str, Any]:
     desired = _desired_number(row)
-    product_ru = await lead_status_sync_service._safe_product_title(row, lead)
+    briefing = await lead_status_sync_service._safe_briefing(row)
+    product_ru = lead_status_sync_service._title_from_briefing(briefing, lead)
     old_name = _clean(lead.get("name"))
     action: dict[str, Any] = {
         "kommo_lead_id": int(lead["id"]),
@@ -228,6 +262,11 @@ async def _action_from_direct_match(
         "target_status_id": None,
         "task_text": "",
         "task_due_at": lead_status_sync_service._task_due_timestamp(),
+        "briefing": {
+            "about_ru": briefing.about_ru,
+            "talk_points_ru": list(briefing.talk_points_ru),
+            "call_goal_ru": briefing.call_goal_ru,
+        },
         "analysis_note": "",
         "contact_card": {
             "name": _clean(row.client_name) or _clean(lead.get("contact_name")),
@@ -296,9 +335,9 @@ async def _enhance_report(
     report: dict[str, Any],
     rows: list[SpreadsheetRow],
 ) -> dict[str, Any]:
-    new_rows = [
-        row for row in rows if _clean(row.product) and not _clean(row.lead_number)
-    ]
+    # Same newest-first batch as the base report — do not re-open the whole
+    # historical empty-Y backlog on every Telegram click.
+    new_rows = lead_status_sync_service._newest_new_rows(rows)
     row_by_number = {row.row_number: row for row in new_rows}
     actions_by_row: dict[int, dict[str, Any]] = {
         int(action["row_number"]): dict(action)
@@ -311,21 +350,23 @@ async def _enhance_report(
         if int(action.get("kommo_lead_id") or 0) > 0
     }
 
-    for row in new_rows:
-        if row.row_number in actions_by_row:
-            continue
-        candidates = await _find_exact_contact_leads(row)
-        lead = _select_unique_contact_lead(row, candidates)
-        if not lead:
-            continue
-        lead_id = int(lead.get("id") or 0)
-        if not lead_id or lead_id in used_leads:
-            continue
-        actions_by_row[row.row_number] = await _action_from_direct_match(row, lead)
-        used_leads.add(lead_id)
+    missing_rows = [row for row in new_rows if row.row_number not in actions_by_row]
+    if missing_rows:
+        candidate_lists = await asyncio.gather(
+            *[_find_exact_contact_leads(row) for row in missing_rows]
+        )
+        for row, candidates in zip(missing_rows, candidate_lists):
+            lead = _select_unique_contact_lead(row, candidates)
+            if not lead:
+                continue
+            lead_id = int(lead.get("id") or 0)
+            if not lead_id or lead_id in used_leads:
+                continue
+            actions_by_row[row.row_number] = await _action_from_direct_match(row, lead)
+            used_leads.add(lead_id)
 
     normalized_actions: list[dict[str, Any]] = []
-    for row_number, action in sorted(actions_by_row.items()):
+    for row_number, action in sorted(actions_by_row.items(), reverse=True):
         row = row_by_number[row_number]
         normalized_actions.append(_rewrite_action_for_row(row, action))
     normalized_by_row = {
@@ -334,7 +375,7 @@ async def _enhance_report(
 
     sheet_updates = [
         _sheet_update(row, normalized_by_row.get(row.row_number))
-        for row in sorted(new_rows, key=lambda item: item.row_number)
+        for row in sorted(new_rows, key=lambda item: item.row_number, reverse=True)
     ]
     kommo_renames = [
         {
@@ -358,7 +399,7 @@ async def _enhance_report(
             "client_name": row.client_name,
             "reason": "y_will_be_filled_kommo_match_required",
         }
-        for row in sorted(new_rows, key=lambda item: item.row_number)
+        for row in sorted(new_rows, key=lambda item: item.row_number, reverse=True)
         if row.row_number not in normalized_by_row
     ]
 
@@ -367,6 +408,9 @@ async def _enhance_report(
         {
             "new_rows_count": len(new_rows),
             "matched_count": len(normalized_actions),
+            "newest_first": True,
+            "max_new_rows": report.get("max_new_rows")
+            or lead_status_sync_service.settings.lead_status_sync_max_new_rows,
             "sheet_updates": sheet_updates,
             "number_assignments_count": len(sheet_updates),
             "kommo_renames": kommo_renames,
@@ -399,11 +443,15 @@ async def _send_registry_confirmation(
         chat_id,
         (
             "⚠️ <b>ПОДТВЕРЖДЕНИЕ ОБРАБОТКИ НОВЫХ ЛИДОВ</b>\n\n"
-            f"Будет заполнено номеров Y: <b>{count}</b>.\n\n"
+            f"Будет заполнено номеров Y: <b>{count}</b> "
+            f"(берём самые свежие строки, до "
+            f"{int(report.get('max_new_rows') or lead_status_sync_service.settings.lead_status_sync_max_new_rows)} "
+            "за раз).\n\n"
             "Номер Y всегда равен номеру строки Google Sheets. "
             "Отсутствие или неоднозначность сделки Kommo больше не блокирует запись Y.\n\n"
             "Для надёжно найденных сделок бот также переименует Kommo, "
-            "при необходимости переведёт на «Первый контакт», добавит анализ и задачу.\n\n"
+            "при необходимости переведёт на «Первый контакт», добавит анализ "
+            "(о чём заявка + о чём говорить) и задачу.\n\n"
             "Новые сделки не создаются. Колонки W и X не изменяются."
         ),
         reply_markup={

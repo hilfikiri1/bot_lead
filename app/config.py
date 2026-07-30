@@ -236,6 +236,9 @@ class Settings(BaseSettings):
     lead_status_sync_interval_minutes: int = 180
     lead_status_sync_initial_delay_seconds: int = 90
     lead_status_sync_notify_only_on_differences: bool = True
+    # Process only the newest empty-Y spreadsheet rows per manual run so a
+    # backlog of older unmatched rows does not delay fresh Facebook leads.
+    lead_status_sync_max_new_rows: int = 5
 
     # Notion workspace integration
     notion_api_token: str = ""

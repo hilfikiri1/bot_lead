@@ -53,7 +53,9 @@ async def find_candidate_leads() -> list[dict[str, Any]]:
         for lead in result.get("leads") or []
         if is_new_facebook_lead_title(lead.get("name"))
     ]
-    candidates.sort(key=lambda item: item.get("created_at") or 0)
+    # Newest Facebook submissions first — managers should see fresh leads
+    # before older unsorted backlog entries.
+    candidates.sort(key=lambda item: item.get("created_at") or 0, reverse=True)
     return candidates
 
 

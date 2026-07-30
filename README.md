@@ -4,7 +4,7 @@
 
 ### Telegram AI Agent для Buy & Bring Solutions
 
-Единый рабочий интерфейс для обработки B2B-лидов, ведения проектов, анализа переговоров и управления следующими действиями.
+Единый рабочий интерфейс для B2B-лидов, проектов, переговоров, документов, следующих действий и постепенного улучшения бизнес-процессов.
 
 ![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-async-009688?logo=fastapi&logoColor=white)
@@ -18,22 +18,24 @@
 
 ## О проекте
 
-**B&BS AI Agent** — это внутренний цифровой помощник Buy & Bring Solutions, работающий через Telegram.
+**B&BS AI Agent** — внутренний цифровой помощник Buy & Bring Solutions, работающий через Telegram.
 
 Менеджер может писать или говорить обычными словами:
 
-- «Что мне делать сегодня?»
+- «Что горит?»
 - «Покажи проект 135»
+- «Что по нему?»
 - «Найди клиента с кормушками»
 - «Сделай follow-up на польском»
 - «Добавь примечание: клиент ждёт новую цену»
 - «Поставь задачу перезвонить завтра в 10:00»
-- «Проанализируй этот разговор»
 - «Подготовь запрос китайскому производителю»
+- «Подведём итоги дня»
+- «Что ты понял за эту неделю?»
 
-Агент находит нужную сделку, собирает контекст, подготавливает результат и — если требуется изменение внешней системы — обязательно показывает предварительный просмотр и запрашивает подтверждение.
+Агент находит нужную сделку, собирает контекст, подготавливает результат и — когда требуется изменение внешней системы — показывает preview и запрашивает подтверждение.
 
-> Главная цель проекта — собрать операционную работу компании в одной интеллектуальной среде, уменьшить ручную рутину, ускорить реакцию на клиентов и формировать долговременную корпоративную память.
+> Главная цель — объединить операционную работу компании, уменьшить повторный ручной поиск, ускорить реакцию на клиентов и формировать долговременную корпоративную память.
 
 ---
 
@@ -43,11 +45,11 @@
 
 | Уровень | Что происходит | Подтверждение |
 |---|---|---|
-| **Чтение** | Поиск сделки, карточка проекта, приоритеты, диагностика | Не требуется |
-| **Подготовка** | Follow-up, письмо, КП, запрос поставщику, ТЗ | Не требуется, ничего не отправляется |
+| **Чтение** | Поиск сделки, карточка проекта, приоритеты, диагностика, дневник | Не требуется |
+| **Подготовка** | Follow-up, письмо, КП, запрос поставщику, ТЗ, недельные выводы | Ничего не отправляется |
 | **Внешняя запись** | Kommo, Notion, Drive, Gmail, Calendar, Sheets | Обязательный preview и подтверждение |
 
-Рабочий контур любой внешней записи:
+Контур внешней записи:
 
 ```text
 proposal
@@ -61,52 +63,75 @@ proposal
 
 ### Неприкосновенные правила
 
-- WhatsApp-сообщения не отправляются агентом автоматически.
-- Gmail создаёт только черновики и не отправляет письма.
-- Изменения Kommo, Notion, Drive, Calendar и Sheets требуют подтверждения.
+- WhatsApp не отправляется автоматически.
+- Gmail создаёт только черновики.
+- Kommo, Notion, Drive, Calendar и Sheets изменяются только после подтверждения.
 - Внутренний номер B&BS, например `135`, не равен техническому Kommo ID.
-- Маркетинговый статус Google Sheets в колонке `W` не копируется из этапа Kommo и не изменяется синхронизацией.
-- Токены, private keys и credential JSON нельзя публиковать в Git, Telegram или логах.
+- Маркетинговый статус Sheets в колонке `W` независим от этапа Kommo.
+- Дневниковое голосовое не создаёт клиента, лид или запись в Kommo.
+- Ежедневные мысли не отправляются в Notion.
+- Notion получает только подтверждённые недельные карточки улучшений.
+- Токены, private keys и credential JSON не публикуются в Git, Telegram или логах.
 
 ---
 
 ## Что умеет агент
 
-### Telegram как единый интерфейс
+### Telegram и контекст
 
 - текстовые и голосовые запросы обычным языком;
 - главное меню и inline-кнопки;
 - память активного проекта;
+- разрешение коротких фраз через текущий контекст;
 - уточнение неоднозначной сделки;
-- работа по внутреннему номеру, имени, телефону, компании или товару;
-- пакетные задачи и примечания для нескольких сделок;
-- роли пользователей и ограничение доступа менеджера.
+- поиск по внутреннему номеру, имени, телефону, компании или товару;
+- пакетные задачи и примечания;
+- роли и ограничение доступа менеджера.
+
+Короткие команды обрабатываются детерминированно до LLM planner:
+
+```text
+что горит
+что срочно
+план дня
+без шага
+ждут нас
+мы ждём
+зависшие
+проект 135
+что по нему
+история
+```
 
 ### Kommo CRM
 
 - список и поиск открытых сделок;
-- карточка сделки с контактом, бюджетом, этапом, задачами и примечаниями;
+- единая карточка сделки/проекта;
+- контакты, бюджет, этап, задачи и примечания;
 - поиск по внутреннему номеру B&BS;
-- создание нового лида после preview;
+- создание нового лида только после preview;
 - редактирование названия, бюджета и этапа;
 - создание примечаний и задач;
 - защита от повторных записей;
-- повторная проверка ответственного менеджера перед записью;
-- чтение доступного контекста внешних чатов Kommo.
+- проверка ответственного менеджера;
+- чтение доступного контекста внешних чатов.
 
 ### Голосовые сообщения
 
-Менеджер может отправить запись после разговора с клиентом. Агент:
+Один существующий pipeline используется для клиентских разговоров, команд и личной вечерней рефлексии:
 
-1. скачивает аудио;
-2. выполняет транскрибацию;
-3. выделяет подтверждённые факты;
-4. определяет недостающие вопросы и риски;
-5. предлагает следующий шаг;
-6. формирует сообщение клиенту;
-7. предлагает действия в Kommo, Calendar, Gmail или Notion.
+```text
+Telegram audio
+→ download
+→ transcription
+→ agent_service.handle_message
+→ либо агентная команда/дневник
+→ либо анализ клиентского разговора
+```
 
-Статус обработки доступен через `/jobs`.
+При активной вечерней рефлексии transcript сначала сохраняется как дневник и возвращает `handled=True`. Поэтому клиентский анализ и создание лида не запускаются.
+
+Статус обычной обработки аудио доступен через `/jobs`.
 
 ### AI-черновики
 
@@ -119,52 +144,33 @@ proposal
 - технические задания;
 - структуры каталогов и прайс-листов.
 
-Текст генерируется на языке клиента или на языке, указанном менеджером: `pl`, `uk`, `ru`, `en`, `de`, `zh`.
+Язык результата берётся из профиля клиента или задаётся менеджером: `pl`, `uk`, `ru`, `en`, `de`, `zh`.
 
 ### WhatsApp
 
-Поддерживаются два безопасных сценария.
+Поддерживаются безопасные сценарии:
 
-**Исходящее сообщение:**
-
-1. агент готовит текст;
-2. пользователь может изменить текст или язык;
-3. кнопка открывает WhatsApp с заполненным сообщением;
-4. пользователь отправляет сообщение вручную;
-5. отдельное подтверждение добавляет отметку в Kommo.
-
-**Входящее сообщение через Meta webhook:**
-
-- webhook проверяет подпись Meta, если задан `WHATSAPP_APP_SECRET`;
-- входящий номер сопоставляется со сделкой Kommo;
-- менеджер получает уведомление в Telegram;
-- сообщение может быть записано в Kommo с защитой от дублей;
-- доступны кнопки перехода в WhatsApp и Kommo.
-
-Автоматическая отправка WhatsApp остаётся отключённой.
+- ручной Click to Chat с подготовленным текстом;
+- WhatsApp Cloud API inbox/outbox при корректной настройке Meta;
+- проверка webhook-подписи;
+- сопоставление входящего номера со сделкой Kommo;
+- статусы `sent`, `delivered`, `read`, `failed`;
+- 24-часовое окно свободного текста;
+- явное подтверждение менеджера перед отправкой.
 
 ### Google Calendar
 
-Calendar используется для действий с точным временем:
+Calendar используется для точных событий: звонок, Zoom, встреча, визит, выставка, поездка, демонстрация. Перед созданием показываются дата, время, часовой пояс, длительность и напоминание.
 
-- звонок;
-- Zoom;
-- встреча;
-- визит;
-- выставка;
-- поездка;
-- демонстрация.
-
-Перед созданием показываются дата, время, часовой пояс, длительность, напоминание и связанные действия. Обычный follow-up без точного времени создаётся как задача Kommo, а не событие Calendar.
+Обычный follow-up без точного времени создаётся как задача Kommo.
 
 ### Gmail
 
 - подготовка письма;
-- определение адресата из контакта;
+- определение адресата;
 - preview;
-- создание Gmail Draft после подтверждения.
-
-Отправка письма не выполняется.
+- Gmail Draft после подтверждения;
+- отправка письма не выполняется.
 
 ### Notion
 
@@ -172,45 +178,89 @@ Calendar используется для действий с точным вре
 - задачи;
 - коммуникации;
 - черновики КП и каталогов;
-- синхронизация рабочих данных;
-- диагностика структуры и прав доступа.
+- подтверждённые карточки Kaizen Improvement;
+- диагностика структуры и прав.
 
-Недоступность Notion не должна блокировать чтение карточки Kommo.
+Недоступность Notion не блокирует чтение Kommo, локальный дневник или недельный отчёт.
 
 ### Google Drive
 
-- создание проектной папки;
-- стандартная структура подпапок;
-- классификация файла;
+- проектные папки по странам;
+- стандартные подпапки;
+- классификация файлов;
 - preview размещения;
 - загрузка после подтверждения;
 - связь файла с Kommo и Notion;
-- диагностика API, прав, Shared Drive и folder ID.
+- диагностика прав, My Drive/Shared Drive и квоты service account.
 
-### Google Sheets и подключение новых лидов
+### Google Sheets
 
-Таблица используется как маркетинговый реестр, а Kommo — как рабочая CRM.
+Sheets используется как маркетинговый реестр, Kommo — как рабочая CRM.
 
-Ручной onboarding обрабатывает строки, где колонка `Y` ещё пустая:
+Ручной onboarding:
 
-1. находит одну надёжно соответствующую сделку Kommo;
-2. предлагает следующий внутренний номер B&BS;
-3. предлагает название вида `166 - Товар`;
-4. при необходимости переводит входящую сделку на этап «Первый контакт»;
-5. подготавливает первичное примечание;
-6. подготавливает квалификационную задачу;
-7. выполняет изменения только после подтверждения.
+1. находит надёжную пару Sheets ↔ Kommo;
+2. присваивает внутренний номер в `Y`;
+3. предлагает название `166 - Товар`;
+4. подготавливает первичное примечание и задачу;
+5. выполняет записи только после подтверждения.
 
-При этом:
-
-- колонка `W` не изменяется;
-- ручной комментарий в `X` не изменяется;
-- новая сделка Kommo этим flow не создаётся;
-- неоднозначные совпадения пропускаются.
+При этом колонка `W` не изменяется. Отдельная `/comment_sync` обновляет только комментарий `X` после preview и повторной проверки.
 
 ---
 
-## Типовой рабочий день менеджера
+## Личный Kaizen Journal
+
+Дневник предназначен для владельца компании. Это не KPI, не контроль сотрудников и не трекер настроения.
+
+### Итоги дня
+
+```text
+/evening
+```
+
+Также распознаются:
+
+```text
+Подведём итоги дня
+Хочу рассказать, как прошёл день
+Запиши итоги дня
+Дополни дневник: ...
+```
+
+Бот предлагает рассказать одним текстом или голосом:
+
+- что получилось;
+- что мешало;
+- где потерялось время;
+- какие появились выводы и идеи;
+- что важно завтра.
+
+Сначала raw text/transcript сохраняется в PostgreSQL, затем OpenAI структурирует запись. При сбое AI исходная запись не теряется.
+
+Ожидание ответа хранится в `AgentSession.context`, действует до шести часов и не переходит на следующий локальный день. Slash-команды не записываются в дневник.
+
+### Итоги недели
+
+```text
+/week
+```
+
+Агент собирает записи с понедельника по воскресенье, ищет повторяющиеся факты и предлагает максимум три конкретных изменения процесса.
+
+Правила:
+
+- повторяемость требует минимум двух разных дней;
+- при менее чем трёх заполненных днях выводы помечаются как предварительные;
+- Kommo operational inbox добавляется read-only и best-effort;
+- ошибка Kommo не блокирует отчёт;
+- Notion-карточки не создаются автоматически.
+
+Подтверждённые улучшения создаются в существующей Tasks database как `Type=Improvement`, `Source=Kaizen`. Полный контракт: [`KAIZEN_JOURNAL.md`](KAIZEN_JOURNAL.md).
+
+---
+
+## Типовой рабочий день
 
 ### Утро
 
@@ -221,13 +271,11 @@ Calendar используется для действий с точным вре
 /overdue
 ```
 
-Менеджер получает приоритеты, просроченные действия и сделки без следующего шага.
-
 ### После звонка
 
-1. Открыть проект или нажать **🎙 Новый разговор**.
+1. Открыть проект.
 2. Отправить голосовое резюме.
-3. Проверить факты, вопросы и риски.
+3. Проверить факты, риски и вопросы.
 4. Подготовить сообщение клиенту.
 5. Создать примечание и следующую задачу.
 6. Подтвердить только корректные действия.
@@ -235,13 +283,17 @@ Calendar используется для действий с точным вре
 ### Перед завершением дня
 
 ```text
-/evening
 /without_next
 /waiting_us
 /waiting_client
+/evening
 ```
 
-Цель — не оставлять активные сделки без понятного владельца следующего действия и срока.
+### В конце недели
+
+```text
+/week
+```
 
 ---
 
@@ -251,53 +303,32 @@ Calendar используется для действий с точным вре
 |---|---|
 | `/agent` | Возможности AI-агента |
 | `/menu` | Главное меню |
+| `/today`, `/plan` | План на сегодня |
 | `/digest` | Приоритетные сделки |
-| `/plan` | План на сегодня |
 | `/inbox` | Операционный inbox |
 | `/overdue` | Просроченные действия |
 | `/without_next` | Сделки без следующего шага |
-| `/waiting_us` | Клиенты, которые ждут действий B&BS |
-| `/waiting_client` | Сделки, где ожидается клиент |
+| `/waiting_us` | Клиенты ждут B&BS |
+| `/waiting_client` | B&BS ждёт клиента |
 | `/stale` | Проекты без свежей активности |
-| `/jobs` | Статус обработки аудио |
-| `/status_sync` | Preview onboarding лидов Sheets ↔ Kommo |
-| `/sheets_sync_preview` | Аналитический preview Sheets |
+| `/evening` | Вечерняя рефлексия |
+| `/week` | Недельный Kaizen-анализ |
+| `/jobs` | Статус аудио |
+| `/status_sync` | Onboarding Sheets ↔ Kommo |
+| `/comment_sync` | Preview обновления комментариев X |
 | `/drive_status` | Диагностика Google Drive |
+| `/diag` | Полный read-only диагностический пакет |
 | `/integration_status` | Состояние интеграций |
 | `/errors` | Последние ошибки |
 | `/kommo_test` | Проверка Kommo |
 | `/notion_test` | Проверка Notion |
 | `/calendar_test` | Проверка Calendar |
-| `/invite` | Одноразовое приглашение сотрудника |
+| `/invite` | Пригласить сотрудника |
 | `/team` | Пользователи и роли |
-| `/bind_kommo` | Привязка Telegram-пользователя к Kommo user ID |
-| `/reset_memory` | Очистка активного контекста |
+| `/bind_kommo` | Привязать Telegram к Kommo user ID |
+| `/reset_memory` | Очистить активный контекст |
 
 Команды не обязательны: большинство действий можно формулировать обычными словами.
-
----
-
-## Примеры запросов
-
-```text
-Покажи проект 135
-Что по Maciej Walasek?
-Найди клиента по номеру +48 501 000 000
-Покажи первый проект из дайджеста
-
-Сделай follow-up по этой сделке на польском
-Подготовь запрос поставщику по проекту 207
-Сделай техническое задание по текущему проекту
-
-Добавь примечание: клиент подтвердил тестовый заказ
-Поставь задачу по 135 завтра в 10:00 — запросить новую цену
-Запланируй созвон в пятницу в 15:00 на 30 минут
-
-Проанализируй разговор и скажи, что я не спросил
-Обнови проекты 134, 135 и 139 по моему голосовому сообщению
-```
-
-Для явного технического Kommo ID используйте `#123456` или `Kommo ID 123456`.
 
 ---
 
@@ -307,22 +338,14 @@ Calendar используется для действий с точным вре
 |---|---|
 | **Owner** | Полный контроль, приглашения, управление командой |
 | **Admin** | Администрирование и операционные действия |
-| **Manager** | Работа только с разрешёнными или назначенными сделками |
-| **Viewer** | Только чтение, без подготовки и подтверждения записей |
+| **Manager** | Работа с разрешёнными или назначенными сделками |
+| **Viewer** | Только чтение, без подтверждения записей |
 
-### Подключение менеджера
-
-1. Owner отправляет `/invite`.
-2. Выбирает роль **Manager**.
-3. Передаёт одноразовую ссылку сотруднику.
-4. Сотрудник открывает ссылку и нажимает **Start**.
-5. Owner привязывает пользователя к Kommo:
+Manager должен быть привязан к Kommo user ID:
 
 ```text
 /bind_kommo TELEGRAM_ID KOMMO_USER_ID
 ```
-
-До привязки Manager не получает доступ к клиентским сделкам. Это сделано специально: агент не угадывает личность сотрудника и владельца сделки.
 
 ---
 
@@ -330,37 +353,35 @@ Calendar используется для действий с точным вре
 
 ```mermaid
 flowchart TD
-    TG[Telegram: текст / голос / файлы] --> API[FastAPI Webhook]
-    API --> ID[Identity & Permission Layer]
-    ID --> PLAN[Agent Planner]
-    PLAN --> RESOLVE[Lead / Project Resolution]
+    TG[Telegram: текст / голос / файлы] --> API[FastAPI webhook]
+    API --> ID[Identity & permissions]
+    ID --> CTX[Session context]
+    CTX --> ROUTE[Deterministic routing]
+    ROUTE --> PLAN[LLM planner fallback]
 
-    RESOLVE --> READ[Read-only services]
-    READ --> TG
+    ROUTE --> JOURNAL[Kaizen journal]
+    JOURNAL --> PG[(PostgreSQL)]
+    JOURNAL --> WEEK[Weekly analysis]
+    WEEK --> PREVIEW[Improvement preview]
 
-    RESOLVE --> DRAFT[Draft generation]
-    DRAFT --> TG
+    PLAN --> READ[Read-only services]
+    PLAN --> DRAFT[Draft generation]
+    PLAN --> PENDING[PendingAgentAction]
+    PREVIEW --> PENDING
 
-    RESOLVE --> PENDING[Pending Agent Action]
-    PENDING --> PREVIEW[Telegram Preview]
-    PREVIEW --> CONFIRM{Explicit confirmation}
-    CONFIRM -->|Да| EXEC[Deterministic Executor]
-    CONFIRM -->|Нет| CANCEL[Cancel]
-
+    PENDING --> CONFIRM{Explicit confirmation}
+    CONFIRM --> EXEC[Deterministic executor]
     EXEC --> KOMMO[Kommo]
     EXEC --> NOTION[Notion]
     EXEC --> DRIVE[Google Drive]
     EXEC --> SHEETS[Google Sheets]
     EXEC --> GMAIL[Gmail Draft]
     EXEC --> CAL[Google Calendar]
-    EXEC --> DB[(PostgreSQL Audit)]
+    EXEC --> AUDIT[(Audit)]
 
     TG --> VOICE[Audio pipeline]
-    VOICE --> REDIS[Redis / Celery or Direct Mode]
-    REDIS --> WHISPER[Transcription]
-    WHISPER --> ANALYSIS[Structured AI Analysis]
-    ANALYSIS --> DB
-    ANALYSIS --> TG
+    VOICE --> TRANSCRIPT[Transcription]
+    TRANSCRIPT --> ROUTE
 ```
 
 ### Роли систем
@@ -368,14 +389,14 @@ flowchart TD
 | Система | Источник истины для |
 |---|---|
 | **Telegram** | Интерфейс, команды, preview и подтверждения |
-| **Kommo** | Сделки, этапы, контакты, задачи, примечания, ответственные |
-| **PostgreSQL** | Память агента, pending actions, аудит, роли, голосовые |
-| **Notion** | Структурированный проектный контекст и рабочая база знаний |
+| **Kommo** | Сделки, этапы, контакты, задачи, примечания |
+| **PostgreSQL** | Память, pending actions, аудит, роли, дневник |
+| **Notion** | Проектный контекст и подтверждённые improvement cards |
 | **Google Drive** | Оригиналы документов и проектные файлы |
-| **Google Sheets** | Маркетинговый реестр и внутренняя нумерация лидов |
+| **Google Sheets** | Маркетинговый реестр и внутренняя нумерация |
 | **Google Calendar** | Действия с точным временем |
 | **Gmail** | Черновики писем |
-| **WhatsApp** | Ручная отправка и входящие webhook-уведомления |
+| **WhatsApp** | Ручная/API-отправка и входящие события |
 
 ---
 
@@ -392,30 +413,15 @@ flowchart TD
 - HTTPS URL для webhook;
 - credentials подключаемых Google/Notion сервисов.
 
-### 1. Клонирование
-
 ```bash
 git clone https://github.com/hilfikiri1/bot_lead.git
 cd bot_lead
 cp .env.example .env
-```
-
-Заполните `.env`. Не добавляйте файл с секретами в Git.
-
-### 2. Локальный запуск
-
-```bash
 docker compose up --build -d
-```
-
-### 3. Миграции
-
-```bash
 docker compose exec api alembic upgrade head
-docker compose exec api alembic current
 ```
 
-### 4. Проверка
+Проверка:
 
 ```bash
 curl http://localhost:8000/health
@@ -423,146 +429,72 @@ curl http://localhost:8000/ready
 curl http://localhost:8000/version
 ```
 
-Swagger доступен по `/docs`, только если разрешён переменной `EXPOSE_API_DOCS=true`.
-
-### 5. Telegram webhook
-
-При заполненном `WEBHOOK_BASE_URL` webhook регистрируется при запуске. Для ручной регистрации:
-
-```bash
-curl -X POST "https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/setWebhook" \
-  -d "url=https://your-domain.com/webhook/telegram" \
-  -d "secret_token=<TELEGRAM_WEBHOOK_SECRET>"
-```
-
-### 6. Первый Owner
-
-Задайте:
-
-```env
-TELEGRAM_OWNER_USER_ID=123456789
-ALLOWED_TELEGRAM_USER_IDS=123456789
-```
-
-После запуска проверьте `/team`. Не удаляйте bootstrap allowlist, пока Owner не появился в базе.
+Swagger доступен по `/docs`, только при `EXPOSE_API_DOCS=true` вне production.
 
 ---
 
 ## Основные переменные окружения
 
-Полный список находится в [`.env.example`](.env.example).
-
-### Core
+Полный список: [`.env.example`](.env.example).
 
 ```env
 APP_ENV=production
 DATABASE_URL=
-CELERY_BROKER_URL=
-CELERY_RESULT_BACKEND=
-OPENAI_API_KEY=
-OPENAI_MODEL=gpt-4o-mini
-OPENAI_WHISPER_MODEL=whisper-1
-```
-
-### Telegram
-
-```env
+REDISHOST=
+REDISPORT=6379
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_WEBHOOK_SECRET=
 WEBHOOK_BASE_URL=
 TELEGRAM_OWNER_USER_ID=
 ALLOWED_TELEGRAM_USER_IDS=
-TELEGRAM_BOT_USERNAME=
-```
-
-### Kommo
-
-```env
+OPENAI_API_KEY=
+OPENAI_MODEL=gpt-4o-mini
+OPENAI_WHISPER_MODEL=whisper-1
 KOMMO_BASE_URL=
 KOMMO_ACCESS_TOKEN=
-KOMMO_DEFAULT_PIPELINE_ID=
-KOMMO_DEFAULT_STATUS_ID=
-KOMMO_MENU_PIPELINE_ID=
-KOMMO_INTERNAL_LEAD_NUMBER_FIELD_ID=
-```
-
-### AI Agent
-
-```env
-AGENT_ENABLED=true
-AGENT_AUTO_VOICE_MODE=true
-AGENT_DEFAULT_CLIENT_LANGUAGE=pl
-AGENT_ACTION_TTL_MINUTES=30
-AGENT_STALE_DAYS_DEFAULT=7
-AGENT_SOURCE_TIMEOUT_SECONDS=8
 MANAGER_TIMEZONE=Europe/Warsaw
 ```
 
-### Google Sheets
+### Kaizen scheduler
 
 ```env
-GOOGLE_SHEETS_SPREADSHEET_ID=
-GOOGLE_SHEETS_WORKSHEET_NAME=FB
-GOOGLE_SHEETS_STATUS_COLUMN=W
-GOOGLE_SHEETS_COMMENT_COLUMN=X
-GOOGLE_SHEETS_LEAD_NUMBER_COLUMN=Y
-GOOGLE_SHEETS_WRITE_ENABLED=false
-LEAD_STATUS_SYNC_ENABLED=false
+AGENT_EVENING_REFLECTION_ENABLED=false
+AGENT_EVENING_REFLECTION_HOUR=19
+AGENT_EVENING_REFLECTION_REMINDER_HOURS=1
+AGENT_WEEKLY_REVIEW_ENABLED=false
+AGENT_WEEKLY_REVIEW_WEEKDAY=6
+AGENT_WEEKLY_REVIEW_HOUR=19
+AGENT_WEEKLY_REVIEW_MIN_DAILY_ENTRIES=2
+AGENT_DIGEST_TIMEZONE=Europe/Warsaw
 ```
 
-Сначала используйте read-only preview. Включайте запись только после проверки сопоставлений и прав service account.
-
-### WhatsApp webhook
-
-```env
-WHATSAPP_ENABLED=false
-WHATSAPP_VERIFY_TOKEN=
-WHATSAPP_APP_SECRET=
-WHATSAPP_PHONE_NUMBER_ID=
-WHATSAPP_ACCESS_TOKEN=
-```
-
-`WHATSAPP_ENABLED=false` не мешает ручному Click to Chat. Meta credentials нужны для Cloud API webhook и будущих API-функций.
+`0 = Monday`, `6 = Sunday`. При включённой reflection обычный evening digest не дублируется. Morning digest не меняется.
 
 ---
 
 ## Production / Railway
 
-Для production рекомендуется раздельно запускать:
+1. Merge только после зелёного CI.
+2. Сделать backup PostgreSQL.
+3. Deploy с kaizen flags `false`.
+4. Применить `alembic upgrade head`.
+5. Проверить единственный head `014_kaizen_journal_entries`.
+6. Проверить `/health`, `/ready`, `/version`, `/diag`.
+7. Выполнить ручной text/voice smoke `/evening`.
+8. Только затем включить evening reflection.
+9. После нескольких записей включить weekly review.
 
-- FastAPI service;
-- Celery worker;
-- PostgreSQL;
-- Redis.
-
-Перед включением записи во внешние системы:
-
-1. проверить deployed commit;
-2. применить актуальный Alembic head;
-3. проверить `/version`, `/health` и `/ready`;
-4. выполнить `/kommo_test`, `/notion_test`, `/drive_status` и `/calendar_test`;
-5. оставить `GOOGLE_SHEETS_WRITE_ENABLED=false` до ручной приёмки;
-6. проверить один тестовый проект;
-7. только затем включать рабочие записи.
+Полный порядок: [`RAILWAY_AGENT_V5.md`](RAILWAY_AGENT_V5.md).
 
 ---
 
 ## Тесты
 
 ```bash
-# В контейнере
-docker compose exec api pytest -q
-
-# Локально
 python -m pip install -r requirements.txt
-pytest -q
-
-# Синтаксическая проверка
 python -m compileall -q app migrations
-
-# Проверка Alembic
 alembic heads
-alembic current
+pytest -q
 ```
 
 Unit/regression tests не заменяют smoke-тест реальных Railway variables и внешних API.
@@ -573,103 +505,58 @@ Unit/regression tests не заменяют smoke-тест реальных Rail
 
 | Endpoint | Назначение |
 |---|---|
-| `GET /health` | Базовая доступность приложения |
-| `GET /ready` | Проверка готовности зависимостей |
-| `GET /version` | Версия развернутого приложения |
+| `GET /health` | Базовая доступность |
+| `GET /ready` | Готовность сервиса |
+| `GET /version` | Версия приложения |
 | `GET /docs` | Swagger, если разрешён |
 | `POST /webhook/telegram` | Telegram webhook |
-| `GET /webhook/whatsapp` | Проверка Meta webhook |
-| `POST /webhook/whatsapp` | Входящие Meta WhatsApp events |
-| `GET /admin/leads` | Список лидов, защищённый Admin API key |
-| `GET /admin/leads/{id}` | Детали лида и связанные данные |
+| `GET/POST /webhook/whatsapp` | Meta webhook |
+| `GET /admin/diagnostics/run` | Защищённая диагностика |
 
 ---
 
-## Структура проекта
-
-```text
-bot_lead/
-├── app/
-│   ├── agent/                  # planner, memory, tools, actions, executor
-│   ├── api/                    # Telegram, WhatsApp, admin, auth
-│   ├── models/                 # SQLAlchemy models
-│   ├── services/               # Kommo, Drive, Sheets, Notion, Gmail, Calendar
-│   ├── tasks/                  # Celery tasks
-│   ├── main.py                 # FastAPI application
-│   ├── config.py               # Environment settings
-│   ├── database.py             # PostgreSQL connection
-│   └── celery_app.py           # Worker configuration
-├── migrations/                 # Alembic migrations
-├── tests/                      # Unit and regression tests
-├── storage/                    # Local development storage
-├── docker-compose.yml
-├── Dockerfile
-├── alembic.ini
-├── requirements.txt
-├── .env.example
-└── README.md
-```
-
----
-
-## Текущий статус функций
+## Текущий статус
 
 | Область | Статус |
 |---|---|
-| Telegram text/voice interface | Рабочий основной контур |
+| Telegram text/voice | Основной рабочий контур |
 | Kommo search/cards/tasks/notes | Реализовано |
 | Roles and Manager restrictions | Реализовано |
 | Gmail drafts | Реализовано, без отправки |
-| Calendar preview and confirmation | Реализовано |
-| Manual WhatsApp handoff | Реализовано |
-| Incoming WhatsApp webhook notifications | Реализовано при корректной настройке Meta |
-| Manual Sheets → Kommo onboarding | Реализовано с подтверждением |
-| Unified project card | Реализовано, допускает частичные данные |
-| Full project timeline | Частично подключено |
-| Durable outbox and automatic retry | Фундамент, не полный сквозной flow |
-| Undo external actions | Фундамент, не готово для обещания пользователю |
-| Deep PDF/XLSX/DOCX/OCR intelligence | В разработке |
-| Fully automatic unified project memory | Частично реализовано |
+| Calendar preview/confirmation | Реализовано |
+| WhatsApp Cloud inbox/outbox | Реализовано при настройке Meta |
+| Sheets onboarding/comments | Реализовано с подтверждением |
+| Unified project card/timeline | Реализовано, часть источников best-effort |
+| Drive project files | Реализовано, зависит от корректного auth mode |
+| Kaizen daily/weekly journal | Local-first, Notion only after confirmation |
+| Durable outbox/retry | Фундамент, не весь сквозной flow |
+| Deep PDF/XLSX/DOCX/OCR | В развитии |
 
-> Агент не является автономным сотрудником, который самостоятельно принимает решения и выполняет действия в фоне. Он работает по запросам менеджера, формирует предложения и выполняет внешние изменения только после подтверждения.
-
----
-
-## Безопасность
-
-- Telegram webhook проверяется секретным токеном.
-- Meta webhook может проверяться через `X-Hub-Signature-256`.
-- Одноразовые приглашения хранятся в виде SHA-256 hash и имеют срок действия.
-- Manager не должен читать чужие сделки при assigned-only scope.
-- Viewer не может подтверждать внешние записи.
-- Повторные callback и delivery markers защищают от дублей.
-- Все внешние действия должны оставлять audit trail.
-- Admin API защищается отдельным ключом.
-- Секреты хранятся только в environment variables.
+> Агент не является автономным сотрудником. Он анализирует, предлагает и выполняет внешние изменения только после подтверждения менеджера.
 
 ---
 
 ## Полезные документы
 
-- [`AGENT_V3.md`](AGENT_V3.md) — единый агентный контур;
-- [`AGENT_V4_IDENTITY_LANGUAGE_WHATSAPP.md`](AGENT_V4_IDENTITY_LANGUAGE_WHATSAPP.md) — роли, языки и WhatsApp handoff;
-- [`STATUS_SYNC_SETUP.md`](STATUS_SYNC_SETUP.md) — Google Sheets и внутренняя нумерация;
-- [`AGENT_V4_3_MARKETING_LEAD_SYNC.md`](AGENT_V4_3_MARKETING_LEAD_SYNC.md) — контракт безопасной синхронизации;
-- [`PHASE1_RELEASE_NOTES.md`](PHASE1_RELEASE_NOTES.md) и [`PHASE2_RELEASE_NOTES.md`](PHASE2_RELEASE_NOTES.md) — история развития.
+- [`AGENT_V5_OPERATIONS.md`](AGENT_V5_OPERATIONS.md) — операционный директор;
+- [`KAIZEN_JOURNAL.md`](KAIZEN_JOURNAL.md) — дневник, weekly review и Notion Board;
+- [`RAILWAY_AGENT_V5.md`](RAILWAY_AGENT_V5.md) — production rollout;
+- [`AGENT_V4_IDENTITY_LANGUAGE_WHATSAPP.md`](AGENT_V4_IDENTITY_LANGUAGE_WHATSAPP.md) — роли, языки и WhatsApp;
+- [`STATUS_SYNC_SETUP.md`](STATUS_SYNC_SETUP.md) — Sheets и внутренняя нумерация;
+- [`SYSTEM_DIAGNOSTICS.md`](SYSTEM_DIAGNOSTICS.md) — единый диагностический пакет.
 
 ---
 
 ## Подход к разработке
 
-Изменения должны выполняться небольшими проверяемыми PR:
-
-1. прочитать актуальный `origin/main`;
-2. не дублировать существующие интеграционные клиенты;
-3. добавить или обновить regression tests;
-4. сохранить preview → confirm → execute → audit;
-5. не включать автоматическую отправку сообщений;
-6. провести smoke-тест на безопасной тестовой сущности;
-7. только после этого включать production writes.
+1. Читать актуальный `origin/main`.
+2. Не дублировать клиентов OpenAI, Telegram, Notion или PostgreSQL.
+3. Делать небольшие проверяемые изменения.
+4. Добавлять regression tests.
+5. Сохранять preview → confirm → execute → audit.
+6. Не включать автоматическую отправку клиентам.
+7. Проводить production smoke на безопасной сущности.
+8. Не merge и не deploy без явного решения владельца.
 
 ---
 

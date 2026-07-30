@@ -21,8 +21,20 @@ from app.services.agent_scheduled_digest_service import start_periodic_digest_lo
 from app.services.communication_timeline_runtime import (
     install_communication_timeline_runtime,
 )
+from app.services.context_intelligence_runtime import (
+    install_context_intelligence_runtime,
+)
 from app.services.diagnostic_runtime import install_diagnostic_runtime
 from app.services.followup_runtime import install_followup_runtime_extensions
+from app.services.kaizen_diagnostics_runtime import (
+    install_kaizen_diagnostics_runtime,
+)
+from app.services.kaizen_notion_guard_runtime import (
+    install_kaizen_notion_guard_runtime,
+)
+from app.services.kaizen_source_guard_runtime import (
+    install_kaizen_source_guard_runtime,
+)
 from app.services.lead_registry_runtime import install_lead_registry_runtime
 from app.services.operator_experience_phone_patch import (
     install_operator_experience_phone_patch,
@@ -31,12 +43,9 @@ from app.services.operator_experience_runtime import install_operator_experience
 from app.services.request_trace import install_request_tracing
 from app.services.runtime_extensions import install_runtime_extensions
 from app.services.supplier_workspace_runtime import install_supplier_workspace_runtime
+from app.services.telegram_command_catalog import set_bot_commands
+from app.services.telegram_service import delete_webhook, register_webhook
 from app.services.whatsapp_cloud_runtime import install_whatsapp_cloud_runtime
-from app.services.telegram_service import (
-    delete_webhook,
-    register_webhook,
-    set_bot_commands,
-)
 
 settings = get_settings()
 APP_VERSION = "5.0.0"
@@ -49,8 +58,12 @@ install_whatsapp_cloud_runtime()
 install_lead_registry_runtime()
 install_operator_experience_runtime()
 install_operator_experience_phone_patch()
-# Install last so /diag wraps the final production behavior of the agent.
+# Install last so /diag and kaizen wrap the final production behavior of the agent.
 install_diagnostic_runtime()
+install_kaizen_diagnostics_runtime()
+install_kaizen_source_guard_runtime()
+install_context_intelligence_runtime()
+install_kaizen_notion_guard_runtime()
 
 structlog.configure(
     processors=[
@@ -111,12 +124,22 @@ async def lifespan(app: FastAPI):
             "Lead status sync scheduler enabled (manual service; background loop exits)"
         )
 
-    if settings.agent_morning_digest_enabled or settings.agent_evening_digest_enabled:
-        digest_task = await start_periodic_digest_loop()
-        app_logger.info(
-            "Agent scheduled digest enabled (morning=%s, evening=%s)",
+    scheduled_agent_enabled = any(
+        (
             settings.agent_morning_digest_enabled,
             settings.agent_evening_digest_enabled,
+            settings.agent_evening_reflection_enabled,
+            settings.agent_weekly_review_enabled,
+        )
+    )
+    if scheduled_agent_enabled:
+        digest_task = await start_periodic_digest_loop()
+        app_logger.info(
+            "Agent scheduler enabled (morning=%s, evening_digest=%s, reflection=%s, weekly=%s)",
+            settings.agent_morning_digest_enabled,
+            settings.agent_evening_digest_enabled,
+            settings.agent_evening_reflection_enabled,
+            settings.agent_weekly_review_enabled,
         )
 
     if followup_service.enabled():

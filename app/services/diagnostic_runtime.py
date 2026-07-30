@@ -216,11 +216,13 @@ def install_diagnostic_runtime() -> None:
 
     install_diagnostics_hardening_runtime()
 
-    # Install the operator fixes last, after diagnostics hardening has replaced the
-    # Drive/project functions that these wrappers extend.
+    # Install operator fixes after diagnostics hardening has replaced Drive/project
+    # functions, then install kaizen last so it sees the final production behavior.
     from app.services.round3_runtime import install_round3_runtime
     from app.services.round3_compat import install_round3_compat
+    from app.services.kaizen_runtime import install_kaizen_runtime
 
     install_round3_runtime()
     install_round3_compat()
-    logger.info("System diagnostic runtime installed")
+    install_kaizen_runtime()
+    logger.info("System diagnostic and kaizen runtimes installed")

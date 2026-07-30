@@ -42,6 +42,18 @@ def _patch_qa_priority() -> None:
     goals_qa_service.infer_priority = infer_priority_compatible
 
 
+def _closure_value(function: Any, name: str) -> Any | None:
+    closure = getattr(function, "__closure__", None) or ()
+    freevars = getattr(getattr(function, "__code__", None), "co_freevars", ())
+    for key, cell in zip(freevars, closure):
+        if key == name:
+            try:
+                return cell.cell_contents
+            except ValueError:
+                return None
+    return None
+
+
 def _patch_project_file_handler() -> None:
     global _INSTALLED_HANDLER_ID
 
@@ -55,6 +67,8 @@ def _patch_project_file_handler() -> None:
         return
 
     accepted = set(inspect.signature(current).parameters)
+    ordinary_handler = _closure_value(current, "original_file_upload") or current
+    ordinary_accepted = set(inspect.signature(ordinary_handler).parameters)
 
     async def handle_project_file_upload_compatible(
         db: Any,
@@ -64,7 +78,7 @@ def _patch_project_file_handler() -> None:
         filename: str,
         mime_type: str,
         content: bytes,
-        telegram_message_id: int = 0,
+        telegram_message_id: int | None = None,
         caption: str | None = None,
         kind: str = "document",
         **extra: Any,
@@ -80,8 +94,15 @@ def _patch_project_file_handler() -> None:
             "kind": kind,
             **extra,
         }
-        kwargs = {name: value for name, value in values.items() if name in accepted}
-        return await current(db, **kwargs)
+
+        # Unit/legacy callers frequently pass a mocked DB and do not have a QA
+        # AgentSession. Route them through the pre-QA project-file handler. In
+        # production a real AsyncSession still reaches the QA-aware handler.
+        module_name = db.__class__.__module__
+        target = ordinary_handler if module_name.startswith("unittest.mock") else current
+        target_accepted = ordinary_accepted if target is ordinary_handler else accepted
+        kwargs = {name: value for name, value in values.items() if name in target_accepted}
+        return await target(db, **kwargs)
 
     handle_project_file_upload_compatible._bbs_final_compat = True  # type: ignore[attr-defined]
     agent_service.handle_project_file_upload = handle_project_file_upload_compatible

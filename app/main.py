@@ -31,6 +31,9 @@ from app.services.facebook_lead_onboarding_runtime import (
 from app.services.final_compat_runtime import install_final_compat_runtime
 from app.services.followup_runtime import install_followup_runtime_extensions
 from app.services.goals_qa_runtime import install_goals_qa_runtime
+from app.services.onboarding_call_checkin_runtime import (
+    install_onboarding_call_checkin_runtime,
+)
 from app.services.qa_projection_runtime import install_qa_projection_runtime
 from app.services.kaizen_diagnostics_runtime import (
     install_kaizen_diagnostics_runtime,
@@ -74,6 +77,7 @@ install_goals_qa_runtime()
 install_qa_projection_runtime()
 install_smart_lead_onboarding_runtime()
 install_final_compat_runtime()
+install_onboarding_call_checkin_runtime()
 
 structlog.configure(
     processors=[

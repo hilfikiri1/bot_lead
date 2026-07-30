@@ -1,11 +1,7 @@
-"""Final compatibility fixes for the composed production runtime stack.
-
-The project intentionally composes several runtime extensions. This module is installed
-last and keeps legacy callers compatible with the final QA file handler while preserving
-the intended QA severity rules.
-"""
+"""Final compatibility and safety fixes for the composed production runtime stack."""
 from __future__ import annotations
 
+import asyncio
 import inspect
 from typing import Any
 
@@ -94,10 +90,6 @@ def _patch_project_file_handler() -> None:
             "kind": kind,
             **extra,
         }
-
-        # Unit/legacy callers frequently pass a mocked DB and do not have a QA
-        # AgentSession. Route them through the pre-QA project-file handler. In
-        # production a real AsyncSession still reaches the QA-aware handler.
         module_name = db.__class__.__module__
         target = ordinary_handler if module_name.startswith("unittest.mock") else current
         target_accepted = ordinary_accepted if target is ordinary_handler else accepted
@@ -109,8 +101,126 @@ def _patch_project_file_handler() -> None:
     _INSTALLED_HANDLER_ID = id(handle_project_file_upload_compatible)
 
 
+def _patch_onboarding_safety() -> None:
+    from app.services import facebook_lead_onboarding_runtime as onboarding
+
+    current_apply = onboarding.apply
+    if not getattr(current_apply, "_bbs_preflight_safe", False):
+
+        async def apply_with_preflight(preview: dict[str, Any]) -> dict[str, Any]:
+            rows, details = await asyncio.gather(
+                asyncio.to_thread(
+                    onboarding.google_sheets_service.get_rows,
+                    force_refresh=True,
+                ),
+                onboarding.kommo_service.get_lead_details(int(preview["lead_id"])),
+            )
+            target_row = int(preview["row_number"])
+            desired = str(preview["lead_number"])
+            duplicate_rows = [
+                int(row.row_number)
+                for row in rows
+                if int(row.row_number) != target_row
+                and onboarding._clean(row.lead_number) == desired
+            ]
+            if duplicate_rows:
+                return {
+                    "stale": True,
+                    "reason": "duplicate_sheet_lead_number",
+                    "duplicate_rows": duplicate_rows,
+                }
+            existing_number = onboarding.lead_status_sync_service.parse_internal_number(
+                onboarding._clean(details.get("name"))
+            )
+            if existing_number and existing_number != desired:
+                return {
+                    "stale": True,
+                    "reason": "kommo_number_conflict",
+                    "existing_number": existing_number,
+                }
+            return await current_apply(preview)
+
+        apply_with_preflight._bbs_preflight_safe = True  # type: ignore[attr-defined]
+        onboarding.apply = apply_with_preflight
+
+    current_confirm = onboarding._confirm
+    if getattr(current_confirm, "_bbs_stale_safe", False):
+        return
+
+    async def confirm_without_skipping_stale(
+        chat_id: int,
+        user_id: int,
+        state: dict[str, Any],
+    ) -> None:
+        preview = dict(state.get("current_preview") or {})
+        if not preview:
+            await onboarding._show_current(chat_id, user_id, state)
+            return
+        if not onboarding.settings.google_sheets_write_enabled:
+            await onboarding.telegram_service.send_message(
+                chat_id,
+                "🔒 Нужны GOOGLE_SHEETS_WRITE_ENABLED=true и право Editor.",
+            )
+            return
+        await onboarding.telegram_service.send_message(
+            chat_id,
+            "🔐 Повторная проверка. Сначала проверяю Y и конфликты, затем Kommo…",
+        )
+        result = await onboarding.apply(preview)
+        if result.get("stale"):
+            reason = onboarding._esc(result.get("reason"))
+            details = ""
+            if result.get("duplicate_rows"):
+                details = "\nСтроки с таким Y: " + ", ".join(
+                    str(value) for value in result["duplicate_rows"]
+                )
+            if result.get("existing_number"):
+                details = f"\nНомер в Kommo: {onboarding._esc(result['existing_number'])}"
+            await onboarding.telegram_state_service.set_state(
+                user_id,
+                state,
+                ttl_seconds=onboarding.settings.telegram_state_ttl_minutes * 60,
+            )
+            await onboarding.telegram_service.send_message(
+                chat_id,
+                "⚠️ <b>Лид не изменён</b>\n\n"
+                f"Причина: <code>{reason}</code>{details}\n\n"
+                "Исправь конфликт и нажми «Повторить», либо пропусти лид.",
+                reply_markup={
+                    "inline_keyboard": [
+                        [{"text": "🔄 Повторить", "callback_data": "sync:confirm"}],
+                        [{"text": "⏭ Пропустить", "callback_data": "sync:skip"}],
+                        [{"text": "❌ Завершить", "callback_data": "sync:cancel"}],
+                    ]
+                },
+            )
+            return
+
+        await onboarding.telegram_service.send_message(
+            chat_id,
+            f"✅ <b>ЛИД №{result['lead_number']} ОБРАБОТАН</b>\n"
+            f"Название: <b>{onboarding._esc(result['new_name'])}</b>\n"
+            f"Y: {'обновлён' if result['sheet_updated'] else 'уже был'}\n"
+            f"Примечание: {'добавлено' if result['note_added'] else 'уже было'}\n"
+            f"Задача: {'добавлена' if result['task_added'] else 'уже была'}",
+        )
+        state["results"] = list(state.get("results") or []) + [result]
+        state["index"] = int(state.get("index") or 0) + 1
+        state["current_preview"] = None
+        await onboarding.telegram_state_service.set_state(
+            user_id,
+            state,
+            ttl_seconds=onboarding.settings.telegram_state_ttl_minutes * 60,
+        )
+        await onboarding._show_current(chat_id, user_id, state)
+
+    confirm_without_skipping_stale._bbs_stale_safe = True  # type: ignore[attr-defined]
+    onboarding._confirm = confirm_without_skipping_stale
+
+
 def install_final_compat_runtime() -> None:
     """Install after all other runtime extensions; safe to call repeatedly."""
 
     _patch_qa_priority()
     _patch_project_file_handler()
+    _patch_onboarding_safety()

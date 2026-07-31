@@ -87,7 +87,7 @@ structlog.configure(
         structlog.dev.ConsoleRenderer(),
     ],
     wrapper_class=structlog.BoundLogger,
-    logger_factory=structlog.PrintLoggerFactory,
+    logger_factory=structlog.PrintLoggerFactory(),
 )
 logging.basicConfig(level=settings.log_level)
 logging.getLogger("httpx").setLevel(logging.WARNING)

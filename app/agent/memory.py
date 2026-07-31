@@ -131,20 +131,27 @@ async def build_context(
     recent = await recent_messages(db, telegram_user_id=telegram_user_id, limit=10)
     active_kommo = session.active_kommo_lead_id or local_context.get("kommo_lead_id")
     active_local = session.active_local_lead_id or local_context.get("local_lead_id")
+    session_context = dict(session.context or {})
     return {
         **local_context,
         "active_kommo_lead_id": active_kommo,
         "active_local_lead_id": active_local,
-        "active_lead_name": (session.context or {}).get("active_lead_name")
+        "active_lead_name": session_context.get("active_lead_name")
         or local_context.get("lead_name"),
         "memory_summary": session.memory_summary,
         "last_intent": session.last_intent,
         "recent_messages": recent,
-        "last_draft": (session.context or {}).get("last_draft"),
-        "last_draft_lead": (session.context or {}).get("last_draft_lead"),
-        "last_draft_created_at": (session.context or {}).get("last_draft_created_at"),
-        "last_digest": (session.context or {}).get("last_digest"),
-        "pending_clarification": (session.context or {}).get("pending_clarification"),
+        "last_draft": session_context.get("last_draft"),
+        "last_draft_lead": session_context.get("last_draft_lead"),
+        "last_draft_created_at": session_context.get("last_draft_created_at"),
+        "last_digest": session_context.get("last_digest"),
+        "pending_clarification": session_context.get("pending_clarification"),
+        # QA intake is a multi-message mode. These values are written to the
+        # session JSON by goals_qa_runtime and must survive the next Telegram
+        # update; otherwise ordinary text is incorrectly routed to the CRM agent.
+        "qa_intake": session_context.get("qa_intake"),
+        "active_qa_issue_id": session_context.get("active_qa_issue_id"),
+        "qa_retest_issue_id": session_context.get("qa_retest_issue_id"),
     }
 
 

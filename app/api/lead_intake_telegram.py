@@ -13,8 +13,17 @@ import logging
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
-from app.services import kommo_service, telegram_service, telegram_state_service
+from app.models.lead_processing_job import LeadProcessingJob
+from app.services import (
+    client_message_service,
+    kommo_service,
+    phone_utils,
+    telegram_service,
+    telegram_state_service,
+)
 from app.services.lead_intake import repository, service, telegram_ui
+from app.services.lead_intake.matching import LeadSnapshot
+from app.services.lead_intake.schema import LeadQualification
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -74,11 +83,79 @@ async def show_job_by_id(db: AsyncSession, chat_id: int, job_id: int) -> None:
     await _send_preview(chat_id, result)
 
 
+async def _send_lead_vcard(
+    chat_id: int,
+    *,
+    job: LeadProcessingJob,
+    snapshot: LeadSnapshot,
+    qualification: LeadQualification | None = None,
+) -> None:
+    phone = phone_utils.to_e164(snapshot.phone) or str(snapshot.phone or "").strip()
+    if not phone:
+        return
+    product = (
+        qualification.product_name_ru
+        if qualification and qualification.product_name_ru
+        else str((job.raw_snapshot_json or {}).get("product") or "Новый запрос")
+    )
+    client_name = str(snapshot.name or "Klient").strip()
+    display_name = f"{client_name} — {product}"[:120]
+    lead_number = str(job.assigned_number or "").strip()
+    content = client_message_service.build_vcard(
+        name=display_name,
+        company=f"B&BS · лид №{lead_number}" if lead_number else "B&BS",
+        phone=phone,
+        email=str(snapshot.email or "").strip() or None,
+        language="pl",
+    )
+    await telegram_service.send_document(
+        chat_id,
+        filename=client_message_service.vcard_filename(
+            f"{lead_number}_{client_name}_{product}" if lead_number else display_name
+        ),
+        content=content,
+        caption=(
+            f"👤 <b>Контакт для iPhone · №{html.escape(lead_number or '—')}</b>\n"
+            f"{html.escape(client_name)} — {html.escape(product)}\n"
+            f"Телефон: <code>{html.escape(phone_utils.display_phone(phone) or phone)}</code>\n"
+            "Нажмите на файл → «Создать новый контакт», затем «Позвонить»."
+        ),
+        mime_type="text/vcard",
+    )
+
+
+async def _send_call_preparation(
+    chat_id: int,
+    *,
+    job: LeadProcessingJob,
+    qualification: LeadQualification,
+    snapshot: LeadSnapshot,
+) -> None:
+    messages, keyboard = telegram_ui.render_call_script(
+        qualification, job, snapshot=snapshot
+    )
+    for index, text in enumerate(messages):
+        # Put outcome / dial buttons only on the last chunk.
+        markup = keyboard if index == len(messages) - 1 else None
+        await telegram_service.send_message(chat_id, text, reply_markup=markup)
+    await _send_lead_vcard(
+        chat_id, job=job, snapshot=snapshot, qualification=qualification
+    )
+
+
 async def _handle_apply_result(chat_id: int, result: service.ApplyResult) -> None:
     if result.status == "completed":
         qualification = service.qualification_from_job(result.job)
         text, keyboard = telegram_ui.render_completed(result.job, qualification)
         await telegram_service.send_message(chat_id, text, reply_markup=keyboard)
+        if qualification and qualification.recommended_action == "phone_call":
+            snapshot = service.snapshot_from_job(result.job)
+            await _send_lead_vcard(
+                chat_id,
+                job=result.job,
+                snapshot=snapshot,
+                qualification=qualification,
+            )
         return
     if result.status == "already_completed":
         await telegram_service.send_message(chat_id, "Этот лид уже был обработан ранее.")
@@ -205,8 +282,10 @@ async def handle_callback(*, callback_data: str, chat_id: int, user_id: int, db:
         if qualification is None:
             await telegram_service.send_message(chat_id, "Сначала постройте предпросмотр лида.")
             return True
-        text, keyboard = telegram_ui.render_call_script(qualification, job)
-        await telegram_service.send_message(chat_id, text, reply_markup=keyboard)
+        snapshot = service.snapshot_from_job(job)
+        await _send_call_preparation(
+            chat_id, job=job, qualification=qualification, snapshot=snapshot
+        )
         return True
 
     if action in _CALL_OUTCOME_MAP:

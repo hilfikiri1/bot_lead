@@ -147,17 +147,23 @@ def _ai_payload(job: LeadProcessingJob, snapshot: LeadSnapshot, row: Spreadsheet
     return {
         "kommo_lead_id": job.kommo_lead_id,
         "assigned_internal_number": job.assigned_number,
-        "client_name": snapshot.name,
+        "client_name": snapshot.name or row.client_name,
+        "company_name": row.company,
         "phone_e164": phone_utils.to_e164(snapshot.phone),
         "email": snapshot.email,
         "region": snapshot.region or row.region,
-        "preferred_contact_channel": raw.get("contact_channel"),
-        "requested_product_raw": snapshot.product,
+        "preferred_contact_channel": raw.get("contact_channel") or row.contact_channel,
+        "requested_product_raw": snapshot.product or row.product,
         "requested_product_translation_hint_ru": product_ru,
         "budget_raw": raw.get("budget") or row.budget,
         "lead_created_at": snapshot.created_at,
         "facebook_lead_id": snapshot.facebook_lead_id,
         "sheet_row_number": row.row_number,
+        "company_research_rule": (
+            "If company_name is present, form a cautious B2B hypothesis from the "
+            "name + product only. Do not invent founding years, assortment lists, "
+            "or website facts."
+        ),
     }
 
 

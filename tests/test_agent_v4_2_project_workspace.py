@@ -265,6 +265,7 @@ def test_project_card_actions_cover_workspace_commands():
         "✅ Добавить задачу",
         "📎 Загрузить файл",
         "✍️ Follow-up",
+        "💬 Переписка",
         "🕘 История",
         "📁 Drive",
         "🔗 Kommo",

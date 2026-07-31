@@ -1515,15 +1515,48 @@ async def _prompt_followup_audio(
     await telegram_service.send_message(
         chat_id,
         (
-            "🎙 <b>Второй разговор по существующей сделке</b>\n\n"
+            "🎙 <b>Добавить разговор к сделке</b>\n\n"
             f"Сделка: <b>{html.escape(str(details.get('name') or '—'))}</b>\n"
             f"ID: <code>{lead_id}</code>\n\n"
-            "Теперь отправьте голосовое сообщение или файл .m4a/.mp3/.wav/.mp4/.webm. "
-            "После анализа появится кнопка подтверждения. Новая сделка в Kommo создана не будет."
+            "Отправьте голосовое или файл .m4a/.mp3/.wav/.ogg/.webm с записью разговора.\n"
+            "Бот сделает <b>транскрипт</b>, анализ на русском и предложит сохранить "
+            "примечание/задачи в эту же сделку — новую сделку не создаст.\n\n"
+            "<i>Можно просто наговорить итог звонка голосом.</i>"
         ),
         reply_markup={
             "inline_keyboard": [
                 [{"text": "❌ Отмена", "callback_data": "state:cancel"}]
+            ]
+        },
+    )
+
+
+async def _prompt_talk_lead_pick(chat_id: int, user_id: int) -> None:
+    """Ask which deal a free-standing talk recording should be attached to."""
+    await telegram_state_service.set_state(
+        user_id,
+        {"mode": "awaiting_talk_lead_search", "chat_id": chat_id},
+        ttl_seconds=settings.telegram_state_ttl_minutes * 60,
+    )
+    await telegram_service.send_message(
+        chat_id,
+        (
+            "🎙 <b>Разговор к сделке</b>\n\n"
+            "Сначала укажите, к какой сделке относится разговор:\n"
+            "• внутренний номер (<code>169</code>)\n"
+            "• ID Kommo\n"
+            "• имя клиента / часть названия\n\n"
+            "После выбора сделки бот попросит голосовое и сделает транскрипт."
+        ),
+        reply_markup={
+            "inline_keyboard": [
+                [
+                    {
+                        "text": "📋 Выбрать из открытых",
+                        "callback_data": "menu:leads:1",
+                    }
+                ],
+                [{"text": "❌ Отмена", "callback_data": "state:cancel"}],
             ]
         },
     )
@@ -1727,12 +1760,12 @@ async def _handle_manager_callback(
             },
         )
         return True
-    if callback_data == "menu:update":
-        await telegram_service.send_message(
-            chat_id,
-            "Выберите сделку, которую нужно дополнить новым разговором или примечанием.",
-        )
-        await _show_lead_page(chat_id, user_id, 1)
+    if callback_data in {"menu:talk", "menu:update"}:
+        await _prompt_talk_lead_pick(chat_id, user_id)
+        return True
+    if callback_data.startswith("talk:pick:"):
+        lead_id = int(callback_data.rsplit(":", 1)[1])
+        await _prompt_followup_audio(chat_id, user_id, lead_id, return_page=0)
         return True
     if callback_data.startswith("menu:leads:"):
         page = int(callback_data.rsplit(":", 1)[1])
@@ -1908,7 +1941,14 @@ async def _handle_manager_callback(
         return True
     if callback_data.startswith("lead:view:"):
         _, _, lead_id_raw, page_raw = callback_data.split(":", 3)
-        await _show_lead_details(chat_id, int(lead_id_raw), return_page=int(page_raw))
+        lead_id = int(lead_id_raw)
+        return_page = int(page_raw)
+        state = await telegram_state_service.get_state(user_id)
+        if state and state.get("mode") == "awaiting_talk_lead_search":
+            await telegram_state_service.clear_state(user_id)
+            await _prompt_followup_audio(chat_id, user_id, lead_id, return_page=return_page)
+            return True
+        await _show_lead_details(chat_id, lead_id, return_page=return_page)
         return True
     if callback_data.startswith("lead:text:"):
         _, _, lead_id_raw, page_raw = callback_data.split(":", 3)
@@ -2612,6 +2652,8 @@ def _legacy_callback_requires_write(callback_data: str) -> bool:
             "unrev:pick:",
             "unrev:confirm:",
             "lead:audio:",
+            "talk:pick:",
+            "menu:talk",
             "lead:text:",
             "lead:task:",
             "lead:calendar:",
@@ -2705,6 +2747,58 @@ async def _handle_text_state(
             result,
             page=1,
             search_mode=True,
+        )
+        return True
+
+    if mode == "awaiting_talk_lead_search":
+        query = text.strip()
+        if not query:
+            await telegram_service.send_message(
+                chat_id, "Укажите номер сделки, ID Kommo или имя клиента."
+            )
+            return True
+        await telegram_service.send_message(chat_id, "🔄 Ищу сделку для разговора...")
+        try:
+            result = await kommo_service.search_open_leads(query, limit=20)
+        except Exception as exc:
+            await telegram_service.send_message(
+                chat_id, f"❌ Не удалось найти сделку: {html.escape(str(exc)[:300])}"
+            )
+            return True
+        leads = list(result.get("leads") or [])
+        if not leads:
+            await telegram_service.send_message(
+                chat_id,
+                "Сделок не найдено. Уточните номер/имя или откройте список открытых сделок.",
+            )
+            return True
+        if len(leads) == 1:
+            lead_id = int(leads[0].get("id") or 0)
+            await telegram_state_service.clear_state(user_id)
+            await _prompt_followup_audio(chat_id, user_id, lead_id, return_page=0)
+            return True
+        rows: list[list[dict[str, str]]] = []
+        lines = [
+            "Найдено несколько сделок. Выберите, к какой добавить разговор:",
+            "",
+        ]
+        for lead in leads[:10]:
+            lead_id = int(lead.get("id") or 0)
+            name = str(lead.get("name") or lead_id)
+            lines.append(f"• <code>{lead_id}</code> — {html.escape(name)}")
+            rows.append(
+                [
+                    {
+                        "text": name[:48],
+                        "callback_data": f"talk:pick:{lead_id}",
+                    }
+                ]
+            )
+        rows.append([{"text": "❌ Отмена", "callback_data": "state:cancel"}])
+        await telegram_service.send_message(
+            chat_id,
+            "\n".join(lines)[:4000],
+            reply_markup={"inline_keyboard": rows},
         )
         return True
 
@@ -3464,6 +3558,7 @@ async def telegram_webhook(
                 "awaiting_calendar_custom_duration",
                 "awaiting_calendar_reminder",
                 "pending_calendar_confirmation",
+                "awaiting_talk_lead_search",
                 "kommo_create_edit",
                 "kommo_create_preview",
             }:

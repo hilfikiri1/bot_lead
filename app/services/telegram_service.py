@@ -748,19 +748,19 @@ async def send_main_menu(chat_id: int) -> dict:
     keyboard = {
         "inline_keyboard": [
             [
-                {"text": "🧠 AI-агент", "callback_data": "menu:agent"},
                 {"text": "🎙 Новый разговор", "callback_data": "menu:new"},
+                {"text": "🎙 Разговор к сделке", "callback_data": "menu:talk"},
             ],
             [
+                {"text": "🧠 AI-агент", "callback_data": "menu:agent"},
                 {"text": "🔎 Найти сделку", "callback_data": "menu:search"},
+            ],
+            [
                 {"text": "📋 Открытые сделки", "callback_data": "menu:leads:1"},
-            ],
-            [
                 {"text": "☀️ Приоритеты", "callback_data": "menu:digest"},
-                {"text": "🧭 Статус аудио", "callback_data": "menu:jobs"},
             ],
             [
-                {"text": "📝 Дополнить сделку", "callback_data": "menu:update"},
+                {"text": "🧭 Статус аудио", "callback_data": "menu:jobs"},
                 {"text": "🔌 Проверить Kommo", "callback_data": "menu:test"},
             ],
             [
@@ -917,7 +917,7 @@ async def send_lead_details(
         "inline_keyboard": [
             [
                 {
-                    "text": "🎙 Новый разговор",
+                    "text": "🎙 Добавить разговор",
                     "callback_data": f"lead:audio:{lead_id}:{return_page}",
                 },
                 {

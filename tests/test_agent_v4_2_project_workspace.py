@@ -263,6 +263,7 @@ def test_project_card_actions_cover_workspace_commands():
     assert {
         "🔄 Обновить статус",
         "✅ Добавить задачу",
+        "🎙 Добавить разговор",
         "📎 Загрузить файл",
         "✍️ Follow-up",
         "💬 Переписка",
@@ -271,6 +272,13 @@ def test_project_card_actions_cover_workspace_commands():
         "🔗 Kommo",
         "📝 Notion",
     }.issubset(labels)
+    callbacks = {
+        button.get("callback_data")
+        for row in markup["inline_keyboard"]
+        for button in row
+        if "callback_data" in button
+    }
+    assert "lead:audio:77:0" in callbacks
 
 
 def test_unified_card_formats_contacts_tasks_files_and_next_step():

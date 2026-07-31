@@ -663,9 +663,27 @@ async def record_call_result(
         if last_at and (datetime.now(timezone.utc) - datetime.fromisoformat(last_at)).total_seconds() < 30:
             return job  # debounce accidental double-taps
 
-    note_text = kommo_notes.build_call_result_note(outcome=outcome, details=details)
-    marker = f"[AUTO_CALL_RESULT:{job.kommo_lead_id}:{int(datetime.now(timezone.utc).timestamp())}]"
-    await kommo_service.add_common_note(job.kommo_lead_id, f"{note_text}\n\n{marker}")
+    if outcome == "no_answer":
+        try:
+            from app.services import missed_call_followup_service
+
+            await missed_call_followup_service.handle_missed_call(
+                job.kommo_lead_id,
+                source="lead_intake_call_result",
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "lead_intake missed-call follow-up failed kommo_lead_id=%s: %s",
+                job.kommo_lead_id,
+                exc,
+            )
+            note_text = kommo_notes.build_call_result_note(outcome=outcome, details=details)
+            marker = f"[AUTO_CALL_RESULT:{job.kommo_lead_id}:{int(datetime.now(timezone.utc).timestamp())}]"
+            await kommo_service.add_common_note(job.kommo_lead_id, f"{note_text}\n\n{marker}")
+    else:
+        note_text = kommo_notes.build_call_result_note(outcome=outcome, details=details)
+        marker = f"[AUTO_CALL_RESULT:{job.kommo_lead_id}:{int(datetime.now(timezone.utc).timestamp())}]"
+        await kommo_service.add_common_note(job.kommo_lead_id, f"{note_text}\n\n{marker}")
 
     recent_calls.append({"outcome": outcome, "at": now_iso, "details": details})
     runtime["call_results"] = recent_calls

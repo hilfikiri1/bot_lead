@@ -430,9 +430,13 @@ def project_actions_markup(snapshot: ProjectSnapshot) -> dict[str, Any]:
         ],
         [
             {
+                "text": "💬 Переписка",
+                "callback_data": f"agent:comms:{lead_id}:0",
+            },
+            {
                 "text": "🕘 История",
                 "callback_data": f"agent:project:history:{lead_id}",
-            }
+            },
         ],
     ]
     links: list[dict[str, str]] = []
@@ -447,51 +451,161 @@ def project_actions_markup(snapshot: ProjectSnapshot) -> dict[str, Any]:
     return {"inline_keyboard": rows}
 
 
+def _humanize_history_note(text: str) -> str:
+    clean = " ".join(str(text or "").split())
+    lowered = clean.casefold()
+    if "первичн" in lowered and "анализ" in lowered:
+        return "Первичный анализ нового лида"
+    if "bbs-missed-call" in lowered or "недозвон" in lowered:
+        attempt = ""
+        for token in clean.split():
+            if token.isdigit():
+                attempt = f" · попытка {token}"
+                break
+        return f"Недозвон{attempt}"
+    if "результат звонка" in lowered:
+        return clean[:180]
+    if "auto_lead_analysis" in lowered or "auto_lead_task" in lowered:
+        return clean.split("[")[0].strip()[:180] or "Системное событие лида"
+    if "update_kommo_lead" in lowered:
+        return "Обновление сделки в Kommo"
+    return clean[:220]
+
+
+def _format_task_due(value: Any) -> str:
+    if value in (None, ""):
+        return ""
+    try:
+        if isinstance(value, (int, float)):
+            dt = datetime.fromtimestamp(int(value), tz=timezone.utc).astimezone()
+        else:
+            dt = datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone()
+        return dt.strftime("%d.%m.%Y %H:%M")
+    except Exception:
+        return ""
+
+
 async def build_history(
     db: AsyncSession,
     *,
     lead: dict[str, Any],
-    limit: int = 12,
+    limit: int = 20,
 ) -> str:
+    """Build an operator-facing timeline of what happened to the lead."""
     kommo_id = int(lead["id"])
+    lines = [
+        f"<b>🕘 История — {html.escape(str(lead.get('name') or kommo_id))}</b>",
+        "",
+        f"Текущий статус: <b>{html.escape(str(lead.get('status_name') or '—'))}</b>",
+        "",
+    ]
+
+    try:
+        notes = await kommo_service.get_recent_common_notes(kommo_id, limit=max(limit, 20))
+    except Exception:
+        notes = list(lead.get("notes") or [])
+
+    try:
+        tasks = await kommo_service.get_open_lead_tasks(kommo_id, limit=20)
+    except Exception:
+        tasks = []
+
     artifacts = await project_artifact_service.recent_for_project(
-        db, kommo_id, limit=limit
+        db, kommo_id, limit=min(limit, 10)
     )
-    events = (
-        await db.execute(
-            select(IntegrationEvent)
-            .order_by(desc(IntegrationEvent.created_at))
-            .limit(200)
+
+    timeline: list[tuple[int, str]] = []
+    for note in notes:
+        stamp = int(note.get("created_at") or note.get("updated_at") or 0)
+        label = _humanize_history_note(str(note.get("text") or ""))
+        if not label:
+            continue
+        timeline.append(
+            (
+                stamp,
+                f"• {_timestamp_label(stamp)} · Заметка · {html.escape(label)}",
+            )
         )
-    ).scalars().all()
-    relevant: list[IntegrationEvent] = []
-    for event in events:
-        payload = dict(event.payload or {})
-        result = dict(event.result or {})
-        lead_id = (
-            payload.get("kommo_lead_id")
-            or payload.get("lead_id")
-            or result.get("kommo_lead_id")
-            or result.get("lead_id")
+    for task in tasks:
+        stamp = int(task.get("complete_till") or 0)
+        title = " ".join(str(task.get("text") or "Задача").split())[:180]
+        due = _format_task_due(task.get("complete_till"))
+        suffix = f" · срок {due}" if due else ""
+        timeline.append(
+            (
+                stamp or int(datetime.now(timezone.utc).timestamp()),
+                f"• {_timestamp_label(stamp) if stamp else 'сейчас'} · Задача{suffix} · "
+                f"{html.escape(title)}",
+            )
         )
-        if int(lead_id or 0) == kommo_id:
-            relevant.append(event)
-    lines = [f"<b>🕘 История — {html.escape(str(lead.get('name') or kommo_id))}</b>", ""]
-    for note in (lead.get("notes") or [])[:5]:
-        lines.append(
-            f"• {_timestamp_label(note.get('created_at'))} · Kommo · "
-            f"{html.escape(' '.join(str(note.get('text') or '').split())[:220])}"
+    for artifact in artifacts:
+        created = artifact.created_at
+        stamp = int(created.timestamp()) if created else 0
+        timeline.append(
+            (
+                stamp,
+                f"• {_timestamp_label(created)} · Файл · "
+                f"{html.escape(str(artifact.final_filename or artifact.suggested_filename))}",
+            )
         )
-    for artifact in artifacts[:5]:
-        lines.append(
-            f"• {_timestamp_label(artifact.created_at)} · Файл · "
-            f"{html.escape(str(artifact.final_filename or artifact.suggested_filename))}"
+
+    # Keep technical IntegrationEvent noise out of the operator history unless
+    # there is nothing else to show — then surface a short human label.
+    if not timeline:
+        events = (
+            await db.execute(
+                select(IntegrationEvent)
+                .order_by(desc(IntegrationEvent.created_at))
+                .limit(50)
+            )
+        ).scalars().all()
+        for event in events:
+            payload = dict(event.payload or {})
+            result = dict(event.result or {})
+            lead_id = (
+                payload.get("kommo_lead_id")
+                or payload.get("lead_id")
+                or result.get("kommo_lead_id")
+                or result.get("lead_id")
+            )
+            if int(lead_id or 0) != kommo_id:
+                continue
+            op = str(event.operation or "")
+            human = {
+                "update_kommo_lead": "Обновление сделки",
+                "create_lead_task": "Создание задачи",
+                "add_common_note": "Добавление заметки",
+            }.get(op, op.replace("_", " ") or "Событие")
+            stamp = int(event.created_at.timestamp()) if event.created_at else 0
+            timeline.append(
+                (
+                    stamp,
+                    f"• {_timestamp_label(event.created_at)} · Система · "
+                    f"{html.escape(human)} · {html.escape(str(event.status))}",
+                )
+            )
+
+    timeline.sort(key=lambda item: item[0], reverse=True)
+    if not timeline:
+        lines.append("Пока нет заметок, задач или звонков по этой сделке.")
+    else:
+        lines.append("<b>Что происходило</b>")
+        lines.append("")
+        lines.extend(item[1] for item in timeline[:limit])
+
+    missed = sum(
+        1
+        for note in notes
+        if "недозвон" in str(note.get("text") or "").casefold()
+        or "bbs-missed-call" in str(note.get("text") or "").casefold()
+        or "не ответил" in str(note.get("text") or "").casefold()
+    )
+    if missed:
+        lines.extend(
+            [
+                "",
+                f"Недозвонов в заметках: <b>{missed}</b>",
+                "1-й за день → задача на сегодня; 2-й+ → задача на завтра.",
+            ]
         )
-    for event in relevant[:5]:
-        lines.append(
-            f"• {_timestamp_label(event.created_at)} · "
-            f"{html.escape(str(event.operation))} · {html.escape(str(event.status))}"
-        )
-    if len(lines) == 2:
-        lines.append("История пока пуста.")
     return "\n".join(lines)[:4000]

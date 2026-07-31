@@ -527,17 +527,53 @@ async def _execute(db: AsyncSession, action: PendingAgentAction) -> dict[str, An
     if action_type == "update_kommo_lead":
         lead_id = int(payload["lead_id"])
         fields = dict(payload.get("fields") or {})
+        previous = {}
+        try:
+            previous = await kommo_service.get_lead_details(lead_id)
+        except Exception:
+            previous = {}
         result = await kommo_service.update_kommo_lead(
             lead_id,
             name=fields.get("name"),
             price=fields.get("price"),
             status_id=fields.get("status_id"),
         )
+        followup_line = ""
+        if fields.get("status_id") is not None:
+            from app.services import missed_call_followup_service
+
+            status_name = str(result.get("status_name") or "")
+            if missed_call_followup_service.is_missed_call_status(status_name):
+                try:
+                    followup = await missed_call_followup_service.handle_missed_call(
+                        lead_id,
+                        source="status_update",
+                        previous_status=str(previous.get("status_name") or "") or None,
+                    )
+                    if followup.get("task_created"):
+                        when = "сегодня" if followup.get("due_rule") == "today" else "завтра"
+                        followup_line = (
+                            f"\n\n📞 Недозвон (попытка {followup.get('attempt')}): "
+                            f"задача позвонить {when} создана."
+                        )
+                    else:
+                        followup_line = (
+                            f"\n\n📞 Недозвон (попытка {followup.get('attempt')}): "
+                            "повторная задача уже есть."
+                        )
+                except Exception as exc:
+                    logger.warning(
+                        "Missed-call follow-up failed for lead %s: %s", lead_id, exc
+                    )
+                    followup_line = (
+                        "\n\n⚠️ Статус обновлён, но задачу на перезвон создать не удалось."
+                    )
         return {
             "text": (
                 "✅ <b>Сделка обновлена</b>\n\n"
                 f"{html.escape(str(result.get('lead_name') or lead_id))}\n"
                 + _result_link("Открыть в Kommo", result.get("url"))
+                + followup_line
             ),
             "data": result,
         }

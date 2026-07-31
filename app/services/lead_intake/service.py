@@ -161,13 +161,61 @@ def _ai_payload(job: LeadProcessingJob, snapshot: LeadSnapshot, row: Spreadsheet
     }
 
 
+def _job_pipeline_id(job: LeadProcessingJob) -> int | None:
+    raw = job.raw_snapshot_json or {}
+    value = raw.get("pipeline_id")
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+async def _resolve_job_pipeline_id(db: AsyncSession, job: LeadProcessingJob) -> int | None:
+    """Return the job's Kommo pipeline, backfilling it into the snapshot when missing."""
+    known = _job_pipeline_id(job)
+    if known is not None:
+        return known
+    try:
+        details = await kommo_service.get_lead_details(job.kommo_lead_id)
+    except Exception as exc:  # pragma: no cover - network guard
+        logger.warning(
+            "lead_intake.pipeline_lookup_failed kommo_lead_id=%s err=%s",
+            job.kommo_lead_id,
+            type(exc).__name__,
+        )
+        return None
+    pipeline_id = details.get("pipeline_id")
+    if pipeline_id is None:
+        return None
+    raw = dict(job.raw_snapshot_json or {})
+    raw["pipeline_id"] = pipeline_id
+    raw["pipeline_name"] = details.get("pipeline_name")
+    await repository.save(db, job, raw_snapshot_json=raw)
+    try:
+        return int(pipeline_id)
+    except (TypeError, ValueError):
+        return None
+
+
 async def find_or_create_next_job(
     db: AsyncSession, *, dry_run: bool | None = None
 ) -> LeadProcessingJob | None:
     """Return the job to show next: resume an in-flight one, else detect a new one."""
+    target_pipeline = detection.target_pipeline_id()
     active = await repository.list_active_jobs(db)
-    if active:
-        return active[0]
+    for job in active:
+        if target_pipeline is not None:
+            job_pipeline = await _resolve_job_pipeline_id(db, job)
+            if job_pipeline is not None and job_pipeline != target_pipeline:
+                logger.info(
+                    "lead_intake.auto_skip_wrong_pipeline kommo_lead_id=%s job_pipeline=%s target=%s",
+                    job.kommo_lead_id,
+                    job_pipeline,
+                    target_pipeline,
+                )
+                await repository.mark_skipped(db, job)
+                continue
+        return job
 
     effective_dry_run = settings.lead_processing_dry_run if dry_run is None else dry_run
     candidates = await detection.find_candidate_leads()
@@ -183,6 +231,16 @@ async def find_or_create_next_job(
             unsorted_metadata=candidate.get("metadata"),
             unsorted_source_name=candidate.get("source_name"),
         )
+        # Defense in depth: unsorted filter can miss edge cases; never queue
+        # a lead from Украина / another pipeline when Poland is configured.
+        if not detection.lead_matches_target_pipeline(raw_snapshot, target_pipeline):
+            logger.info(
+                "lead_intake.skip_non_target_pipeline kommo_lead_id=%s pipeline_id=%s target=%s",
+                lead_id,
+                raw_snapshot.get("pipeline_id"),
+                target_pipeline,
+            )
+            continue
         job = await repository.create_job(
             db,
             kommo_lead_id=lead_id,
@@ -195,9 +253,10 @@ async def find_or_create_next_job(
             processing_version=settings.lead_processing_version,
         )
         logger.info(
-            "lead_intake.detected kommo_lead_id=%s facebook_lead_id=%s",
+            "lead_intake.detected kommo_lead_id=%s facebook_lead_id=%s pipeline_id=%s",
             lead_id,
             snapshot.facebook_lead_id,
+            raw_snapshot.get("pipeline_id"),
         )
         return job
     return None

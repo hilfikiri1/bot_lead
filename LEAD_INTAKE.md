@@ -156,7 +156,9 @@ LEAD_PROCESSING_VERSION=1
 
 ## Значения, требующие ручной настройки
 
-- `KOMMO_POLAND_PIPELINE_ID` — technical ID воронки «Польша»;
+- `KOMMO_POLAND_PIPELINE_ID` — technical ID воронки «Польша (1 этап)».
+  Когда задан, `/new_leads` читает **только** неразобранное этой воронки
+  и автоматически пропускает лиды из Украины/других воронок;
 - `KOMMO_FIRST_CONTACT_STATUS_ID` — technical ID этапа «Первый контакт»
   внутри этой воронки (если не задан, бот ищет этап по имени);
 - `GOOGLE_SHEETS_FACEBOOK_LEAD_ID_COLUMN` — буква колонки, если таблица

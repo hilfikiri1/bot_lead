@@ -130,10 +130,8 @@ def _marcin_analysis(*, include_hallucination: bool = False) -> CRMCallAnalysis:
 
 @pytest.mark.asyncio
 async def test_marcin_bojdo_call_uses_kommo_context_and_applies_confirmed_actions():
-    details_before = _marcin_details()
-    details_after = _marcin_details(
-        status_id=30, status_name="Ожидание данных клиента"
-    )
+    details_before = _marcin_details(status_name="НЕДОЗВОН")
+    details_after = _marcin_details(status_id=30, status_name="Первый контакт")
     future_timestamp = int((datetime.now(timezone.utc) + timedelta(days=30)).timestamp())
 
     with (
@@ -150,7 +148,7 @@ async def test_marcin_bojdo_call_uses_kommo_context_and_applies_confirmed_action
         patch(
             "app.services.call_crm_agent_service.kommo_service.get_pipeline_statuses",
             new_callable=AsyncMock,
-            return_value=[{"id": 30, "name": "Ожидание данных клиента"}],
+            return_value=[{"id": 30, "name": "Первый контакт"}],
         ),
         patch(
             "app.services.call_crm_agent_service.kommo_service.add_common_note",
@@ -198,12 +196,14 @@ async def test_marcin_bojdo_call_uses_kommo_context_and_applies_confirmed_action
     assert analysis.identity.identity_confidence == 1
     assert analysis.priority.value == "A2"
     assert analysis.kommo_update.task_due_date == date(2026, 8, 3)
-    assert analysis.kommo_update.new_stage == "Ожидание данных клиента"
+    assert analysis.kommo_update.new_stage == "Первый контакт"
     assert analysis.client_message.send_automatically is False
     assert "[Imię" not in analysis.client_message.text
     assert "плох" not in analysis.kommo_update.note.casefold()
     assert "обман" not in analysis.kommo_update.note.casefold()
     assert "Нет новых подтверждений" not in analysis.kommo_update.note
+    assert "Тип контакта: телефонный разговор" in analysis.kommo_update.note
+    assert "Исходная расшифровка разговора:" in analysis.kommo_update.note
 
     assert [item.action for item in analysis.actions_completed] == [
         "note_created",
@@ -216,6 +216,10 @@ async def test_marcin_bojdo_call_uses_kommo_context_and_applies_confirmed_action
     assert result.legacy_analysis["client"]["name"] == "Marcin Bojdo"
     assert result.legacy_analysis["lead"]["budget"] == "powyżej 20 000 USD"
     assert "crm_call_analysis" in result.legacy_analysis
+    assert result.legacy_analysis["call_metadata"]["call_type"] == (
+        "Первичный телефонный контакт"
+    )
+    assert result.legacy_analysis["call_metadata"]["retained_in_agent_memory"] is False
 
 
 @pytest.mark.asyncio

@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import re
 from datetime import date
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -20,6 +21,10 @@ PriorityValue = Literal["A1", "A2", "B", "C", "D"]
 WaitingFor = Literal["client", "manager", "factory", "logistics", "other"]
 StageName = Literal[
     "Первый контакт",
+    "Сбор информации",
+    "Квалификация лида",
+    # Backward-compatible values accepted from older prompts. The call policy
+    # normalizes them to the real Kommo stages before any write.
     "Квалификация",
     "Ожидание данных клиента",
     "Получено ТЗ",
@@ -32,6 +37,31 @@ StageName = Literal[
     "PI/договор",
     "Ожидание оплаты",
 ]
+
+_CYRILLIC_RE = re.compile(r"[А-Яа-яЁё]")
+_LETTER_RE = re.compile(r"[A-Za-zА-Яа-яЁё]")
+
+
+def _require_russian_narrative(value: str, *, field_name: str) -> str:
+    """Reject long internal prose with no Cyrillic characters.
+
+    Names, brands, email addresses and short codes may legitimately be Latin.
+    Narrative CRM fields must be Russian so a Polish transcript cannot leak into
+    the internal Kommo note, manager task or Telegram report. Validation failure
+    triggers the existing single JSON repair pass.
+    """
+    clean = str(value or "").strip()
+    letters = _LETTER_RE.findall(clean)
+    if len(letters) >= 12 and not _CYRILLIC_RE.search(clean):
+        raise ValueError(f"{field_name} must be written in Russian")
+    return clean
+
+
+def _require_russian_list(values: list[str], *, field_name: str) -> list[str]:
+    return [
+        _require_russian_narrative(str(value), field_name=field_name)
+        for value in values
+    ]
 
 
 class StrictModel(BaseModel):
@@ -52,6 +82,11 @@ class PriorityDecision(StrictModel):
     value: PriorityValue
     reason: str
 
+    @field_validator("reason")
+    @classmethod
+    def reason_must_be_russian(cls, value: str) -> str:
+        return _require_russian_narrative(value, field_name="priority.reason")
+
 
 class KommoUpdateDecision(StrictModel):
     should_add_note: bool = True
@@ -63,6 +98,13 @@ class KommoUpdateDecision(StrictModel):
     task_title: str = ""
     task_description: str = ""
     task_due_date: date | None = None
+
+    @field_validator("note", "stage_reason", "task_title", "task_description")
+    @classmethod
+    def internal_update_text_must_be_russian(
+        cls, value: str, info: Any
+    ) -> str:
+        return _require_russian_narrative(value, field_name=f"kommo_update.{info.field_name}")
 
     @model_validator(mode="after")
     def validate_conditional_fields(self) -> "KommoUpdateDecision":
@@ -126,6 +168,31 @@ class CRMCallAnalysis(StrictModel):
     needs_review: bool = False
     review_reason: str = ""
     actions_completed: list[ActionCompleted] = Field(default_factory=list)
+
+    @field_validator(
+        "summary",
+        "client_goal",
+        "client_commitment",
+        "manager_commitment",
+        "review_reason",
+    )
+    @classmethod
+    def internal_narrative_must_be_russian(cls, value: str, info: Any) -> str:
+        return _require_russian_narrative(value, field_name=info.field_name)
+
+    @field_validator(
+        "known_from_crm",
+        "confirmed_in_call",
+        "new_information",
+        "inferences",
+        "unknown",
+        "contradictions",
+    )
+    @classmethod
+    def internal_lists_must_be_russian(
+        cls, values: list[str], info: Any
+    ) -> list[str]:
+        return _require_russian_list(values, field_name=info.field_name)
 
     @model_validator(mode="after")
     def review_requires_reason(self) -> "CRMCallAnalysis":

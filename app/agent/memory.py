@@ -146,11 +146,11 @@ async def build_context(
         "last_draft_created_at": session_context.get("last_draft_created_at"),
         "last_digest": session_context.get("last_digest"),
         "pending_clarification": session_context.get("pending_clarification"),
-        # QA intake is a multi-message mode. These values are written to the
-        # session JSON by goals_qa_runtime and must survive the next Telegram
-        # update; otherwise ordinary text is incorrectly routed to the CRM agent.
+        # QA modes are written to AgentSession.context by goals_qa_runtime and
+        # must survive the next Telegram update. Without these keys, text after
+        # /bug is incorrectly routed to the normal CRM agent, and /bug_test
+        # cannot receive the manager's verification result.
         "qa_intake": session_context.get("qa_intake"),
-        "active_qa_issue_id": session_context.get("active_qa_issue_id"),
         "qa_retest_issue_id": session_context.get("qa_retest_issue_id"),
     }
 

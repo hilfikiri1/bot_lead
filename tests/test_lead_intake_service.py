@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from app.services.google_sheets_service import SpreadsheetRow
-from app.services.lead_intake import kommo_notes, repository, service
+from app.services.lead_intake import detection, kommo_notes, repository, service
 from app.services.lead_intake.schema import LeadQualification, LeadQualificationError
 from tests.lead_intake_helpers import make_row, temp_db_session
 
@@ -632,13 +632,45 @@ async def test_completed_and_skipped_jobs_are_excluded_from_active_list():
 async def test_find_or_create_next_job_resumes_active_job_before_detecting_new_ones():
     async with temp_db_session() as db:
         job = await _create_job(db)
-        with patch(
-            "app.services.lead_intake.service.detection.find_candidate_leads",
-            new=AsyncMock(return_value=[]),
-        ) as find_mock:
+        with (
+            patch.object(service.settings, "kommo_poland_pipeline_id", None),
+            patch.object(detection.settings, "kommo_poland_pipeline_id", None),
+            patch(
+                "app.services.lead_intake.service.detection.find_candidate_leads",
+                new=AsyncMock(return_value=[]),
+            ) as find_mock,
+        ):
             resumed = await service.find_or_create_next_job(db)
         assert resumed.id == job.id
         find_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_find_or_create_next_job_auto_skips_ukraine_active_job():
+    async with temp_db_session() as db:
+        ukraine = await repository.create_job(
+            db,
+            kommo_lead_id=999001,
+            original_title="Facebook #ua",
+            facebook_lead_id="ua1",
+            facebook_technical_tag=None,
+            source="facebook_lead_ads",
+            raw_snapshot={"pipeline_id": 13901771, "name": "Svetlana", "phone": "+380638569124"},
+            dry_run=True,
+            processing_version=1,
+        )
+        with (
+            patch.object(service.settings, "kommo_poland_pipeline_id", 13866843),
+            patch.object(detection.settings, "kommo_poland_pipeline_id", 13866843),
+            patch(
+                "app.services.lead_intake.service.detection.find_candidate_leads",
+                new=AsyncMock(return_value=[]),
+            ),
+        ):
+            next_job = await service.find_or_create_next_job(db)
+        await db.refresh(ukraine)
+        assert ukraine.status == "skipped"
+        assert next_job is None
 
 
 @pytest.mark.asyncio

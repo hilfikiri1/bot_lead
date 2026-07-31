@@ -19,8 +19,11 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from app.config import get_settings
 from app.services import contact_resolver, kommo_service
 from app.services.lead_intake.matching import LeadSnapshot
+
+settings = get_settings()
 
 FACEBOOK_TITLE_RE = re.compile(r"^\s*Facebook\s*[#№]", re.IGNORECASE)
 FACEBOOK_ID_IN_TITLE_RE = re.compile(r"[#№]\s*([0-9]{4,})")
@@ -45,13 +48,40 @@ def is_new_facebook_lead_title(title: str | None) -> bool:
     return bool(FACEBOOK_TITLE_RE.match(str(title or "")))
 
 
+def target_pipeline_id() -> int | None:
+    """Pipeline that `/new_leads` is allowed to process (Poland by default)."""
+    return settings.kommo_poland_pipeline_id or settings.kommo_unreviewed_pipeline_id
+
+
+def lead_matches_target_pipeline(lead: dict[str, Any], pipeline_id: int | None) -> bool:
+    if pipeline_id is None:
+        return True
+    lead_pipeline = lead.get("pipeline_id")
+    if lead_pipeline is None:
+        return True
+    try:
+        return int(lead_pipeline) == int(pipeline_id)
+    except (TypeError, ValueError):
+        return False
+
+
 async def find_candidate_leads() -> list[dict[str, Any]]:
-    """Return raw Kommo unsorted/incoming entries whose title is a Facebook lead."""
-    result = await kommo_service.get_all_unreviewed_leads()
+    """Return Facebook unsorted leads from the configured Poland pipeline only.
+
+    When ``KOMMO_POLAND_PIPELINE_ID`` is set we query Kommo unsorted with that
+    filter, so Ukrainian (or any other) inbox items never enter the queue.
+    """
+    pipeline_id = target_pipeline_id()
+    if pipeline_id is not None:
+        result = await kommo_service.get_all_unsorted_leads(pipeline_id=pipeline_id)
+    else:
+        result = await kommo_service.get_all_unreviewed_leads()
+
     candidates = [
         lead
         for lead in result.get("leads") or []
         if is_new_facebook_lead_title(lead.get("name"))
+        and lead_matches_target_pipeline(lead, pipeline_id)
     ]
     # Newest Facebook submissions first — managers should see fresh leads
     # before older unsorted backlog entries.
@@ -140,6 +170,8 @@ async def build_snapshot(
         "facebook_lead_id": facebook_lead_id,
         "facebook_technical_tag": technical_tag,
         "source": "facebook_lead_ads",
+        "pipeline_id": details.get("pipeline_id"),
+        "pipeline_name": details.get("pipeline_name"),
         "name": snapshot.name,
         "phone": snapshot.phone,
         "email": snapshot.email,

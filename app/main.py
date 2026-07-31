@@ -27,6 +27,7 @@ from app.services.context_intelligence_runtime import (
     install_context_intelligence_runtime,
 )
 from app.services.diagnostic_runtime import install_diagnostic_runtime
+from app.services.first_contact_runtime import install_first_contact_runtime
 from app.services.followup_runtime import install_followup_runtime_extensions
 from app.services.goals_qa_runtime import install_goals_qa_runtime
 from app.services.qa_projection_runtime import install_qa_projection_runtime
@@ -75,6 +76,8 @@ install_goals_qa_runtime()
 install_qa_projection_runtime()
 # Final compatibility/security layer for production-facing entry points.
 install_production_hardening_runtime()
+# Final card/callback extension: first contact must remain distinct from follow-up.
+install_first_contact_runtime()
 
 structlog.configure(
     processors=[

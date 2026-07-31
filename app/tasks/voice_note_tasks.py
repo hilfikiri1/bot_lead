@@ -15,6 +15,7 @@ from app.config import get_settings
 from app.database import AsyncSessionLocal
 from app.services import (
     ai_analysis_service,
+    call_crm_agent_service,
     command_router_service,
     crm_service,
     notion_service,
@@ -331,11 +332,34 @@ async def _process(
                 "analyze",
                 target_kommo_lead_id=target_kommo_lead_id,
             )
-            analysis = await ai_analysis_service.analyse_transcript(transcript)
+
+            crm_call_result = None
+            if target_kommo_lead_id:
+                manager_name = (
+                    getattr(actor, "display_name", None)
+                    or getattr(actor, "name", None)
+                    or getattr(actor, "full_name", None)
+                )
+                crm_call_result = await call_crm_agent_service.process_completed_call(
+                    transcript=transcript,
+                    kommo_deal_id=int(target_kommo_lead_id),
+                    manager_name=manager_name,
+                )
+                analysis = crm_call_result.legacy_analysis
+            else:
+                analysis = await ai_analysis_service.analyse_transcript(transcript)
 
             await crm_service.update_voice_note_status(db, voice_note, "saving")
-            client = await crm_service.upsert_client(db, analysis.get("client", {}))
-            lead = await crm_service.create_lead(db, client, analysis.get("lead", {}))
+            if crm_call_result and crm_call_result.lead_context:
+                client, lead = await call_crm_agent_service.upsert_local_crm_snapshot(
+                    db,
+                    lead_context=crm_call_result.lead_context,
+                    analysis=crm_call_result.analysis,
+                )
+            else:
+                client = await crm_service.upsert_client(db, analysis.get("client", {}))
+                lead = await crm_service.create_lead(db, client, analysis.get("lead", {}))
+
             voice_note = await crm_service.complete_voice_note_job(
                 db,
                 voice_note,
@@ -353,8 +377,7 @@ async def _process(
             )
             notion_action_id: int | None = None
             if settings.agent_enabled:
-                # Notion is an external write. In Agent v3 it is never performed
-                # silently: the manager receives a separate confirmation button.
+                # Notion remains an external write that requires manager confirmation.
                 action = await agent_actions.stage_action(
                     db,
                     telegram_user_id=telegram_user_id,
@@ -435,15 +458,69 @@ async def _process(
                     )
 
             report_text = telegram_service.format_report(analysis, transcript)
+            if crm_call_result:
+                report_text += call_crm_agent_service.format_actions_report(
+                    crm_call_result.analysis
+                )
             report_text += notion_line
-            await telegram_service.send_report(
-                chat_id=chat_id,
-                report_text=report_text,
-                lead_id=lead.id,
-                voice_note_id=voice_note.id,
-                target_kommo_lead_id=target_kommo_lead_id,
-                notion_action_id=notion_action_id,
-            )
+
+            if crm_call_result and target_kommo_lead_id:
+                rows: list[list[dict[str, str]]] = []
+                if notion_action_id:
+                    rows.append(
+                        [
+                            {
+                                "text": "📓 Сохранить анализ в Notion",
+                                "callback_data": f"agent:ok:{notion_action_id}",
+                            },
+                            {
+                                "text": "❌ Не сохранять",
+                                "callback_data": f"agent:no:{notion_action_id}",
+                            },
+                        ]
+                    )
+                if crm_call_result.analysis.client_message.text:
+                    rows.append(
+                        [
+                            {
+                                "text": "💬 Текст клиенту",
+                                "callback_data": f"action:whatsapp:{lead.id}:{voice_note.id}",
+                            },
+                            {
+                                "text": "📅 Следующий контакт",
+                                "callback_data": f"action:calendar:{lead.id}:{voice_note.id}",
+                            },
+                        ]
+                    )
+                lead_url = (
+                    crm_call_result.lead_context.kommo_url
+                    if crm_call_result.lead_context
+                    else ""
+                )
+                final_row: list[dict[str, str]] = []
+                if lead_url:
+                    final_row.append({"text": "🔗 Открыть Kommo", "url": lead_url})
+                final_row.append(
+                    {
+                        "text": "❌ Закрыть",
+                        "callback_data": f"action:cancel:{lead.id}:{voice_note.id}",
+                    }
+                )
+                rows.append(final_row)
+                await telegram_service.send_message(
+                    chat_id,
+                    report_text,
+                    reply_markup={"inline_keyboard": rows},
+                )
+            else:
+                await telegram_service.send_report(
+                    chat_id=chat_id,
+                    report_text=report_text,
+                    lead_id=lead.id,
+                    voice_note_id=voice_note.id,
+                    target_kommo_lead_id=target_kommo_lead_id,
+                    notion_action_id=notion_action_id,
+                )
             logger.info("Approval report sent for voice_note_id=%d", voice_note.id)
 
         await _mark_processing_done(telegram_user_id, telegram_message_id)

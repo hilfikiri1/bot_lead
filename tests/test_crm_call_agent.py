@@ -58,7 +58,7 @@ def _marcin_analysis(*, include_hallucination: bool = False) -> CRMCallAnalysis:
         confirmed.extend(
             [
                 "Посредники обманывали клиента.",
-                "Клиент сталкивался с плохим качеством.",
+                "У клиента были проблемы с качеством.",
             ]
         )
     return CRMCallAnalysis(

@@ -73,7 +73,7 @@ def build_bug_fix_prompt(issue: Any) -> str:
             "4. требуется ли миграция или новая переменная окружения.",
         ]
     )
-    return "\n".join(lines)[:12000]
+    return "\n".join(lines)[:3500]
 
 
 async def _ensure_bug_folder(issue: Any) -> dict[str, Any]:

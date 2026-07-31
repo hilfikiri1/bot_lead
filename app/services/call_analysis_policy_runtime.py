@@ -71,9 +71,9 @@ def _norm(value: Any) -> str:
 
 def _is_exact_company_field(name: str) -> bool:
     normalized = _norm(name)
-    if any(token in normalized for token in _PRODUCT_FIELD_TOKENS):
+    if any(_norm(token) in normalized for token in _PRODUCT_FIELD_TOKENS):
         return False
-    return normalized in _COMPANY_FIELD_NAMES
+    return normalized in {_norm(item) for item in _COMPANY_FIELD_NAMES}
 
 
 async def _company_name(contact_id: int | None, fields: dict[str, str]) -> str:
@@ -113,10 +113,11 @@ async def _company_name(contact_id: int | None, fields: dict[str, str]) -> str:
 
 
 def _previous_call_count(previous_notes: list[str]) -> int:
+    normalized_markers = tuple(_norm(marker) for marker in _CALL_NOTE_MARKERS)
     count = 0
     for note in previous_notes:
         normalized = _norm(note)
-        if any(marker in normalized for marker in _CALL_NOTE_MARKERS):
+        if any(marker in normalized for marker in normalized_markers):
             count += 1
     return count
 
@@ -126,12 +127,15 @@ def _call_number(lead_context: Any) -> int:
 
 
 def _call_type(lead_context: Any) -> str:
-    return "Первичный телефонный контакт" if _call_number(lead_context) == 1 else "Повторный телефонный разговор"
+    if _call_number(lead_context) == 1:
+        return "Первичный телефонный контакт"
+    return "Повторный телефонный разговор"
 
 
 def _is_early_stage(stage: str) -> bool:
     normalized = _norm(stage)
-    return not normalized or any(token in normalized for token in _EARLY_STAGE_TOKENS)
+    normalized_tokens = tuple(_norm(token) for token in _EARLY_STAGE_TOKENS)
+    return not normalized or any(token in normalized for token in normalized_tokens)
 
 
 def _has_substantive_call(analysis: Any, call_context: Any) -> bool:
@@ -210,7 +214,9 @@ def _apply_early_stage_policy(analysis: Any, lead_context: Any, call_context: An
     if _norm(target) == _norm(lead_context.current_stage):
         analysis.kommo_update.should_change_stage = False
         analysis.kommo_update.new_stage = target
-        analysis.kommo_update.stage_reason = "Сделка уже находится на корректной стадии."
+        analysis.kommo_update.stage_reason = (
+            "Сделка уже находится на корректной стадии."
+        )
     else:
         analysis.kommo_update.should_change_stage = True
         analysis.kommo_update.new_stage = target
@@ -311,7 +317,11 @@ def _stage_before(analysis: Any, lead_context: Any) -> str:
 
 def _stage_after(analysis: Any, lead_context: Any) -> str:
     for action in analysis.actions_completed or []:
-        if action.action == "stage_updated" and action.status == "success" and action.new_value:
+        if (
+            action.action == "stage_updated"
+            and action.status == "success"
+            and action.new_value
+        ):
             return str(action.new_value)
     return str(analysis.kommo_update.new_stage or lead_context.current_stage or "")
 
@@ -419,10 +429,14 @@ def install_call_analysis_policy_runtime() -> None:
         processed.kommo_update.note = _build_kommo_note(
             processed, lead_context, call_context
         )
-        processed.kommo_update.should_add_note = bool(processed.kommo_update.note)
+        processed.kommo_update.should_add_note = bool(
+            processed.kommo_update.note
+        )
         return processed
 
-    def to_legacy_with_call_metadata(analysis: Any, lead_context: Any) -> dict[str, Any]:
+    def to_legacy_with_call_metadata(
+        analysis: Any, lead_context: Any
+    ) -> dict[str, Any]:
         payload = original_to_legacy(analysis, lead_context)
         if lead_context is not None:
             payload["call_metadata"] = {
@@ -437,12 +451,18 @@ def install_call_analysis_policy_runtime() -> None:
             }
         return payload
 
-    async def save_ai_report_and_forget_call(db: Any, voice_note: Any, analysis: dict[str, Any]):
+    async def save_ai_report_and_forget_call(
+        db: Any,
+        voice_note: Any,
+        analysis: dict[str, Any],
+    ):
         report = await original_save_ai_report(db, voice_note, analysis)
         try:
             await _forget_completed_call_from_agent_memory(
                 db,
-                telegram_user_id=getattr(voice_note, "telegram_user_id", None),
+                telegram_user_id=getattr(
+                    voice_note, "telegram_user_id", None
+                ),
                 transcript=getattr(voice_note, "transcript", None),
             )
         except Exception:

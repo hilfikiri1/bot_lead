@@ -83,12 +83,30 @@ def build_kommo_note(
 
     if qualification.call_script:
         script = qualification.call_script
+        if script.company_context_ru:
+            lines.extend(["", "КОМПАНИЯ / КОНТЕКСТ", "", script.company_context_ru])
+        if script.personal_analysis_ru:
+            lines.extend(["", "ЛИЧНЫЙ АНАЛИЗ (ЗВОНОК)", "", script.personal_analysis_ru])
+        if script.priority_note_ru:
+            lines.extend(["", "ПРИОРИТЕТ ДЛЯ ЗВОНКА", "", script.priority_note_ru])
         lines.extend(["", "ЦЕЛЬ ЗВОНКА", "", _clean(script.objective) or "Квалифицировать запрос"])
+        if script.main_question_pl:
+            lines.extend(["", "ГЛАВНЫЙ ВОПРОС", "", script.main_question_pl])
+            if script.main_question_reason_ru:
+                lines.append(script.main_question_reason_ru)
+        if script.conversation_script_pl:
+            lines.extend(["", "СЦЕНАРИЙ РАЗГОВОРА", "", script.conversation_script_pl])
+        elif script.opening_phrase:
+            lines.extend(["", "ОТКРЫТИЕ (язык клиента)", "", script.opening_phrase])
         if script.questions:
             lines.extend(["", "О ЧЁМ ГОВОРИТЬ", ""])
             lines.extend(f"– {question}" for question in script.questions[:10] if _clean(question))
-        if script.opening_phrase:
-            lines.extend(["", "ОТКРЫТИЕ (язык клиента)", "", script.opening_phrase])
+        if script.clarify_points_ru:
+            lines.extend(["", "ЧТО ОБЯЗАТЕЛЬНО ВЫЯСНИТЬ", ""])
+            lines.extend(f"– {item}" for item in script.clarify_points_ru if _clean(item))
+        if script.cheat_sheet_ru:
+            lines.extend(["", "ШПАРГАЛКА", ""])
+            lines.extend(f"– {item}" for item in script.cheat_sheet_ru if _clean(item))
 
     if qualification.main_risks_ru:
         lines.extend(["", "ОСНОВНЫЕ РИСКИ", ""])

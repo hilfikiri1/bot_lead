@@ -32,8 +32,19 @@ class CallScript(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     objective: str
+    # Manager-facing Russian briefing used in Telegram "Prepare call".
+    company_context_ru: str = ""
+    personal_analysis_ru: str = ""
+    priority_note_ru: str = ""
+    # The single fork question that removes the main uncertainty first.
+    main_question_pl: str = ""
+    main_question_reason_ru: str = ""
+    # Longer Polish conversation scenario the manager can follow almost verbatim.
+    conversation_script_pl: str = ""
     opening_phrase: str
     questions: list[str] = Field(default_factory=list)
+    clarify_points_ru: list[str] = Field(default_factory=list)
+    cheat_sheet_ru: list[str] = Field(default_factory=list)
     possible_objections: list[str] = Field(default_factory=list)
     recommended_answers: list[str] = Field(default_factory=list)
     must_record_after_call: list[str] = Field(default_factory=list)

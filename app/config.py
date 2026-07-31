@@ -226,7 +226,7 @@ class Settings(BaseSettings):
     lead_processing_business_end: str = "18:00"
     # Bump when the note/task template or AI schema changes, so historical
     # jobs can be told apart from freshly generated ones.
-    lead_processing_version: int = 1
+    lead_processing_version: int = 2
 
     # Periodic Kommo <-> Google Sheets lead registry reconciliation.
     # Marketing status (column W) is deliberately independent from Kommo stages.

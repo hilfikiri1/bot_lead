@@ -142,7 +142,9 @@ def preview_keyboard(job: LeadProcessingJob, qualification: LeadQualification) -
     if qualification.recommended_action == "whatsapp":
         rows.append([{"text": "📲 Send WhatsApp", "callback_data": f"lp:wa:{job.id}"}])
     elif qualification.recommended_action == "phone_call":
-        rows.append([{"text": "📞 Prepare call", "callback_data": f"lp:call:{job.id}"}])
+        rows.append(
+            [{"text": "📞 Подготовка к звонку + контакт", "callback_data": f"lp:call:{job.id}"}]
+        )
     return {"inline_keyboard": rows}
 
 
@@ -214,6 +216,9 @@ def render_completed(job: LeadProcessingJob, qualification: LeadQualification | 
             )
     if qualification and qualification.recommended_action == "phone_call":
         rows.append(
+            [{"text": "📞 Подготовка к звонку + контакт", "callback_data": f"lp:call:{job.id}"}]
+        )
+        rows.append(
             [
                 {"text": "✅ Call completed", "callback_data": f"lp:call_ok:{job.id}"},
                 {"text": "📵 No answer", "callback_data": f"lp:call_na:{job.id}"},
@@ -234,40 +239,146 @@ def render_whatsapp_share(job: LeadProcessingJob, qualification: LeadQualificati
     return "\n".join(lines)[:4000], {"inline_keyboard": rows}
 
 
-def render_call_script(qualification: LeadQualification, job: LeadProcessingJob) -> tuple[str, dict[str, Any]]:
-    script = qualification.call_script
-    lines = ["📞 <b>Подготовка к звонку</b>", ""]
-    if script:
-        lines.extend(
+def _chunk_telegram_messages(sections: list[list[str]], *, limit: int = 3900) -> list[str]:
+    """Join section blocks into Telegram-safe messages without cutting mid-section when possible."""
+    messages: list[str] = []
+    current: list[str] = []
+    current_len = 0
+    for section in sections:
+        block = "\n".join(section).strip()
+        if not block:
+            continue
+        extra = len(block) + (2 if current else 0)
+        if current and current_len + extra > limit:
+            messages.append("\n\n".join(current))
+            current = [block]
+            current_len = len(block)
+        else:
+            current.append(block)
+            current_len += extra
+    if current:
+        messages.append("\n\n".join(current))
+    return messages or ["📞 Подготовка к звонку"]
+
+
+def call_outcome_keyboard(
+    job: LeadProcessingJob, *, phone_e164: str | None = None
+) -> dict[str, Any]:
+    rows: list[list[dict[str, str]]] = []
+    if phone_e164:
+        rows.append([{"text": f"📞 Позвонить {phone_e164}", "url": f"tel:{phone_e164}"}])
+    rows.extend(
+        [
             [
-                f"<b>Цель:</b> {_esc(script.objective)}",
-                "",
-                f"<b>Открывающая фраза:</b> {_esc(script.opening_phrase)}",
-            ]
-        )
-        if script.questions:
-            lines.extend(["", "<b>Вопросы:</b>"])
-            lines.extend(f"{index}. {_esc(item)}" for index, item in enumerate(script.questions, 1))
-        if script.possible_objections:
-            lines.extend(["", "<b>Возможные возражения:</b>"])
-            lines.extend(f"• {_esc(item)}" for item in script.possible_objections)
-        if script.recommended_answers:
-            lines.extend(["", "<b>Рекомендуемые ответы:</b>"])
-            lines.extend(f"• {_esc(item)}" for item in script.recommended_answers)
-        lines.extend(["", f"<b>Закрывающая фраза:</b> {_esc(script.closing_phrase)}"])
-    keyboard = {
-        "inline_keyboard": [
-            [
-                {"text": "✅ Call completed", "callback_data": f"lp:call_ok:{job.id}"},
-                {"text": "📵 No answer", "callback_data": f"lp:call_na:{job.id}"},
+                {"text": "✅ Поговорили", "callback_data": f"lp:call_ok:{job.id}"},
+                {"text": "📵 Не ответил", "callback_data": f"lp:call_na:{job.id}"},
             ],
             [
                 {"text": "📅 Перенести", "callback_data": f"lp:call_later:{job.id}"},
                 {"text": "❌ Номер неверный", "callback_data": f"lp:call_bad:{job.id}"},
             ],
         ]
-    }
-    return "\n".join(lines)[:4000], keyboard
+    )
+    return {"inline_keyboard": rows}
+
+
+def render_call_script(
+    qualification: LeadQualification,
+    job: LeadProcessingJob,
+    *,
+    snapshot: LeadSnapshot | None = None,
+) -> tuple[list[str], dict[str, Any]]:
+    """Return one or more Telegram messages with a full call briefing."""
+    script = qualification.call_script
+    phone_display = phone_utils.display_phone(snapshot.phone if snapshot else None)
+    phone_e164 = phone_utils.to_e164(snapshot.phone if snapshot else None)
+    analysis = ""
+    if script and script.personal_analysis_ru.strip():
+        analysis = script.personal_analysis_ru.strip()
+    elif qualification.lead_analysis_ru.strip():
+        analysis = qualification.lead_analysis_ru.strip()
+
+    sections: list[list[str]] = [
+        [
+            "📞 <b>ПОДГОТОВКА К ЗВОНКУ</b>",
+            "",
+            f"Лид: №{_esc(job.assigned_number)} · {_esc(qualification.product_name_ru)}",
+            f"Клиент: {_esc(snapshot.name if snapshot else None)}",
+            f"Телефон: <code>{_esc(phone_display or phone_e164)}</code>",
+        ]
+    ]
+
+    if script and script.company_context_ru.strip():
+        sections.append(["<b>КОМПАНИЯ / КОНТЕКСТ</b>", "", _esc(script.company_context_ru)])
+
+    if analysis:
+        sections.append(["<b>ЛИЧНЫЙ АНАЛИЗ</b>", "", _esc(analysis)])
+
+    priority_note = ""
+    if script and script.priority_note_ru.strip():
+        priority_note = script.priority_note_ru.strip()
+    else:
+        priority_note = (
+            f"{qualification.priority} — {qualification.priority_label_ru}. "
+            f"Потенциал: {_POTENTIAL_RU.get(qualification.potential, qualification.potential)}."
+        )
+    sections.append(["<b>ПРИОРИТЕТ</b>", "", _esc(priority_note)])
+
+    if script:
+        sections.append(["<b>ЦЕЛЬ ЗВОНКА</b>", "", _esc(script.objective)])
+        if script.main_question_pl.strip():
+            main_block = [
+                "<b>ГЛАВНЫЙ ВОПРОС В НАЧАЛЕ</b>",
+                "",
+                _esc(script.main_question_pl),
+            ]
+            if script.main_question_reason_ru.strip():
+                main_block.extend(["", _esc(script.main_question_reason_ru)])
+            sections.append(main_block)
+        if script.conversation_script_pl.strip():
+            sections.append(
+                ["<b>СЦЕНАРИЙ РАЗГОВОРА</b>", "", _esc(script.conversation_script_pl)]
+            )
+        elif script.opening_phrase.strip():
+            sections.append(
+                ["<b>ОТКРЫВАЮЩАЯ ФРАЗА</b>", "", _esc(script.opening_phrase)]
+            )
+        if script.questions:
+            q_lines = ["<b>ВОПРОСЫ</b>", ""]
+            q_lines.extend(
+                f"{index}. {_esc(item)}" for index, item in enumerate(script.questions, 1)
+            )
+            sections.append(q_lines)
+        clarify = script.clarify_points_ru or qualification.missing_information_ru
+        if clarify:
+            c_lines = ["<b>ЧТО ОБЯЗАТЕЛЬНО ВЫЯСНИТЬ</b>", ""]
+            c_lines.extend(f"• {_esc(item)}" for item in clarify)
+            sections.append(c_lines)
+        if script.cheat_sheet_ru:
+            s_lines = ["<b>КРАТКАЯ ШПАРГАЛКА</b>", ""]
+            s_lines.extend(f"• {_esc(item)}" for item in script.cheat_sheet_ru)
+            sections.append(s_lines)
+        if script.possible_objections:
+            o_lines = ["<b>ВОЗРАЖЕНИЯ</b>", ""]
+            o_lines.extend(f"• {_esc(item)}" for item in script.possible_objections)
+            if script.recommended_answers:
+                o_lines.extend(["", "<b>ОТВЕТЫ</b>", ""])
+                o_lines.extend(f"• {_esc(item)}" for item in script.recommended_answers)
+            sections.append(o_lines)
+        if script.must_record_after_call:
+            r_lines = ["<b>ЗАФИКСИРОВАТЬ ПОСЛЕ ЗВОНКА</b>", ""]
+            r_lines.extend(f"• {_esc(item)}" for item in script.must_record_after_call)
+            sections.append(r_lines)
+        if script.closing_phrase.strip():
+            sections.append(["<b>ЗАВЕРШЕНИЕ</b>", "", _esc(script.closing_phrase)])
+
+    sections.append(
+        [
+            "Ниже — контакт .vcf для iPhone. Нажмите «Позвонить», чтобы открыть набор номера.",
+        ]
+    )
+    messages = _chunk_telegram_messages(sections)
+    return messages, call_outcome_keyboard(job, phone_e164=phone_e164)
 
 
 def edit_menu(job: LeadProcessingJob) -> tuple[str, dict[str, Any]]:

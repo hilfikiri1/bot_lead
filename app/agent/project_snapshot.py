@@ -420,23 +420,29 @@ def project_actions_markup(snapshot: ProjectSnapshot) -> dict[str, Any]:
         ],
         [
             {
-                "text": "📎 Загрузить файл",
-                "callback_data": f"agent:project:upload:{lead_id}",
+                "text": "🎙 Добавить разговор",
+                "callback_data": f"lead:audio:{lead_id}:0",
             },
             {
-                "text": "✍️ Follow-up",
-                "callback_data": f"agent:prep:draft:{lead_id}",
+                "text": "📎 Загрузить файл",
+                "callback_data": f"agent:project:upload:{lead_id}",
             },
         ],
         [
             {
+                "text": "✍️ Follow-up",
+                "callback_data": f"agent:prep:draft:{lead_id}",
+            },
+            {
                 "text": "💬 Переписка",
                 "callback_data": f"agent:comms:{lead_id}:0",
             },
+        ],
+        [
             {
                 "text": "🕘 История",
                 "callback_data": f"agent:project:history:{lead_id}",
-            },
+            }
         ],
     ]
     links: list[dict[str, str]] = []

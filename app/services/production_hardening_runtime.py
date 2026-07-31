@@ -117,3 +117,9 @@ def install_production_hardening_runtime() -> None:
         )
 
     telegram_api._verify_secret = verify_telegram_secret_fail_closed
+
+    # Install after every legacy upload/message wrapper so /bug screenshot capture
+    # and /bug_prompt cannot be bypassed by an older runtime layer.
+    from app.services.bug_capture_runtime import install_bug_capture_runtime
+
+    install_bug_capture_runtime()

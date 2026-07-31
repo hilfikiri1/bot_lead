@@ -7,14 +7,16 @@ import logging
 from contextlib import asynccontextmanager, suppress
 
 import structlog
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text
 
 from app.api.admin import router as admin_router
 from app.api.diagnostics import router as diagnostics_router
 from app.api.telegram import router as telegram_router
 from app.api.whatsapp import router as whatsapp_router
 from app.config import get_settings
+from app.database import engine
 from app.db_migrations import upgrade_database
 from app.services import followup_service, lead_status_sync_service
 from app.services.agent_scheduled_digest_service import start_periodic_digest_loop
@@ -42,6 +44,9 @@ from app.services.operator_experience_phone_patch import (
     install_operator_experience_phone_patch,
 )
 from app.services.operator_experience_runtime import install_operator_experience_runtime
+from app.services.production_hardening_runtime import (
+    install_production_hardening_runtime,
+)
 from app.services.request_trace import install_request_tracing
 from app.services.runtime_extensions import install_runtime_extensions
 from app.services.supplier_workspace_runtime import install_supplier_workspace_runtime
@@ -68,6 +73,8 @@ install_context_intelligence_runtime()
 install_kaizen_notion_guard_runtime()
 install_goals_qa_runtime()
 install_qa_projection_runtime()
+# Final compatibility/security layer for production-facing entry points.
+install_production_hardening_runtime()
 
 structlog.configure(
     processors=[
@@ -90,10 +97,10 @@ async def lifespan(app: FastAPI):
     app_logger = logging.getLogger(__name__)
     app_logger.info("Starting Buy & Bring CRM Assistant")
 
-    try:
-        await upgrade_database()
-    except Exception as exc:
-        app_logger.error("Startup migration failed: %s", exc)
+    # A process with an outdated or partially migrated schema must not receive
+    # production traffic. Let the exception abort startup instead of reporting a
+    # misleading healthy/ready state.
+    await upgrade_database()
 
     if (
         settings.telegram_bot_token
@@ -219,6 +226,17 @@ async def health():
 
 @app.get("/ready")
 async def ready():
+    try:
+        async with engine.connect() as connection:
+            await connection.execute(text("SELECT 1"))
+    except Exception as exc:
+        logging.getLogger(__name__).error(
+            "Readiness database check failed: %s", exc.__class__.__name__
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database unavailable",
+        ) from exc
     return {
         "status": "ready",
         "service": "buy-bring-crm-assistant",

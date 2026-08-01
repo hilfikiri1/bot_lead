@@ -117,3 +117,50 @@ def install_production_hardening_runtime() -> None:
         )
 
     telegram_api._verify_secret = verify_telegram_secret_fail_closed
+
+    # Install after every legacy upload/message wrapper so /bug screenshot capture
+    # and /bug_prompt cannot be bypassed by an older runtime layer.
+    from app.services.bug_capture_runtime import install_bug_capture_runtime
+
+    install_bug_capture_runtime()
+    bug_upload = agent_service.handle_project_file_upload
+
+    async def handle_project_file_upload_final(
+        db: Any,
+        *,
+        chat_id: int,
+        telegram_user_id: int,
+        telegram_message_id: int | None = None,
+        filename: str,
+        mime_type: str,
+        content: bytes,
+        caption: str | None = None,
+        kind: str | None = None,
+    ):
+        # Old internal project-upload calls do not carry Telegram caption/kind and
+        # must not query the QA session merely because /bug support is installed.
+        if caption is None and kind is None:
+            return await handle_project_file_upload_compat(
+                db,
+                chat_id=chat_id,
+                telegram_user_id=telegram_user_id,
+                telegram_message_id=telegram_message_id,
+                filename=filename,
+                mime_type=mime_type,
+                content=content,
+                caption=caption,
+                kind=kind,
+            )
+        return await bug_upload(
+            db,
+            chat_id=chat_id,
+            telegram_user_id=telegram_user_id,
+            telegram_message_id=telegram_message_id,
+            filename=filename,
+            mime_type=mime_type,
+            content=content,
+            caption=caption,
+            kind=kind,
+        )
+
+    agent_service.handle_project_file_upload = handle_project_file_upload_final

@@ -39,6 +39,9 @@ from app.services.kaizen_notion_guard_runtime import (
 from app.services.kaizen_source_guard_runtime import (
     install_kaizen_source_guard_runtime,
 )
+from app.services.lead_history_update_runtime import (
+    install_lead_history_update_runtime,
+)
 from app.services.lead_registry_runtime import install_lead_registry_runtime
 from app.services.operator_experience_phone_patch import (
     install_operator_experience_phone_patch,
@@ -65,6 +68,7 @@ install_whatsapp_cloud_runtime()
 install_lead_registry_runtime()
 install_operator_experience_runtime()
 install_operator_experience_phone_patch()
+install_lead_history_update_runtime()
 # Install last so diagnostics, kaizen and goals/QA wrap final production behavior.
 install_diagnostic_runtime()
 install_kaizen_diagnostics_runtime()

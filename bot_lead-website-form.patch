@@ -1,0 +1,280 @@
+diff --git a/.env.example b/.env.example
+index 6cc865a..77df472 100644
+--- a/.env.example
++++ b/.env.example
+@@ -114,6 +114,7 @@ KOMMO_UNREVIEWED_HIDE_NUMBERED=false
+ KOMMO_UNREVIEWED_PAGE_SIZE=8
+ 
+ ADMIN_API_KEY=
++WEBSITE_LEAD_WEBHOOK_SECRET=
+ CORS_ALLOWED_ORIGINS=
+ EXPOSE_API_DOCS=false
+ ENABLE_GOOGLE_OAUTH_ROUTES=false
+diff --git a/app/api/website_form.py b/app/api/website_form.py
+new file mode 100644
+index 0000000..a24159f
+--- /dev/null
++++ b/app/api/website_form.py
+@@ -0,0 +1,73 @@
++"""Webhook endpoint for Buy & Bring Solutions website contact forms."""
++
++from __future__ import annotations
++
++import hmac
++from typing import Any
++
++from fastapi import APIRouter, Header, HTTPException, status
++from pydantic import BaseModel, EmailStr, Field
++
++from app.config import get_settings
++from app.services.website_form_service import notify_website_form
++
++router = APIRouter(prefix="/webhook/website-form", tags=["website-form"])
++settings = get_settings()
++
++
++class WebsiteFormPayload(BaseModel):
++    language: str = "pl"
++    pageUrl: str = ""
++    formType: str = "contact"
++    submittedAt: str = ""
++    name: str = Field(min_length=1, max_length=200)
++    company: str = ""
++    email: EmailStr
++    phone: str = ""
++    topic: str = ""
++    description: str = ""
++
++
++def require_website_form_secret(
++    x_website_lead_secret: str | None = Header(default=None),
++) -> None:
++    configured = settings.website_lead_webhook_secret.strip()
++    if not configured:
++        raise HTTPException(
++            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
++            detail="Website form webhook is disabled",
++        )
++    if not hmac.compare_digest(x_website_lead_secret or "", configured):
++        raise HTTPException(
++            status_code=status.HTTP_401_UNAUTHORIZED,
++            detail="Invalid webhook secret",
++        )
++
++
++@router.post("", dependencies=[])
++async def receive_website_form(
++    payload: WebsiteFormPayload,
++    x_website_lead_secret: str | None = Header(default=None),
++) -> dict[str, Any]:
++    require_website_form_secret(x_website_lead_secret)
++
++    if not settings.telegram_bot_token.strip():
++        raise HTTPException(
++            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
++            detail="Telegram bot is not configured",
++        )
++
++    try:
++        await notify_website_form(payload.model_dump())
++    except RuntimeError as exc:
++        raise HTTPException(
++            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
++            detail=str(exc),
++        ) from exc
++    except Exception as exc:
++        raise HTTPException(
++            status_code=status.HTTP_502_BAD_GATEWAY,
++            detail="Telegram delivery failed",
++        ) from exc
++
++    return {"success": True}
+diff --git a/app/config.py b/app/config.py
+index da7011e..690e3e1 100644
+--- a/app/config.py
++++ b/app/config.py
+@@ -314,6 +314,7 @@ class Settings(BaseSettings):
+ 
+     # Security / web API
+     admin_api_key: str = ""
++    website_lead_webhook_secret: str = ""
+     cors_allowed_origins: str = ""
+     enable_google_oauth_routes: bool = False
+     expose_api_docs: bool = False
+diff --git a/app/main.py b/app/main.py
+index 8d40a4b..17d6515 100644
+--- a/app/main.py
++++ b/app/main.py
+@@ -14,6 +14,7 @@ from sqlalchemy import text
+ from app.api.admin import router as admin_router
+ from app.api.diagnostics import router as diagnostics_router
+ from app.api.telegram import router as telegram_router
++from app.api.website_form import router as website_form_router
+ from app.api.whatsapp import router as whatsapp_router
+ from app.config import get_settings
+ from app.database import engine
+@@ -207,6 +208,7 @@ if cors_origins:
+         allow_headers=[
+             "Content-Type",
+             "X-Admin-Key",
++            "X-Website-Lead-Secret",
+             "X-Telegram-Bot-Api-Secret-Token",
+             "X-Hub-Signature-256",
+             "X-Request-ID",
+@@ -217,6 +219,7 @@ if cors_origins:
+ 
+ app.include_router(telegram_router)
+ app.include_router(whatsapp_router)
++app.include_router(website_form_router)
+ app.include_router(admin_router)
+ app.include_router(diagnostics_router)
+ 
+diff --git a/app/services/website_form_service.py b/app/services/website_form_service.py
+new file mode 100644
+index 0000000..0ad9029
+--- /dev/null
++++ b/app/services/website_form_service.py
+@@ -0,0 +1,93 @@
++"""Format and deliver website form submissions to Telegram."""
++
++from __future__ import annotations
++
++import html
++from typing import Any
++
++from app.config import get_settings
++from app.services import telegram_service
++
++settings = get_settings()
++
++FORM_TYPE_LABELS: dict[str, str] = {
++    "contact": "Запрос с сайта (контакт)",
++    "consultation": "Заявка на консультацию",
++}
++
++TOPIC_LABELS: dict[str, str] = {
++    "sourcing": "Wyszukiwanie producenta",
++    "audit": "Weryfikacja / audyt fabryki",
++    "qc": "Kontrola jakości",
++    "oem": "Private Label / OEM",
++    "consolidation": "Konsolidacja",
++    "freight": "Transport i odprawa",
++    "full": "Kompleksowa obsługa importu",
++    "other": "Inne",
++    "logistics": "Logistyka i transport",
++}
++
++
++def _escape(value: str) -> str:
++    return html.escape(value or "—", quote=False)
++
++
++def format_website_form_message(payload: dict[str, Any]) -> str:
++    form_type = str(payload.get("formType") or "contact")
++    form_label = FORM_TYPE_LABELS.get(form_type, form_type)
++    topic_raw = str(payload.get("topic") or "").strip()
++    topic_label = TOPIC_LABELS.get(topic_raw, topic_raw or "—")
++    language = str(payload.get("language") or "pl").upper()
++    submitted_at = str(payload.get("submittedAt") or "—")
++    page_url = str(payload.get("pageUrl") or "—")
++
++    name = str(payload.get("name") or "")
++    email = str(payload.get("email") or "")
++
++    lines = [
++        "🌐 <b>Новая заявка с сайта</b>",
++        "",
++        f"<b>Тип:</b> {_escape(form_label)}",
++        f"<b>Имя:</b> {_escape(name)}",
++        f"<b>Email:</b> {_escape(email)}",
++    ]
++
++    phone = str(payload.get("phone") or "").strip()
++    if phone:
++        lines.append(f"<b>Телефон:</b> {_escape(phone)}")
++
++    company = str(payload.get("company") or "").strip()
++    if company:
++        lines.append(f"<b>Компания:</b> {_escape(company)}")
++
++    lines.extend(
++        [
++            f"<b>Тема / услуга:</b> {_escape(topic_label)}",
++            "",
++            "<b>Описание:</b>",
++            _escape(str(payload.get("description") or "—")),
++            "",
++            f"<b>Страница:</b> {_escape(page_url)}",
++            f"<b>Язык:</b> {language}",
++            f"<b>Отправлено:</b> {_escape(submitted_at)}",
++        ]
++    )
++
++    return "\n".join(lines)
++
++
++def resolve_notification_chat_id() -> int:
++    if settings.telegram_approval_chat_id:
++        return int(settings.telegram_approval_chat_id)
++    if settings.telegram_owner_user_id:
++        return int(settings.telegram_owner_user_id)
++    raise RuntimeError(
++        "Telegram notification chat is not configured "
++        "(set TELEGRAM_APPROVAL_CHAT_ID or TELEGRAM_OWNER_USER_ID)"
++    )
++
++
++async def notify_website_form(payload: dict[str, Any]) -> None:
++    chat_id = resolve_notification_chat_id()
++    message = format_website_form_message(payload)
++    await telegram_service.send_message(chat_id, message)
+diff --git a/tests/test_website_form.py b/tests/test_website_form.py
+new file mode 100644
+index 0000000..daa788b
+--- /dev/null
++++ b/tests/test_website_form.py
+@@ -0,0 +1,44 @@
++import pytest
++from fastapi import HTTPException
++
++
++def test_website_form_webhook_disabled_without_secret(monkeypatch):
++    from app.api import website_form
++
++    monkeypatch.setattr(website_form.settings, "website_lead_webhook_secret", "")
++    with pytest.raises(HTTPException) as exc:
++        website_form.require_website_form_secret(None)
++    assert exc.value.status_code == 503
++
++
++def test_website_form_webhook_rejects_wrong_secret(monkeypatch):
++    from app.api import website_form
++
++    monkeypatch.setattr(website_form.settings, "website_lead_webhook_secret", "correct")
++    with pytest.raises(HTTPException) as exc:
++        website_form.require_website_form_secret("wrong")
++    assert exc.value.status_code == 401
++
++
++def test_format_website_form_message_includes_core_fields():
++    from app.services.website_form_service import format_website_form_message
++
++    message = format_website_form_message(
++        {
++            "formType": "contact",
++            "name": "Jan Kowalski",
++            "email": "jan@firma.pl",
++            "phone": "+48 783 232 971",
++            "company": "Firma Sp. z o.o.",
++            "topic": "full",
++            "description": "Import linii opakowaniowej",
++            "pageUrl": "https://example.com/pl/kontakt",
++            "language": "pl",
++            "submittedAt": "2025-08-05T10:00:00Z",
++        }
++    )
++
++    assert "Jan Kowalski" in message
++    assert "jan@firma.pl" in message
++    assert "Import linii opakowaniowej" in message
++    assert "Запрос с сайта" in message

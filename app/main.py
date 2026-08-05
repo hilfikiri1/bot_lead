@@ -14,6 +14,7 @@ from sqlalchemy import text
 from app.api.admin import router as admin_router
 from app.api.diagnostics import router as diagnostics_router
 from app.api.telegram import router as telegram_router
+from app.api.website_form import router as website_form_router
 from app.api.whatsapp import router as whatsapp_router
 from app.config import get_settings
 from app.database import engine
@@ -207,6 +208,7 @@ if cors_origins:
         allow_headers=[
             "Content-Type",
             "X-Admin-Key",
+            "X-Website-Lead-Secret",
             "X-Telegram-Bot-Api-Secret-Token",
             "X-Hub-Signature-256",
             "X-Request-ID",
@@ -217,6 +219,7 @@ if cors_origins:
 
 app.include_router(telegram_router)
 app.include_router(whatsapp_router)
+app.include_router(website_form_router)
 app.include_router(admin_router)
 app.include_router(diagnostics_router)
 

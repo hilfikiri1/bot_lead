@@ -314,6 +314,7 @@ class Settings(BaseSettings):
 
     # Security / web API
     admin_api_key: str = ""
+    website_lead_webhook_secret: str = ""
     cors_allowed_origins: str = ""
     enable_google_oauth_routes: bool = False
     expose_api_docs: bool = False

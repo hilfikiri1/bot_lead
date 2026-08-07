@@ -5,8 +5,11 @@ Supports:
 - read-only connection checks;
 - listing all open leads;
 - creating a lead from a reviewed Telegram voice-note report.
+- deterministic website-form lead intake from the authenticated server webhook.
 
-All write operations must be initiated by an explicit Telegram button click.
+Interactive write operations must be initiated by an explicit Telegram button
+click. Website-form intake is the narrow exception: the authenticated webhook
+is a pre-authorized, deterministic source and never writes LLM-generated data.
 """
 
 from __future__ import annotations
@@ -869,38 +872,29 @@ async def add_common_note(lead_id: int, text: str) -> bool:
     return True
 
 
-async def create_lead_from_analysis(
+async def _create_lead_with_contact(
     *,
+    lead_title: str,
     client_data: dict[str, Any],
-    lead_data: dict[str, Any],
-    conversation_summary: str | None,
-    recommended_next_step: str | None,
-    missing_questions: list[str] | None,
-    transcript: str | None,
-    lead_name_override: str | None = None,
-    confirmed_facts: list[str] | None = None,
-    risks: list[str] | None = None,
-    whatsapp_message: str | None = None,
-) -> dict[str, Any]:
-    """Create one Kommo lead after explicit human approval in Telegram."""
-    lead_title = _lead_title(
-        client_data,
-        lead_data,
-        lead_name_override=lead_name_override,
-    )
-    lead_payload: dict[str, Any] = {"name": lead_title}
+    fallback_contact_name: str,
+) -> tuple[dict[str, Any], int | None, dict[str, Any]]:
+    """Create a lead and attach/reuse one contact using the configured placement."""
+    clean_title = lead_title.strip()[:255] or "Новый запрос"
+    lead_payload: dict[str, Any] = {"name": clean_title}
     lead_payload.update(await _resolve_configured_lead_placement())
 
     phone = client_data.get("phone")
     email = client_data.get("email")
     contact_name = (
-        client_data.get("name") or client_data.get("company") or "Контакт из Telegram"
+        client_data.get("name")
+        or client_data.get("company")
+        or fallback_contact_name
     )
 
     existing_contact_id = await find_existing_contact(phone, email)
     contact_id: int | None = existing_contact_id
 
-    if existing_contact_id:
+    if existing_contact_id is not None:
         lead_payload["_embedded"] = {"contacts": [{"id": existing_contact_id}]}
         data = await _submit_new_lead(lead_payload, "/api/v4/leads/complex")
     elif any([client_data.get("name"), client_data.get("company"), phone, email]):
@@ -930,7 +924,7 @@ async def create_lead_from_analysis(
 
     created_leads = _extract_embedded_items(data, "leads")
     if not created_leads:
-        recovered = await find_recent_lead_by_name(lead_title)
+        recovered = await find_recent_lead_by_name(clean_title)
         if recovered:
             logger.warning(
                 "Kommo response had no embedded lead, but a recent lead with the same "
@@ -946,25 +940,29 @@ async def create_lead_from_analysis(
     if not isinstance(lead_id, int):
         raise KommoAPIError("Kommo вернул сделку без корректного ID.")
 
-    embedded_contacts = (created.get("_embedded") or {}).get("contacts") or []
-    if not contact_id and embedded_contacts:
-        maybe_contact_id = embedded_contacts[0].get("id")
+    if contact_id is None:
+        maybe_contact_id = created.get("contact_id")
         if isinstance(maybe_contact_id, int):
             contact_id = maybe_contact_id
 
-    notes_added = await save_analysis_to_kommo_notes(
-        lead_id,
-        client_data=client_data,
-        lead_data=lead_data,
-        conversation_summary=conversation_summary,
-        recommended_next_step=recommended_next_step,
-        missing_questions=missing_questions,
-        transcript=transcript,
-        confirmed_facts=confirmed_facts,
-        risks=risks,
-        whatsapp_message=whatsapp_message,
-    )
+    if contact_id is None:
+        embedded_contacts = (created.get("_embedded") or {}).get("contacts") or []
+        if embedded_contacts:
+            maybe_contact_id = embedded_contacts[0].get("id")
+            if isinstance(maybe_contact_id, int):
+                contact_id = maybe_contact_id
 
+    return created, contact_id, lead_payload
+
+
+async def _created_lead_result(
+    *,
+    created: dict[str, Any],
+    contact_id: int | None,
+    lead_payload: dict[str, Any],
+    notes_added: int,
+) -> dict[str, Any]:
+    lead_id = created["id"]
     pipeline_id = created.get("pipeline_id") or lead_payload.get("pipeline_id")
     status_id = created.get("status_id") or lead_payload.get("status_id")
     try:
@@ -989,6 +987,88 @@ async def create_lead_from_analysis(
         "notes_added": notes_added,
         "url": f"{_base_url()}/leads/detail/{lead_id}",
     }
+
+
+async def create_lead_from_external_intake(
+    *,
+    lead_title: str,
+    client_data: dict[str, Any],
+    note_text: str,
+) -> dict[str, Any]:
+    """Create a lead from a trusted, pre-authorized deterministic intake source.
+
+    This is intentionally narrower than the agent write path: callers provide
+    already validated deterministic fields, not arbitrary AI/tool output.
+    """
+    created, contact_id, lead_payload = await _create_lead_with_contact(
+        lead_title=lead_title,
+        client_data=client_data,
+        fallback_contact_name="Контакт с сайта",
+    )
+    try:
+        note_saved = await add_common_note(created["id"], note_text)
+    except Exception as exc:
+        note_saved = False
+        logger.error(
+            "website_intake.kommo_note_failed lead_id=%s error_type=%s",
+            created["id"],
+            type(exc).__name__,
+            exc_info=True,
+        )
+    notes_added = 1 if note_saved else 0
+    return await _created_lead_result(
+        created=created,
+        contact_id=contact_id,
+        lead_payload=lead_payload,
+        notes_added=notes_added,
+    )
+
+
+async def create_lead_from_analysis(
+    *,
+    client_data: dict[str, Any],
+    lead_data: dict[str, Any],
+    conversation_summary: str | None,
+    recommended_next_step: str | None,
+    missing_questions: list[str] | None,
+    transcript: str | None,
+    lead_name_override: str | None = None,
+    confirmed_facts: list[str] | None = None,
+    risks: list[str] | None = None,
+    whatsapp_message: str | None = None,
+) -> dict[str, Any]:
+    """Create one Kommo lead after explicit human approval in Telegram."""
+    lead_title = _lead_title(
+        client_data,
+        lead_data,
+        lead_name_override=lead_name_override,
+    )
+    created, contact_id, lead_payload = await _create_lead_with_contact(
+        lead_title=lead_title,
+        client_data=client_data,
+        fallback_contact_name="Контакт из Telegram",
+    )
+    lead_id = created["id"]
+
+    notes_added = await save_analysis_to_kommo_notes(
+        lead_id,
+        client_data=client_data,
+        lead_data=lead_data,
+        conversation_summary=conversation_summary,
+        recommended_next_step=recommended_next_step,
+        missing_questions=missing_questions,
+        transcript=transcript,
+        confirmed_facts=confirmed_facts,
+        risks=risks,
+        whatsapp_message=whatsapp_message,
+    )
+
+    return await _created_lead_result(
+        created=created,
+        contact_id=contact_id,
+        lead_payload=lead_payload,
+        notes_added=notes_added,
+    )
 
 
 async def test_connection() -> dict[str, Any]:

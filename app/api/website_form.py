@@ -9,7 +9,7 @@ from fastapi import APIRouter, Header, HTTPException, status
 from pydantic import BaseModel, EmailStr, Field
 
 from app.config import get_settings
-from app.services.website_form_service import notify_website_form
+from app.services.website_form_service import deliver_website_form
 
 router = APIRouter(prefix="/webhook/website-form", tags=["website-form"])
 settings = get_settings()
@@ -51,23 +51,17 @@ async def receive_website_form(
 ) -> dict[str, Any]:
     require_website_form_secret(x_website_lead_secret)
 
-    if not settings.telegram_bot_token.strip():
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Telegram bot is not configured",
-        )
-
     try:
-        await notify_website_form(payload.model_dump())
+        delivery = await deliver_website_form(payload.model_dump())
     except RuntimeError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=str(exc),
+            detail="Website lead delivery is unavailable",
         ) from exc
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Telegram delivery failed",
+            detail="Website lead delivery failed",
         ) from exc
 
-    return {"success": True}
+    return {"success": True, **delivery}

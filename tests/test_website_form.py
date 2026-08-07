@@ -58,10 +58,38 @@ def test_website_lead_title_and_note_are_readable():
     title = build_website_lead_title(payload)
     note = format_website_form_note(payload)
 
-    assert title == "WWW PL — Jan Kowalski — Import linii opakowaniowej"
+    assert title == "WWWPL - Import linii opakowaniowej"
     assert "ЗАЯВКА С САЙТА BUY & BRING SOLUTIONS" in note
     assert "Firma Sp. z o.o." in note
     assert "Источник: website_form" in note
+
+
+def test_website_lead_title_matches_contact_request_without_client_name():
+    from app.services.website_form_service import (
+        build_website_lead_title,
+        format_website_form_note,
+    )
+
+    payload = {
+        **_website_payload(),
+        "name": "Kyrylo",
+        "email": "s.poland.s@mail.ru",
+        "phone": "+48 555 555 555",
+        "company": "Podolskyi",
+        "description": "Pomooocyyy",
+    }
+
+    assert build_website_lead_title(payload) == "WWWPL - Pomooocyyy"
+    note = format_website_form_note(payload)
+    for expected in (
+        "Kyrylo",
+        "s.poland.s@mail.ru",
+        "+48 555 555 555",
+        "Podolskyi",
+        "Kompleksowa obsługa importu",
+        "Pomooocyyy",
+    ):
+        assert expected in note
 
 
 @pytest.mark.asyncio
@@ -84,6 +112,25 @@ async def test_external_intake_creates_contact_lead_and_note(monkeypatch):
         "get_contact_field_ids",
         AsyncMock(return_value={"PHONE": 10, "EMAIL": 11}),
     )
+    monkeypatch.setattr(
+        kommo_service,
+        "find_existing_company",
+        AsyncMock(return_value=None),
+    )
+    monkeypatch.setattr(
+        kommo_service,
+        "get_lead_custom_fields",
+        AsyncMock(
+            return_value=[
+                {"id": 20, "name": "Имя", "type": "text"},
+                {"id": 21, "name": "E-mail", "type": "text"},
+                {"id": 22, "name": "Номер телефона", "type": "text"},
+                {"id": 23, "name": "Компания", "type": "text"},
+                {"id": 24, "name": "Тема / услуга", "type": "text"},
+                {"id": 25, "name": "Описание заявки", "type": "textarea"},
+            ]
+        ),
+    )
     submit = AsyncMock(
         return_value=[
             {"id": 42, "contact_id": 84, "pipeline_id": 7, "status_id": 8}
@@ -99,12 +146,20 @@ async def test_external_intake_creates_contact_lead_and_note(monkeypatch):
     )
 
     result = await kommo_service.create_lead_from_external_intake(
-        lead_title="WWW PL — Jan Kowalski — Import linii opakowaniowej",
+        lead_title="WWWPL - Import linii opakowaniowej",
         client_data={
             "name": "Jan Kowalski",
             "company": "Firma Sp. z o.o.",
             "phone": "+48 783 232 971",
             "email": "jan@firma.pl",
+        },
+        lead_fields={
+            "name": "Jan Kowalski",
+            "company": "Firma Sp. z o.o.",
+            "phone": "+48 783 232 971",
+            "email": "jan@firma.pl",
+            "topic": "Kompleksowa obsługa importu",
+            "description": "Import linii opakowaniowej",
         },
         note_text="SOURCE NOTE",
     )
@@ -115,6 +170,15 @@ async def test_external_intake_creates_contact_lead_and_note(monkeypatch):
     contact = lead_payload["_embedded"]["contacts"][0]
     assert contact["name"] == "Jan Kowalski"
     assert {field["field_id"] for field in contact["custom_fields_values"]} == {10, 11}
+    assert lead_payload["_embedded"]["companies"] == [{"name": "Firma Sp. z o.o."}]
+    assert {field["field_id"] for field in lead_payload["custom_fields_values"]} == {
+        20,
+        21,
+        22,
+        23,
+        24,
+        25,
+    }
     add_note.assert_awaited_once_with(42, "SOURCE NOTE")
     assert result["lead_id"] == 42
     assert result["contact_id"] == 84
@@ -153,6 +217,27 @@ async def test_external_intake_keeps_created_lead_if_note_fails(monkeypatch):
     assert result["lead_id"] == 42
     assert result["contact_id"] == 84
     assert result["note_saved"] is False
+
+
+@pytest.mark.asyncio
+async def test_website_form_sync_passes_structured_lead_fields(monkeypatch):
+    from app.services import website_form_service
+
+    create = AsyncMock(return_value={"lead_id": 42})
+    monkeypatch.setattr(
+        website_form_service.kommo_service,
+        "create_lead_from_external_intake",
+        create,
+    )
+
+    await website_form_service.sync_website_form_to_kommo(_website_payload())
+
+    kwargs = create.await_args.kwargs
+    assert kwargs["lead_title"] == "WWWPL - Import linii opakowaniowej"
+    assert kwargs["lead_fields"]["name"] == "Jan Kowalski"
+    assert kwargs["lead_fields"]["company"] == "Firma Sp. z o.o."
+    assert kwargs["lead_fields"]["topic"] == "Kompleksowa obsługa importu"
+    assert kwargs["lead_fields"]["description"] == "Import linii opakowaniowej"
 
 
 @pytest.mark.asyncio

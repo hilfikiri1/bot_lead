@@ -31,6 +31,26 @@ PAGE_SIZE = 250
 MAX_NOTE_CHARS = 14000
 MAX_TRANSCRIPT_CHUNK = 8000
 
+WEBSITE_LEAD_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
+    "name": ("Имя", "Imię", "Name"),
+    "email": ("E-mail", "Email", "Adres e-mail"),
+    "phone": ("Номер телефона", "Телефон", "Telefon", "Numer telefonu", "Phone"),
+    "company": ("Компания", "Firma", "Company"),
+    "topic": ("Тема / услуга", "Тема", "Услуга", "Temat / usługa", "Usługa"),
+    "description": (
+        "Описание заявки",
+        "Описание",
+        "Opis zapytania",
+        "Opis projektu",
+        "Opis",
+    ),
+    "form_type": ("Тип заявки", "Typ zapytania", "Rodzaj zapytania"),
+    "language": ("Язык", "Język", "Language"),
+    "page_url": ("Страница заявки", "URL страницы", "Strona zgłoszenia"),
+    "submitted_at": ("Дата/Время", "Дата заявки", "Data zgłoszenia", "Date/Time"),
+    "source": ("Источник заявки", "Источник", "Źródło", "Source"),
+}
+
 
 class KommoAPIError(RuntimeError):
     """Safe Kommo error that never contains authorization headers."""
@@ -814,6 +834,122 @@ async def get_contact_field_ids() -> dict[str, int]:
     return result
 
 
+async def get_lead_custom_fields() -> list[dict[str, Any]]:
+    """Return lead custom-field metadata used to map deterministic website intake."""
+    data = await _request(
+        "GET",
+        "/api/v4/leads/custom_fields",
+        params={"limit": PAGE_SIZE},
+    )
+    fields = ((data or {}).get("_embedded") or {}).get("custom_fields", [])
+    return [field for field in fields if isinstance(field, dict)]
+
+
+def _normalized_field_name(value: Any) -> str:
+    return re.sub(r"[^\w]+", "", str(value or "").casefold(), flags=re.UNICODE)
+
+
+def _custom_field_value(field: dict[str, Any], value: Any) -> dict[str, Any] | None:
+    """Build one Kommo custom-field value without guessing unsupported enum values."""
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+
+    field_id = field.get("id")
+    if not isinstance(field_id, int):
+        return None
+
+    field_type = str(field.get("type") or "text").casefold()
+    if field_type in {"select", "multiselect", "radio"}:
+        enums = field.get("enums") or []
+        match = next(
+            (
+                item
+                for item in enums
+                if _normalized_field_name(item.get("value")) == _normalized_field_name(raw)
+            ),
+            None,
+        )
+        enum_id = match.get("id") if isinstance(match, dict) else None
+        if not isinstance(enum_id, int):
+            return None
+        return {"field_id": field_id, "values": [{"enum_id": enum_id}]}
+
+    if field_type in {"date", "date_time", "birthday"}:
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return {"field_id": field_id, "values": [{"value": int(parsed.timestamp())}]}
+
+    if field_type in {"numeric", "monetary"}:
+        try:
+            number = float(raw.replace(" ", "").replace(",", "."))
+        except ValueError:
+            return None
+        return {"field_id": field_id, "values": [{"value": number}]}
+
+    if field_type == "checkbox":
+        return {
+            "field_id": field_id,
+            "values": [{"value": raw.casefold() in {"1", "true", "yes", "tak", "да"}}],
+        }
+
+    return {"field_id": field_id, "values": [{"value": raw[:2000]}]}
+
+
+async def build_website_lead_custom_values(
+    lead_fields: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """Map website values onto matching lead fields that already exist in this account."""
+    if not lead_fields:
+        return []
+
+    fields = await get_lead_custom_fields()
+    by_name = {
+        _normalized_field_name(field.get("name")): field
+        for field in fields
+        if _normalized_field_name(field.get("name"))
+    }
+    values: list[dict[str, Any]] = []
+    used_ids: set[int] = set()
+    for key, raw in lead_fields.items():
+        if not str(raw or "").strip():
+            continue
+        aliases = WEBSITE_LEAD_FIELD_ALIASES.get(key, ())
+        field = next(
+            (by_name.get(_normalized_field_name(alias)) for alias in aliases if alias),
+            None,
+        )
+        if not field or field.get("id") in used_ids:
+            continue
+        item = _custom_field_value(field, raw)
+        if item:
+            values.append(item)
+            used_ids.add(item["field_id"])
+    return values
+
+
+async def find_existing_company(name: str | None) -> int | None:
+    """Return an exact Kommo company match so website intake does not create duplicates."""
+    clean_name = str(name or "").strip()
+    if not clean_name:
+        return None
+    data = await _request(
+        "GET",
+        "/api/v4/companies",
+        params={"query": clean_name, "limit": 50},
+    )
+    companies = ((data or {}).get("_embedded") or {}).get("companies") or []
+    for company in companies:
+        if str(company.get("name") or "").strip().casefold() != clean_name.casefold():
+            continue
+        company_id = company.get("id")
+        if isinstance(company_id, int):
+            return company_id
+    return None
+
+
 def _lead_title(
     client_data: dict[str, Any],
     lead_data: dict[str, Any],
@@ -877,11 +1013,15 @@ async def _create_lead_with_contact(
     lead_title: str,
     client_data: dict[str, Any],
     fallback_contact_name: str,
+    lead_fields: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], int | None, dict[str, Any]]:
     """Create a lead and attach/reuse one contact using the configured placement."""
     clean_title = lead_title.strip()[:255] or "Новый запрос"
     lead_payload: dict[str, Any] = {"name": clean_title}
     lead_payload.update(await _resolve_configured_lead_placement())
+    lead_custom_values = await build_website_lead_custom_values(lead_fields)
+    if lead_custom_values:
+        lead_payload["custom_fields_values"] = lead_custom_values
 
     phone = client_data.get("phone")
     email = client_data.get("email")
@@ -893,31 +1033,49 @@ async def _create_lead_with_contact(
 
     existing_contact_id = await find_existing_contact(phone, email)
     contact_id: int | None = existing_contact_id
+    # Company linking is part of deterministic website intake only. The reviewed
+    # Telegram/voice path keeps its existing behavior and approval semantics.
+    company_name = (
+        str(client_data.get("company") or "").strip()
+        if lead_fields is not None
+        else ""
+    )
+    existing_company_id = (
+        await find_existing_company(company_name) if company_name else None
+    )
+    embedded: dict[str, list[dict[str, Any]]] = {}
+
+    if existing_company_id is not None:
+        embedded["companies"] = [{"id": existing_company_id}]
+    elif company_name:
+        embedded["companies"] = [{"name": company_name[:255]}]
 
     if existing_contact_id is not None:
-        lead_payload["_embedded"] = {"contacts": [{"id": existing_contact_id}]}
+        embedded["contacts"] = [{"id": existing_contact_id}]
+        lead_payload["_embedded"] = embedded
         data = await _submit_new_lead(lead_payload, "/api/v4/leads/complex")
     elif any([client_data.get("name"), client_data.get("company"), phone, email]):
         field_ids = await get_contact_field_ids()
-        custom_values: list[dict[str, Any]] = []
+        contact_custom_values: list[dict[str, Any]] = []
         if phone and field_ids.get("PHONE"):
-            custom_values.append(
+            contact_custom_values.append(
                 {
                     "field_id": field_ids["PHONE"],
                     "values": [{"value": phone}],
                 }
             )
         if email and field_ids.get("EMAIL"):
-            custom_values.append(
+            contact_custom_values.append(
                 {
                     "field_id": field_ids["EMAIL"],
                     "values": [{"value": email}],
                 }
             )
         contact_payload: dict[str, Any] = {"name": str(contact_name)[:255]}
-        if custom_values:
-            contact_payload["custom_fields_values"] = custom_values
-        lead_payload["_embedded"] = {"contacts": [contact_payload]}
+        if contact_custom_values:
+            contact_payload["custom_fields_values"] = contact_custom_values
+        embedded["contacts"] = [contact_payload]
+        lead_payload["_embedded"] = embedded
         data = await _submit_new_lead(lead_payload, "/api/v4/leads/complex")
     else:
         data = await _submit_new_lead(lead_payload, "/api/v4/leads")
@@ -993,6 +1151,7 @@ async def create_lead_from_external_intake(
     *,
     lead_title: str,
     client_data: dict[str, Any],
+    lead_fields: dict[str, Any] | None = None,
     note_text: str,
 ) -> dict[str, Any]:
     """Create a lead from a trusted, pre-authorized deterministic intake source.
@@ -1004,6 +1163,7 @@ async def create_lead_from_external_intake(
         lead_title=lead_title,
         client_data=client_data,
         fallback_contact_name="Контакт с сайта",
+        lead_fields=lead_fields,
     )
     try:
         note_saved = await add_common_note(created["id"], note_text)

@@ -41,12 +41,11 @@ def _one_line(value: Any) -> str:
 def build_website_lead_title(payload: dict[str, Any]) -> str:
     """Create a readable temporary title until the manager assigns a B&BS number."""
     language = _one_line(payload.get("language") or "pl").upper()[:5]
-    name = _one_line(payload.get("name")) or "Клиент с сайта"
     description = _one_line(payload.get("description"))
     topic_raw = _one_line(payload.get("topic"))
     topic_label = TOPIC_LABELS.get(topic_raw, topic_raw)
     request_summary = description[:100] or topic_label or "Новый запрос"
-    return f"WWW {language} — {name} — {request_summary}"[:255]
+    return f"WWW{language} - {request_summary}"[:255]
 
 
 def format_website_form_note(payload: dict[str, Any]) -> str:
@@ -87,6 +86,8 @@ def format_website_form_note(payload: dict[str, Any]) -> str:
 
 async def sync_website_form_to_kommo(payload: dict[str, Any]) -> dict[str, Any]:
     """Create the CRM contact + lead using the existing server-side Kommo client."""
+    form_type = _one_line(payload.get("formType") or "contact")
+    topic_raw = _one_line(payload.get("topic"))
     client_data = {
         "name": _one_line(payload.get("name")),
         "company": _one_line(payload.get("company")),
@@ -94,9 +95,23 @@ async def sync_website_form_to_kommo(payload: dict[str, Any]) -> dict[str, Any]:
         "phone": _one_line(payload.get("phone")),
         "language": _one_line(payload.get("language") or "pl"),
     }
+    lead_fields = {
+        "name": client_data["name"],
+        "email": client_data["email"],
+        "phone": client_data["phone"],
+        "company": client_data["company"],
+        "topic": TOPIC_LABELS.get(topic_raw, topic_raw),
+        "description": str(payload.get("description") or "").strip(),
+        "form_type": FORM_TYPE_LABELS.get(form_type, form_type),
+        "language": client_data["language"].upper(),
+        "page_url": _one_line(payload.get("pageUrl")),
+        "submitted_at": _one_line(payload.get("submittedAt")),
+        "source": "Website B&BS",
+    }
     return await kommo_service.create_lead_from_external_intake(
         lead_title=build_website_lead_title(payload),
         client_data=client_data,
+        lead_fields=lead_fields,
         note_text=format_website_form_note(payload),
     )
 

@@ -29,6 +29,14 @@ TOPIC_LABELS: dict[str, str] = {
     "logistics": "Logistyka i transport",
 }
 
+PROJECT_DETAIL_LABELS: tuple[tuple[str, str], ...] = (
+    ("product", "Продукт"),
+    ("quantity", "Количество"),
+    ("budget", "Бюджет проекта"),
+    ("destination", "Доставка"),
+    ("deadline", "Желаемый срок"),
+)
+
 
 def _escape(value: str) -> str:
     return html.escape(value or "—", quote=False)
@@ -38,13 +46,34 @@ def _one_line(value: Any) -> str:
     return " ".join(str(value or "").split()).strip()
 
 
+def _project_detail_rows(payload: dict[str, Any]) -> list[tuple[str, str]]:
+    rows: list[tuple[str, str]] = []
+    for key, label in PROJECT_DETAIL_LABELS:
+        value = _one_line(payload.get(key))
+        if value:
+            rows.append((label, value))
+    return rows
+
+
+def _kommo_description(payload: dict[str, Any]) -> str:
+    description = str(payload.get("description") or "").strip()
+    details = _project_detail_rows(payload)
+    if not details:
+        return description
+    rows = [f"{label}: {value}" for label, value in details]
+    if description:
+        rows.extend(["", f"Описание: {description}"])
+    return "\n".join(rows)
+
+
 def build_website_lead_title(payload: dict[str, Any]) -> str:
     """Create a readable temporary title until the manager assigns a B&BS number."""
     language = _one_line(payload.get("language") or "pl").upper()[:5]
+    product = _one_line(payload.get("product"))
     description = _one_line(payload.get("description"))
     topic_raw = _one_line(payload.get("topic"))
     topic_label = TOPIC_LABELS.get(topic_raw, topic_raw)
-    request_summary = description[:100] or topic_label or "Новый запрос"
+    request_summary = product[:100] or description[:100] or topic_label or "Новый запрос"
     return f"WWW{language} - {request_summary}"[:255]
 
 
@@ -68,8 +97,16 @@ def format_website_form_note(payload: dict[str, Any]) -> str:
     company = _one_line(payload.get("company"))
     if company:
         rows.append(f"Компания: {company}")
+
+    project_details = _project_detail_rows(payload)
+    if project_details:
+        rows.append("")
+        rows.append("Параметры проекта:")
+        rows.extend(f"{label}: {value}" for label, value in project_details)
+
     rows.extend(
         [
+            "",
             f"Тема / услуга: {topic_label}",
             "",
             "Описание:",
@@ -101,7 +138,7 @@ async def sync_website_form_to_kommo(payload: dict[str, Any]) -> dict[str, Any]:
         "phone": client_data["phone"],
         "company": client_data["company"],
         "topic": TOPIC_LABELS.get(topic_raw, topic_raw),
-        "description": str(payload.get("description") or "").strip(),
+        "description": _kommo_description(payload),
         "form_type": FORM_TYPE_LABELS.get(form_type, form_type),
         "language": client_data["language"].upper(),
         "page_url": _one_line(payload.get("pageUrl")),
@@ -149,8 +186,15 @@ def format_website_form_message(
     if company:
         lines.append(f"<b>Компания:</b> {_escape(company)}")
 
+    project_details = _project_detail_rows(payload)
+    if project_details:
+        lines.extend(["", "<b>Параметры проекта:</b>"])
+        for label, value in project_details:
+            lines.append(f"<b>{_escape(label)}:</b> {_escape(value)}")
+
     lines.extend(
         [
+            "",
             f"<b>Тема / услуга:</b> {_escape(topic_label)}",
             "",
             "<b>Описание:</b>",
@@ -206,6 +250,7 @@ async def notify_website_form(
     *,
     kommo_result: dict[str, Any] | None = None,
     kommo_failed: bool = False,
+    attachments: list[dict[str, Any]] | None = None,
 ) -> None:
     chat_id = resolve_notification_chat_id()
     message = format_website_form_message(
@@ -225,8 +270,33 @@ async def notify_website_form(
         reply_markup=reply_markup,
     )
 
+    for attachment in attachments or []:
+        filename = str(attachment.get("filename") or "attachment")[:180]
+        content = attachment.get("content")
+        if not isinstance(content, bytes):
+            continue
+        try:
+            await telegram_service.send_document(
+                chat_id,
+                filename=filename,
+                content=content,
+                caption=f"📎 Файл из заявки: {_escape(filename)}",
+                mime_type=str(attachment.get("content_type") or "application/octet-stream"),
+            )
+        except Exception as exc:
+            logger.error(
+                "website_form.attachment_delivery_failed filename=%s error_type=%s",
+                filename,
+                type(exc).__name__,
+                exc_info=True,
+            )
 
-async def deliver_website_form(payload: dict[str, Any]) -> dict[str, Any]:
+
+async def deliver_website_form(
+    payload: dict[str, Any],
+    *,
+    attachments: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     """Fan out one lead to Kommo and Telegram without making either a single point of failure."""
     kommo_result: dict[str, Any] | None = None
     kommo_failed = False
@@ -246,6 +316,7 @@ async def deliver_website_form(payload: dict[str, Any]) -> dict[str, Any]:
             payload,
             kommo_result=kommo_result,
             kommo_failed=kommo_failed,
+            attachments=attachments,
         )
         telegram_sent = True
     except Exception as exc:

@@ -164,3 +164,12 @@ def install_production_hardening_runtime() -> None:
         )
 
     agent_service.handle_project_file_upload = handle_project_file_upload_final
+
+    # The journal v2 wraps the final message/callback chain.  It is deliberately
+    # independent from Kommo/client workflows and keeps personal reflections in a
+    # separate database entry type.
+    from app.services.reflection_journal_v2_runtime import (
+        install_reflection_journal_v2_runtime,
+    )
+
+    install_reflection_journal_v2_runtime()

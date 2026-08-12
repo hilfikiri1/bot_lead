@@ -35,7 +35,7 @@ class KaizenJournalEntry(Base):
             name="uq_kaizen_journal_user_type_period",
         ),
         CheckConstraint(
-            "entry_type IN ('daily', 'weekly')",
+            "entry_type IN ('daily', 'daily_personal', 'weekly')",
             name="ck_kaizen_journal_entry_type",
         ),
         CheckConstraint(

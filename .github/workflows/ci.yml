@@ -40,7 +40,7 @@ jobs:
             echo "Expected exactly one Alembic head, found $count"
             exit 1
           fi
-          printf '%s\n' "$heads" | grep -q "016_lead_processing_jobs"
+          printf '%s\n' "$heads" | grep -q "017_reflection_journal_v2"
 
       - name: Run tests
         run: pytest -q

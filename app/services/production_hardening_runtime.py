@@ -165,7 +165,7 @@ def install_production_hardening_runtime() -> None:
 
     agent_service.handle_project_file_upload = handle_project_file_upload_final
 
-    # The journal v2 wraps the final message/callback chain.  It is deliberately
+    # The journal v2 wraps the final message/callback chain. It is deliberately
     # independent from Kommo/client workflows and keeps personal reflections in a
     # separate database entry type.
     from app.services.reflection_journal_v2_runtime import (
@@ -173,3 +173,41 @@ def install_production_hardening_runtime() -> None:
     )
 
     install_reflection_journal_v2_runtime()
+
+    # Slash commands must always bypass journal capture. Besides being safer for
+    # the operator, this preserves compatibility with isolated command tests that
+    # intentionally use a lightweight mocked DB instead of a real AgentSession.
+    reflection_message = agent_service.handle_message
+    pre_reflection_message = _closure_value(reflection_message, "original_message")
+
+    async def handle_message_with_command_bypass(
+        db: Any,
+        *,
+        chat_id: int,
+        telegram_user_id: int,
+        text: str,
+        source: str = "text",
+        allow_conversation_passthrough: bool = False,
+        active_kommo_lead_id: int | None = None,
+    ):
+        if str(text or "").strip().startswith("/") and callable(pre_reflection_message):
+            return await pre_reflection_message(
+                db,
+                chat_id=chat_id,
+                telegram_user_id=telegram_user_id,
+                text=text,
+                source=source,
+                allow_conversation_passthrough=allow_conversation_passthrough,
+                active_kommo_lead_id=active_kommo_lead_id,
+            )
+        return await reflection_message(
+            db,
+            chat_id=chat_id,
+            telegram_user_id=telegram_user_id,
+            text=text,
+            source=source,
+            allow_conversation_passthrough=allow_conversation_passthrough,
+            active_kommo_lead_id=active_kommo_lead_id,
+        )
+
+    agent_service.handle_message = handle_message_with_command_bypass

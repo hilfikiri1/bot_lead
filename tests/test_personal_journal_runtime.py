@@ -86,6 +86,7 @@ async def test_save_uses_only_daily_personal_entry(monkeypatch):
     monkeypatch.setattr(personal_journal_runtime.kaizen_journal_service, "clear_pending_reflection", clear)
     monkeypatch.setattr(personal_journal_runtime.kaizen_journal_service, "local_now", lambda: datetime(2026, 8, 13, 20, 14, tzinfo=ZoneInfo("Europe/Warsaw")))
     monkeypatch.setattr(personal_journal_runtime, "_append_to_notion", AsyncMock(return_value=("ok", "https://notion.test/personal")))
+    monkeypatch.setattr(personal_journal_runtime, "flag_modified", lambda *args, **kwargs: None)
 
     _, saved = await personal_journal_runtime.save_personal_transcript(
         db, telegram_user_id=10, session=session, text="Моя личная запись.", source="voice"

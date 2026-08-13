@@ -234,6 +234,21 @@ def install_personal_journal_runtime() -> None:
         active_kommo_lead_id: int | None = None,
     ) -> AgentReply:
         raw = str(text or "").strip()
+        # Explicit slash commands never need journal state and must preserve the
+        # lightweight command/test path used by the rest of the agent.
+        if raw.startswith("/"):
+            reply = await original_message(
+                db,
+                chat_id=chat_id,
+                telegram_user_id=telegram_user_id,
+                text=text,
+                source=source,
+                allow_conversation_passthrough=allow_conversation_passthrough,
+                active_kommo_lead_id=active_kommo_lead_id,
+            )
+            reply.reply_markup = _rename_personal_buttons(reply.reply_markup)
+            return reply
+
         session = await memory.get_or_create_session(
             db, telegram_user_id=int(telegram_user_id)
         )
@@ -242,7 +257,7 @@ def install_personal_journal_runtime() -> None:
 
         # Inside personal journal, natural language can never become a weekly-review
         # command. Only an explicit slash command is allowed to escape the diary.
-        if scope == PERSONAL and raw and not raw.startswith("/"):
+        if scope == PERSONAL and raw:
             try:
                 entry, saved = await save_personal_transcript(
                     db,

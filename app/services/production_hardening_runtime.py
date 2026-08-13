@@ -211,3 +211,18 @@ def install_production_hardening_runtime() -> None:
         )
 
     agent_service.handle_message = handle_message_with_command_bypass
+
+    # Follow-ups use Monday-Friday client working days. Install after the legacy
+    # follow-up callbacks so their calls resolve to the weekend-aware functions.
+    from app.services.business_day_followup_runtime import (
+        install_business_day_followup_runtime,
+    )
+
+    install_business_day_followup_runtime()
+
+    # Mobile /bug usage is naturally two-step: screenshot first, explanation next.
+    # Install outermost so the description reaches the pending screenshot issue
+    # before the evening-journal wrapper can interpret the same text.
+    from app.services.bug_photo_intake_runtime import install_bug_photo_intake_runtime
+
+    install_bug_photo_intake_runtime()

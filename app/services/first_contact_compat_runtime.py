@@ -75,3 +75,12 @@ def install_first_contact_compat_runtime() -> None:
             return markup
 
         client_message_service.message_draft_markup = message_draft_markup_compat
+
+    # main.py installs this compatibility runtime last. Keep the explicit personal
+    # journal destination outermost as well, so an older pending /bug description
+    # cannot consume the owner's next diary voice note.
+    from app.services.personal_journal_priority_runtime import (
+        install_personal_journal_priority_runtime,
+    )
+
+    install_personal_journal_priority_runtime()

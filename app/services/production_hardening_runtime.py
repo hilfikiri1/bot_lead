@@ -220,6 +220,13 @@ def install_production_hardening_runtime() -> None:
 
     install_business_day_followup_runtime()
 
+    # Personal diary is transcript-only. Install outside the generic reflection
+    # router so natural phrases such as "итоги недели" remain diary text while
+    # personal mode is active. The /bug wrapper stays outermost below it.
+    from app.services.personal_journal_runtime import install_personal_journal_runtime
+
+    install_personal_journal_runtime()
+
     # Mobile /bug usage is naturally two-step: screenshot first, explanation next.
     # Install outermost so the description reaches the pending screenshot issue
     # before the evening-journal wrapper can interpret the same text.

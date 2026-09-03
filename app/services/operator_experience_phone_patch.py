@@ -8,6 +8,7 @@ from app.services import operator_experience_runtime
 from app.services.contact_bundle_runtime import install_contact_bundle_runtime
 from app.services.critical_workflow_runtime import install_critical_workflow_runtime
 from app.services.status_sync_all_runtime import install_status_sync_all_runtime
+from app.services.status_sync_create_runtime import install_status_sync_create_runtime
 
 _INSTALLED = False
 
@@ -65,3 +66,4 @@ def install_operator_experience_phone_patch() -> None:
     install_critical_workflow_runtime()
     install_contact_bundle_runtime()
     install_status_sync_all_runtime()
+    install_status_sync_create_runtime()

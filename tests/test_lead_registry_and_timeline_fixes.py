@@ -37,7 +37,7 @@ def _row(
 
 
 @pytest.mark.asyncio
-async def test_row_number_policy_fills_y_even_without_kommo_match(monkeypatch):
+async def test_row_number_policy_prepares_creation_when_kommo_match_is_missing(monkeypatch):
     rows = [
         _row(
             165,
@@ -75,10 +75,9 @@ async def test_row_number_policy_fills_y_even_without_kommo_match(monkeypatch):
         for item in result["sheet_updates"]
     ] == [(166, "166"), (165, "165")]
     assert result["onboarding_actions"] == []
-    assert [item["row_number"] for item in result["unmatched_table_rows"]] == [
-        166,
-        165,
-    ]
+    assert result["create_count"] == 2
+    assert [item["row_number"] for item in result["create_actions"]] == [166, 165]
+    assert result["unmatched_table_rows"] == []
 
 
 @pytest.mark.asyncio

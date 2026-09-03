@@ -84,7 +84,7 @@ def test_analysis_note_includes_talk_sections():
     assert "Уточнить категорию" in note
 
 
-def test_newest_new_rows_limits_to_latest_empty_y():
+def test_newest_new_rows_returns_all_empty_y_newest_first():
     rows = [
         _row(row_number=160, product="old A"),
         _row(row_number=161, product="old B"),
@@ -95,11 +95,12 @@ def test_newest_new_rows_limits_to_latest_empty_y():
         lead_status_sync_service.settings, "lead_status_sync_max_new_rows", 2
     ):
         newest = lead_status_sync_service._newest_new_rows(rows)
-    assert [row.row_number for row in newest] == [168, 161]
+    # Runtime owner workflow intentionally ignores the historical batch cap.
+    assert [row.row_number for row in newest] == [168, 161, 160]
 
 
 @pytest.mark.asyncio
-async def test_report_prefers_newest_row_and_uses_briefing():
+async def test_report_processes_all_pending_rows_newest_first_and_uses_briefing():
     rows = [
         _row(row_number=160, product="stary produkt", phone="500111222"),
         _row(row_number=168, product="Artykuły elektryczne", phone="606999210"),
@@ -170,8 +171,8 @@ async def test_report_prefers_newest_row_and_uses_briefing():
         report = await lead_status_sync_service.build_status_sync_report()
 
     assert report["newest_first"] is True
-    assert report["new_rows_count"] == 1
-    assert report["onboarding_actions"][0]["row_number"] == 168
+    assert report["new_rows_count"] == 2
+    assert [item["row_number"] for item in report["onboarding_actions"]] == [168, 160]
     note = report["onboarding_actions"][0]["analysis_note"]
     assert "О ЧЁМ ЗАЯВКА" in note
     assert "Свежий лид по электротоварам" in note

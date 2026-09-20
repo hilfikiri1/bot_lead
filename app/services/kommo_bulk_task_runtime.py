@@ -122,6 +122,7 @@ def install_kommo_bulk_task_runtime() -> None:
 
         combined_results = dict(payload.get("item_results") or {})
         lines: list[str] = []
+        other_result_lines: list[str] = []
         failed = 0
 
         if other_items:
@@ -129,6 +130,16 @@ def install_kommo_bulk_task_runtime() -> None:
             shadow.payload = {**payload, "items": other_items, "item_results": combined_results}
             result = await original_execute(shadow)
             combined_results.update((result.get("data") or {}).get("item_results") or {})
+            raw_lines = str(result.get("text") or "").splitlines()
+            for raw_line in raw_lines:
+                stripped = raw_line.strip()
+                if not stripped:
+                    continue
+                if "Результат Kommo Bulk JSON" in stripped:
+                    continue
+                if stripped.startswith("Успешно:"):
+                    continue
+                other_result_lines.append(raw_line)
             if result.get("partial_failed"):
                 failed += 1
 
@@ -155,8 +166,7 @@ def install_kommo_bulk_task_runtime() -> None:
                     "status": "ok",
                     "operations": operations,
                 }
-                label = item.get("internal_lead_number")
-                ref = f"№{label}" if label else f"Kommo ID {lead_id}"
+                ref = bulk._item_label(item)
                 lines.append(
                     f"✅ {html.escape(ref)} — задача создана до "
                     f"{html.escape(str(task.get('due_at') or ''))}"
@@ -168,8 +178,7 @@ def install_kommo_bulk_task_runtime() -> None:
                     "status": "failed",
                     "operations": operations,
                 }
-                label = item.get("internal_lead_number")
-                ref = f"№{label}" if label else f"Kommo ID {lead_id}"
+                ref = bulk._item_label(item)
                 lines.append(
                     f"❌ {html.escape(ref)} — {html.escape(str(exc)[:200])}"
                 )
@@ -188,9 +197,10 @@ def install_kommo_bulk_task_runtime() -> None:
             if isinstance(item, dict) and item.get("status") == "skipped"
         )
         result_lines = ["<b>Результат Kommo Bulk JSON</b>", ""]
-        result_lines.extend(lines[:40])
-        if len(lines) > 40:
-            result_lines.append(f"…и ещё {len(lines) - 40}")
+        visible_lines = other_result_lines + lines
+        result_lines.extend(visible_lines[:40])
+        if len(visible_lines) > 40:
+            result_lines.append(f"…и ещё {len(visible_lines) - 40}")
         result_lines.extend(
             [
                 "",

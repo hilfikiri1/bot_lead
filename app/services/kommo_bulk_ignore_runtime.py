@@ -145,7 +145,7 @@ def install_kommo_bulk_ignore_runtime() -> None:
         )
         text = text.replace(
             "delete — пропустить",
-            "delete → Игнор",
+            "delete",
         )
         old_warning = (
             "🗑 <b>Важно:</b> команды delete только отображаются в отчёте и "
@@ -194,8 +194,7 @@ def install_kommo_bulk_ignore_runtime() -> None:
         for item in source_items:
             if item.get("action") != "delete":
                 continue
-            internal = item.get("internal_lead_number")
-            label = f"№{internal}" if internal else f"Kommo ID {item.get('lead_id')}"
+            label = bulk._item_label(item)
             target = str(item.get("target_status_name") or "Игнор")
             text = text.replace(
                 f"{html.escape(label)} — update",

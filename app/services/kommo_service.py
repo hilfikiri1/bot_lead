@@ -570,6 +570,83 @@ async def update_kommo_lead(
     }
 
 
+async def update_kommo_leads_bulk(
+    updates: list[dict[str, Any]],
+    *,
+    chunk_size: int = 50,
+) -> list[dict[str, Any]]:
+    """Update reviewed lead payloads in Kommo in bounded batches.
+
+    This low-level helper intentionally does not resolve stage names or lead
+    references. Callers must validate those before execution.
+    """
+    if not updates:
+        return []
+    chunk_size = max(1, min(int(chunk_size), 50))
+    allowed = {"id", "name", "price", "status_id", "pipeline_id"}
+    normalized: list[dict[str, Any]] = []
+    for item in updates:
+        if not isinstance(item, dict):
+            raise ValueError("Bulk lead update item must be an object.")
+        unknown = set(item) - allowed
+        if unknown:
+            raise ValueError(
+                "Unsupported bulk lead fields: " + ", ".join(sorted(unknown))
+            )
+        lead_id = item.get("id")
+        if not isinstance(lead_id, int) or lead_id <= 0:
+            raise ValueError("Each bulk lead update requires a positive integer id.")
+        if len(item) <= 1:
+            raise ValueError(f"Lead {lead_id} has no fields to update.")
+        normalized.append(dict(item))
+
+    updated: list[dict[str, Any]] = []
+    for start in range(0, len(normalized), chunk_size):
+        batch = normalized[start : start + chunk_size]
+        data = await _request("PATCH", "/api/v4/leads", json_body=batch)
+        items = _extract_embedded_items(data, "leads")
+        if items:
+            updated.extend(items)
+        else:
+            updated.extend({"id": item["id"]} for item in batch)
+    return updated
+
+
+async def add_common_notes_bulk(
+    notes: list[dict[str, Any]],
+    *,
+    chunk_size: int = 50,
+) -> int:
+    """Add common Kommo notes in bounded batches."""
+    if not notes:
+        return 0
+    chunk_size = max(1, min(int(chunk_size), 50))
+    normalized: list[dict[str, Any]] = []
+    for item in notes:
+        if not isinstance(item, dict):
+            raise ValueError("Bulk note item must be an object.")
+        lead_id = item.get("lead_id")
+        text = str(item.get("text") or "").strip()
+        if not isinstance(lead_id, int) or lead_id <= 0:
+            raise ValueError("Each bulk note requires a positive integer lead_id.")
+        if not text:
+            raise ValueError(f"Lead {lead_id} note text is empty.")
+        normalized.append(
+            {
+                "entity_id": lead_id,
+                "note_type": "common",
+                "params": {"text": text[:15000]},
+            }
+        )
+
+    created = 0
+    for start in range(0, len(normalized), chunk_size):
+        batch = normalized[start : start + chunk_size]
+        await _request("POST", "/api/v4/leads/notes", json_body=batch)
+        created += len(batch)
+    return created
+
+
 async def get_all_open_leads(
     max_pages: int | None = None,
     *,

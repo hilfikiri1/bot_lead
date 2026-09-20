@@ -95,6 +95,7 @@ async def test_build_preview_resolves_stage_and_blocks_delete(monkeypatch):
             return_value=[
                 {"id": 70, "name": "Первый контакт"},
                 {"id": 72, "name": "Ожидание решения"},
+                {"id": 99, "name": "Игнор"},
             ]
         ),
     )
@@ -124,8 +125,9 @@ async def test_build_preview_resolves_stage_and_blocks_delete(monkeypatch):
     assert first["executable"] is True
     assert first["update_payload"]["status_id"] == 72
     assert first["target_status_name"] == "Ожидание решения"
-    assert second["executable"] is False
-    assert "не будет выполнено" in second["warnings"][0]
+    assert second["executable"] is True
+    assert second["update_payload"]["status_id"] == 99
+    assert second["target_status_name"] == "Игнор"
 
 
 @pytest.mark.asyncio

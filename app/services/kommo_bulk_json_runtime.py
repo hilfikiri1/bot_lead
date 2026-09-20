@@ -328,6 +328,15 @@ def _ref_label(ref: dict[str, Any]) -> str:
     return f"Kommo ID {ref.get('kommo_id')}"
 
 
+def _item_label(item: dict[str, Any]) -> str:
+    lead_id = int(item.get("lead_id") or 0)
+    internal = item.get("internal_lead_number")
+    lead_name = _clean(item.get("lead_name")) or str(lead_id)
+    if internal:
+        return f"№{internal} · {lead_name} · Kommo ID {lead_id}"
+    return f"Kommo ID {lead_id} · {lead_name}"
+
+
 async def build_bulk_preview(payload: dict[str, Any]) -> dict[str, Any]:
     actor = identity_service.current_user()
     if actor is not None and actor.role not in {"owner", "admin"}:
@@ -577,12 +586,7 @@ def format_bulk_preview(report: dict[str, Any]) -> str:
         "delete": "delete — пропустить",
     }
     for item in items[:15]:
-        internal = item.get("internal_lead_number")
-        label = (
-            f"№{internal}"
-            if internal
-            else f"Kommo ID {item.get('lead_id')}"
-        )
+        label = _item_label(item)
         detail = labels.get(str(item.get("action")), str(item.get("action")))
         if item.get("target_status_name"):
             detail += f" → {item['target_status_name']}"
@@ -828,8 +832,7 @@ async def _execute_bulk_json(action: Any) -> dict[str, Any]:
             result["operations"] = operations
             item_results[key] = result
 
-        internal = item.get("internal_lead_number")
-        label = f"№{internal}" if internal else f"Kommo ID {lead_id}"
+        label = _item_label(item)
         final_status = item_results.get(key, {}).get("status")
         icon = "✅" if final_status == "ok" else ("⏭" if final_status == "skipped" else "❌")
         lines.append(

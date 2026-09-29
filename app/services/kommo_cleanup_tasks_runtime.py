@@ -14,7 +14,7 @@ import asyncio
 import html
 import re
 import time
-from typing import Any
+from typing import Any, Awaitable, Callable, TypeVar
 
 from app.agent import actions, executor, planner, service as agent_service
 from app.agent.contracts import AgentPlan, AgentReply
@@ -26,6 +26,17 @@ _COMMAND_RE = re.compile(r"(?i)^\s*/cleanup_tasks(?:@[A-Za-z0-9_]+)?\s*$")
 _ACTION_TYPE = "cleanup_kommo_overdue_tasks"
 _MAX_CONCURRENCY = 6
 
+# Kommo applies a fairly strict request-rate limit. A cleanup may inspect more
+# than a hundred leads, so concurrency alone is not enough: requests need to be
+# paced globally and HTTP 429 responses retried with backoff.
+_REQUEST_SPACING_SECONDS = 0.35
+_RATE_LIMIT_RETRIES = 5
+_RATE_LIMIT_BASE_DELAY_SECONDS = 1.0
+_RATE_LIMIT_MAX_DELAY_SECONDS = 12.0
+_RATE_LOCK = asyncio.Lock()
+_NEXT_REQUEST_AT = 0.0
+_T = TypeVar("_T")
+
 
 def _matches_command(text: str) -> bool:
     return bool(_COMMAND_RE.match(text or ""))
@@ -35,6 +46,54 @@ def _lead_label(item: dict[str, Any]) -> str:
     lead_id = int(item.get("lead_id") or 0)
     lead_name = " ".join(str(item.get("lead_name") or "").split()).strip()
     return f"Kommo ID {lead_id} · {lead_name or lead_id}"
+
+
+async def _wait_for_request_slot() -> None:
+    """Pace cleanup-specific Kommo requests across all concurrent inspectors."""
+    global _NEXT_REQUEST_AT
+
+    async with _RATE_LOCK:
+        loop = asyncio.get_running_loop()
+        now = loop.time()
+        delay = max(0.0, _NEXT_REQUEST_AT - now)
+        if delay:
+            await asyncio.sleep(delay)
+        _NEXT_REQUEST_AT = loop.time() + max(0.0, float(_REQUEST_SPACING_SECONDS))
+
+
+async def _call_kommo_with_rate_limit_retry(
+    operation: Callable[[], Awaitable[_T]],
+) -> _T:
+    """Run one Kommo operation with pacing and retry only for HTTP 429."""
+    for attempt in range(_RATE_LIMIT_RETRIES + 1):
+        await _wait_for_request_slot()
+        try:
+            return await operation()
+        except kommo_service.KommoAPIError as exc:
+            if exc.status_code != 429 or attempt >= _RATE_LIMIT_RETRIES:
+                raise
+            delay = min(
+                _RATE_LIMIT_MAX_DELAY_SECONDS,
+                _RATE_LIMIT_BASE_DELAY_SECONDS * (2**attempt),
+            )
+            await asyncio.sleep(max(0.0, float(delay)))
+    raise RuntimeError("Kommo retry loop exhausted unexpectedly.")
+
+
+async def _get_open_lead_tasks_safely(
+    lead_id: int,
+    *,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    return await _call_kommo_with_rate_limit_retry(
+        lambda: kommo_service.get_open_lead_tasks(int(lead_id), limit=limit)
+    )
+
+
+async def _complete_tasks_safely(task_ids: list[int]) -> int:
+    return await _call_kommo_with_rate_limit_retry(
+        lambda: overdue_runtime._complete_tasks(task_ids)
+    )
 
 
 async def build_cleanup_preview() -> dict[str, Any]:
@@ -54,7 +113,7 @@ async def build_cleanup_preview() -> dict[str, Any]:
     async def inspect(lead: dict[str, Any]) -> dict[str, Any] | None:
         lead_id = int(lead["id"])
         async with semaphore:
-            tasks = await kommo_service.get_open_lead_tasks(lead_id, limit=50)
+            tasks = await _get_open_lead_tasks_safely(lead_id, limit=50)
         overdue = overdue_runtime._overdue_tasks(tasks, now_ts=now_ts)
         if not overdue:
             return None
@@ -81,13 +140,20 @@ async def build_cleanup_preview() -> dict[str, Any]:
         elif result is not None:
             items.append(result)
 
-    items.sort(key=lambda item: (str(item.get("lead_name") or "").casefold(), int(item["lead_id"])))
+    items.sort(
+        key=lambda item: (
+            str(item.get("lead_name") or "").casefold(),
+            int(item["lead_id"]),
+        )
+    )
     return {
         "scanned_at": now_ts,
         "scanned_leads": len(leads),
         "items": items,
         "leads_with_overdue": len(items),
-        "overdue_task_count": sum(int(item["overdue_task_count"]) for item in items),
+        "overdue_task_count": sum(
+            int(item["overdue_task_count"]) for item in items
+        ),
         "scan_errors": scan_errors,
     }
 
@@ -207,8 +273,10 @@ async def _execute_cleanup(action: Any) -> dict[str, Any]:
             if isinstance(task_id, int) and int(task_id) > 0
         }
         try:
-            current_tasks = await kommo_service.get_open_lead_tasks(lead_id, limit=50)
-            current_overdue = overdue_runtime._overdue_tasks(current_tasks, now_ts=now_ts)
+            current_tasks = await _get_open_lead_tasks_safely(lead_id, limit=50)
+            current_overdue = overdue_runtime._overdue_tasks(
+                current_tasks, now_ts=now_ts
+            )
             current_overdue_ids = {
                 int(task["id"])
                 for task in current_overdue
@@ -218,7 +286,7 @@ async def _execute_cleanup(action: Any) -> dict[str, Any]:
             skipped = len(snapshot_ids - current_overdue_ids)
             completed = 0
             if valid_ids:
-                completed = await overdue_runtime._complete_tasks(valid_ids)
+                completed = await _complete_tasks_safely(valid_ids)
                 completed_total += completed
                 completed_leads += 1
             skipped_total += skipped
@@ -231,7 +299,11 @@ async def _execute_cleanup(action: Any) -> dict[str, Any]:
             if completed or skipped:
                 result_lines.append(
                     f"✅ {html.escape(label)} — закрыто: <b>{completed}</b>"
-                    + (f" · пропущено после перепроверки: <b>{skipped}</b>" if skipped else "")
+                    + (
+                        f" · пропущено после перепроверки: <b>{skipped}</b>"
+                        if skipped
+                        else ""
+                    )
                 )
         except Exception as exc:
             failed_total += 1
@@ -240,14 +312,20 @@ async def _execute_cleanup(action: Any) -> dict[str, Any]:
                 "error": str(exc)[:500],
                 "task_ids": sorted(snapshot_ids),
             }
-            result_lines.append(f"❌ {html.escape(label)} — {html.escape(str(exc)[:220])}")
+            result_lines.append(
+                f"❌ {html.escape(label)} — {html.escape(str(exc)[:220])}"
+            )
 
     payload["item_results"] = item_results
     action.payload = payload
 
     visible = result_lines[:25]
     lines = [
-        "<b>✅ Очистка задач завершена</b>" if not failed_total else "<b>⚠️ Очистка задач завершена частично</b>",
+        (
+            "<b>✅ Очистка задач завершена</b>"
+            if not failed_total
+            else "<b>⚠️ Очистка задач завершена частично</b>"
+        ),
         "",
         f"Закрыто задач: <b>{completed_total}</b>",
         f"Обработано сделок: <b>{completed_leads}</b>",
@@ -268,7 +346,9 @@ async def _execute_cleanup(action: Any) -> dict[str, Any]:
             "completed_leads": completed_leads,
         },
         "partial_failed": failed_total > 0,
-        "error_message": "Часть просроченных задач не закрыта." if failed_total else None,
+        "error_message": (
+            "Часть просроченных задач не закрыта." if failed_total else None
+        ),
     }
 
 

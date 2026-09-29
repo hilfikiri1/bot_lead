@@ -59,6 +59,9 @@ from app.services.kommo_bulk_ignore_runtime import (
 from app.services.kommo_bulk_overdue_task_runtime import (
     install_kommo_bulk_overdue_task_runtime,
 )
+from app.services.kommo_cleanup_tasks_command_runtime import (
+    install_kommo_cleanup_tasks_command_runtime,
+)
 from app.services.lead_registry_runtime import install_lead_registry_runtime
 from app.services.operator_experience_phone_patch import (
     install_operator_experience_phone_patch,
@@ -90,6 +93,7 @@ install_kommo_bulk_json_runtime()
 install_kommo_bulk_task_runtime()
 install_kommo_bulk_ignore_runtime()
 install_kommo_bulk_overdue_task_runtime()
+install_kommo_cleanup_tasks_command_runtime()
 # Install last so diagnostics, kaizen and goals/QA wrap final production behavior.
 install_diagnostic_runtime()
 install_kaizen_diagnostics_runtime()

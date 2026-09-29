@@ -39,6 +39,7 @@ COMMANDS = [
     {"command": "jobs", "description": "Статус обработки аудио"},
     {"command": "status_sync", "description": "Обработать новые лиды Sheets"},
     {"command": "bulk_json", "description": "Массовые изменения Kommo из JSON"},
+    {"command": "cleanup_tasks", "description": "Закрыть просроченные задачи Kommo"},
     {"command": "new_leads", "description": "Обработать новые лиды Facebook"},
     {"command": "comment_sync", "description": "Сверить комментарии X с Kommo"},
     {"command": "drive_status", "description": "Диагностика Google Drive"},

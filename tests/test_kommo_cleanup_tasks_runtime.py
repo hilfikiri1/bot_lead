@@ -8,6 +8,15 @@ import pytest
 from app.services import kommo_cleanup_tasks_runtime as cleanup
 
 
+@pytest.fixture(autouse=True)
+def _fast_cleanup_rate_limit(monkeypatch) -> None:
+    """Keep unit tests instant while preserving production pacing defaults."""
+    monkeypatch.setattr(cleanup, "_REQUEST_SPACING_SECONDS", 0.0)
+    monkeypatch.setattr(cleanup, "_RATE_LIMIT_BASE_DELAY_SECONDS", 0.0)
+    monkeypatch.setattr(cleanup, "_RATE_LIMIT_MAX_DELAY_SECONDS", 0.0)
+    monkeypatch.setattr(cleanup, "_NEXT_REQUEST_AT", 0.0)
+
+
 def test_cleanup_command_matches_exact_slash_command() -> None:
     assert cleanup._matches_command("/cleanup_tasks")
     assert cleanup._matches_command(" /cleanup_tasks@bbs_bot ")
@@ -53,6 +62,33 @@ async def test_preview_collects_only_overdue_incomplete_tasks(monkeypatch) -> No
 
 
 @pytest.mark.asyncio
+async def test_preview_retries_kommo_429_instead_of_marking_scan_failed(monkeypatch) -> None:
+    monkeypatch.setattr(
+        cleanup.kommo_service,
+        "get_all_open_leads",
+        AsyncMock(return_value={"leads": [{"id": 101, "name": "Laser"}]}),
+    )
+    calls = 0
+
+    async def fake_tasks(lead_id: int, limit: int = 50):
+        nonlocal calls
+        calls += 1
+        if calls < 3:
+            raise cleanup.kommo_service.KommoAPIError("rate limited", status_code=429)
+        return [{"id": 1, "is_completed": False, "complete_till": 100}]
+
+    monkeypatch.setattr(cleanup.kommo_service, "get_open_lead_tasks", fake_tasks)
+    monkeypatch.setattr(cleanup.time, "time", lambda: 1_000)
+
+    report = await cleanup.build_cleanup_preview()
+
+    assert calls == 3
+    assert report["scan_errors"] == []
+    assert report["overdue_task_count"] == 1
+    assert report["items"][0]["overdue_task_ids"] == [1]
+
+
+@pytest.mark.asyncio
 async def test_execute_rechecks_snapshot_and_does_not_close_new_or_moved_tasks(monkeypatch) -> None:
     action = SimpleNamespace(
         payload={
@@ -91,6 +127,44 @@ async def test_execute_rechecks_snapshot_and_does_not_close_new_or_moved_tasks(m
     assert result["data"]["skipped_tasks"] == 1
     assert result["partial_failed"] is False
     assert action.payload["item_results"]["101"]["task_ids"] == [1]
+
+
+@pytest.mark.asyncio
+async def test_execute_retries_429_when_completing_tasks(monkeypatch) -> None:
+    action = SimpleNamespace(
+        payload={
+            "items": [
+                {
+                    "lead_id": 101,
+                    "lead_name": "Laser",
+                    "overdue_task_ids": [1],
+                    "overdue_task_count": 1,
+                }
+            ]
+        }
+    )
+    monkeypatch.setattr(cleanup.time, "time", lambda: 1_000)
+    monkeypatch.setattr(
+        cleanup.kommo_service,
+        "get_open_lead_tasks",
+        AsyncMock(return_value=[{"id": 1, "is_completed": False, "complete_till": 100}]),
+    )
+    calls = 0
+
+    async def fake_complete(task_ids: list[int]) -> int:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise cleanup.kommo_service.KommoAPIError("rate limited", status_code=429)
+        return len(task_ids)
+
+    monkeypatch.setattr(cleanup.overdue_runtime, "_complete_tasks", fake_complete)
+
+    result = await cleanup._execute_cleanup(action)
+
+    assert calls == 2
+    assert result["data"]["completed_tasks"] == 1
+    assert result["partial_failed"] is False
 
 
 def test_preview_without_overdue_tasks_has_no_confirmation_language() -> None:
